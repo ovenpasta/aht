@@ -1,0 +1,21 @@
+name = "aht"
+description = "Ada HTTP/WebSocket client with TLS via mbedTLS"
+version = "0.1.0-dev"
+
+authors = ["Aldo Nicolas Bruno"]
+maintainers = ["ovenpasta@pizzahack.eu"]
+maintainers-logins = ["ovenpasta"]
+licenses = "Apache-2.0"
+tags = ["http", "websocket", "tls", "mbedtls", "client"]
+
+project-files = ["aht.gpr"]
+
+[build-switches]
+"*".ada_version = "Ada2022"
+"*".contracts = "Yes"
+"*".runtime_checks = "Everything"
+"*".style_checks = "No"
+
+[[actions]]
+type = "pre-build"
+command = ["sh", "scripts/fetch_mbedtls.sh"]

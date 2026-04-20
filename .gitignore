@@ -1,0 +1,32 @@
+# Alire workspace (generated)
+alire/
+config/
+
+# GNAT build outputs
+obj/
+lib/
+*.ali
+*.o
+*.cswi
+*.adb.std*
+*.ads.std*
+
+# Test binaries and build tree
+tests/obj/
+tests/bin/
+
+# mbedTLS source (downloaded by scripts/fetch_mbedtls.sh)
+third_party/
+
+# Scratch area for binding regeneration
+scratch/
+
+# Stray top-level review binaries from ad-hoc builds
+/review_empty
+/review_encoding
+/review_urls
+
+# Editor / OS
+*.swp
+*~
+.DS_Store

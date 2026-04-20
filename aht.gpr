@@ -1,0 +1,46 @@
+library project Aht is
+
+   for Library_Name use "aht";
+   for Library_Kind use "static";
+
+   for Source_Dirs use ("src");
+   for Object_Dir  use "obj";
+   for Library_Dir use "lib";
+
+   type Build_Mode_Kind is ("debug", "release");
+   Build_Mode : Build_Mode_Kind := external ("BUILD_MODE", "debug");
+
+   Mbedtls_Lib_Dir := "third_party/mbedtls-2.28.9/library";
+
+   package Compiler is
+      case Build_Mode is
+         when "debug" =>
+            for Default_Switches ("Ada") use
+              ("-g", "-O0",
+               "-gnat2022",
+               "-gnata",              -- enable contracts/assertions
+               "-gnatwa",             -- all warnings
+               "-gnatVa",             -- all validity checks
+               "-fstack-check");
+         when "release" =>
+            for Default_Switches ("Ada") use
+              ("-O2", "-gnatn",
+               "-gnat2022");
+      end case;
+   end Compiler;
+
+   package Binder is
+      for Default_Switches ("Ada") use ("-Es");
+   end Binder;
+
+   package Linker is
+      --  mbedTLS static libraries are produced by scripts/fetch_mbedtls.sh.
+      --  They are consumed by AHT.Transport.TLS via a `pragma Linker_Options`
+      --  directive, so listing them here is not strictly required — but
+      --  keeping the directory on the library search path lets link-time
+      --  errors surface at the project level rather than from inside the
+      --  binding unit.
+      for Linker_Options use ("-L" & Mbedtls_Lib_Dir);
+   end Linker;
+
+end Aht;
