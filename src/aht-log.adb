@@ -71,17 +71,37 @@ package body AHT.Log is
    --  error.
 
    protected Sync_Holder is
-      procedure Set (Cb : Sink_Callback);
+      procedure Install
+        (Cb       : Sink_Callback;
+         Rejected : out Boolean);
+      --  Single-step check-and-set so two tasks racing in
+      --  Synchronized_Sink cannot both pass the "nothing wrapped yet"
+      --  gate and then both install different inners.
+      --  * Cb = null       → clear Inner,        Rejected := False.
+      --  * Inner = null    → Inner := Cb,        Rejected := False.
+      --  * Inner = Cb      → no-op,              Rejected := False.
+      --  * otherwise       → Inner unchanged,    Rejected := True.
       function  Get return Sink_Callback;
    private
       Inner : Sink_Callback := null;
    end Sync_Holder;
 
    protected body Sync_Holder is
-      procedure Set (Cb : Sink_Callback) is
+      procedure Install
+        (Cb       : Sink_Callback;
+         Rejected : out Boolean)
+      is
       begin
-         Inner := Cb;
-      end Set;
+         if Cb = null then
+            Inner := null;
+            Rejected := False;
+         elsif Inner = null or else Inner = Cb then
+            Inner := Cb;
+            Rejected := False;
+         else
+            Rejected := True;
+         end if;
+      end Install;
 
       function Get return Sink_Callback is
       begin
@@ -189,26 +209,24 @@ package body AHT.Log is
    function Synchronized_Sink
      (Inner : Sink_Callback) return Sink_Callback
    is
-      Current : constant Sink_Callback := Sync_Holder.Get;
+      Rejected : Boolean;
    begin
-      if Inner = null then
-         Sync_Holder.Set (null);
-         return null;
-      end if;
-
-      --  Reject a second wrap with a different Inner while one is
-      --  already active. The trampoline is a single module-level
-      --  procedure; repointing it silently would invalidate every
-      --  Sink_Callback value handed out earlier. Idempotent calls
-      --  (same Inner) pass through and return the same trampoline.
-      if Current /= null and then Current /= Inner then
+      --  Atomic check-and-set inside Sync_Holder. Two tasks racing
+      --  here cannot both see "empty" and then both install their
+      --  own Inner: the loser's Install call observes the winner's
+      --  value and signals Rejected, turning into Program_Error.
+      Sync_Holder.Install (Inner, Rejected);
+      if Rejected then
          raise Program_Error with
            "AHT.Log.Synchronized_Sink: a different callback is already "
            & "wrapped; call Synchronized_Sink (null) first to release it";
       end if;
 
-      Sync_Holder.Set (Inner);
-      return Sync_Trampoline'Access;
+      if Inner = null then
+         return null;
+      else
+         return Sync_Trampoline'Access;
+      end if;
    end Synchronized_Sink;
 
 end AHT.Log;
