@@ -54,5 +54,16 @@ package AHT.Log is
    --  Returns a thread-safe wrapper around Inner: concurrent Emit
    --  calls are serialized so records from different tasks do not
    --  interleave. Inner itself need not be thread-safe.
+   --
+   --  Only one wrap is active at a time. The returned access value
+   --  is a module-level trampoline (required for library-level
+   --  accessibility of `Sink_Callback`), and it delegates to the
+   --  most recently wrapped Inner. Calling Synchronized_Sink a
+   --  second time with a different non-null Inner while a previous
+   --  wrap is still active raises `Program_Error` rather than
+   --  silently repointing the first wrap at the second Inner.
+   --  Passing null clears the active wrap so the next call can
+   --  install a new one; idempotent calls (same Inner) are allowed
+   --  and return the same trampoline.
 
 end AHT.Log;

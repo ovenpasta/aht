@@ -226,6 +226,54 @@ begin
       end if;
    end;
 
+   --  Case 6: Synchronized_Sink single-wrap contract. A second wrap
+   --  with a different Inner must raise Program_Error rather than
+   --  silently repointing the first wrap at the new callback.
+   --  Idempotent re-wrap (same Inner) is allowed and returns the
+   --  same trampoline. Passing null clears the wrap.
+   declare
+      use type AHT.Log.Sink_Callback;
+      W1, W2, W3 : AHT.Log.Sink_Callback;
+      Raised     : Boolean := False;
+   begin
+      AHT.Log.Set_Sink (null);
+      --  Case 5 installed a wrap around Racy_Sink; release it so
+      --  the first call below starts from a clean slate.
+      W3 := AHT.Log.Synchronized_Sink (null);
+
+      W1 := AHT.Log.Synchronized_Sink (Capture_Sink'Unrestricted_Access);
+      if W1 = null then
+         Fail ("single-wrap: first wrap returned null");
+      end if;
+
+      W2 := AHT.Log.Synchronized_Sink (Capture_Sink'Unrestricted_Access);
+      if W2 /= W1 then
+         Fail ("single-wrap: idempotent re-wrap returned a different "
+               & "trampoline");
+      end if;
+
+      begin
+         W3 := AHT.Log.Synchronized_Sink (Racy_Sink'Unrestricted_Access);
+         Fail ("single-wrap: second wrap with different Inner did not "
+               & "raise Program_Error");
+      exception
+         when Program_Error => Raised := True;
+      end;
+      if not Raised then
+         Fail ("single-wrap: Program_Error not raised");
+      end if;
+
+      --  Clearing should make the next wrap succeed.
+      W3 := AHT.Log.Synchronized_Sink (null);
+      if W3 /= null then
+         Fail ("single-wrap: Synchronized_Sink (null) did not return null");
+      end if;
+      W3 := AHT.Log.Synchronized_Sink (Racy_Sink'Unrestricted_Access);
+      if W3 = null then
+         Fail ("single-wrap: post-clear wrap returned null");
+      end if;
+   end;
+
    AHT.Log.Set_Sink (null);
 
    if Failures = 0 then

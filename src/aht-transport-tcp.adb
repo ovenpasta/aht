@@ -103,11 +103,6 @@ package body AHT.Transport.TCP is
          raise Transport_Error with "TCP transport already connected";
       end if;
 
-      if not Self.Selector_Open then
-         Create_Selector (Self.Selector);
-         Self.Selector_Open := True;
-      end if;
-
       for E of Endpoints loop
          Try (E);
          exit when Success;
@@ -118,6 +113,31 @@ package body AHT.Transport.TCP is
            ("all candidates refused — " & To_String (Last_Error));
          raise Transport_Error with
            "TCP connect: all candidates failed: " & To_String (Last_Error);
+      end if;
+
+      --  Socket is connected. Now create the selector Read/Abort_Pending
+      --  need. Deferred until here so that a failed connect path (every
+      --  candidate refused, DNS lookup failure, etc.) never leaves the
+      --  transport holding an open selector that only a later Close
+      --  would have released. If Create_Selector itself fails we unwind
+      --  the just-opened socket too, keeping the object reusable.
+      if not Self.Selector_Open then
+         begin
+            Create_Selector (Self.Selector);
+            Self.Selector_Open := True;
+         exception
+            when E : Socket_Error =>
+               Self.Connected := False;
+               begin
+                  Close_Socket (Self.Socket);
+               exception
+                  when Socket_Error => null;
+               end;
+               Self.Socket := No_Socket;
+               raise Transport_Error with
+                 "TCP connect: Create_Selector failed: "
+                 & Ada.Exceptions.Exception_Message (E);
+         end;
       end if;
    end Connect_Candidates;
 

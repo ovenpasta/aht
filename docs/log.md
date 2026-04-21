@@ -102,11 +102,17 @@ actually runs often.
 - `Synchronized_Sink (Inner)` — returns a thread-safe wrapper
   around `Inner`. The trampoline is a module-level named
   procedure, so it satisfies the library-level accessibility of
-  `Sink_Callback`. One wrap lives at a time.
+  `Sink_Callback`. Only one wrap is active at a time: attempting
+  a second wrap with a different non-null Inner while the first
+  is still live raises `Program_Error` rather than silently
+  repointing the trampoline (which would invalidate every
+  `Sink_Callback` value handed out earlier). Pass `null` to
+  release the wrap. Idempotent re-wrap with the same Inner is
+  allowed and returns the same trampoline.
 
 ## Covered by `tests/bin/test_log`
 
-Five cases:
+Six cases:
 
 1. **silent default** — no sink installed ⇒ `Is_Enabled` is false
    for every level and a captured sink that is reset beforehand
@@ -127,3 +133,7 @@ Five cases:
    sink (reads a global counter, sleeps 1 ms, writes back).
    Unserialized it loses hundreds of bumps; with
    `Synchronized_Sink` the counter ends at exactly 800.
+6. **`Synchronized_Sink` single-wrap contract** — re-wrap with
+   the same Inner returns the same trampoline; re-wrap with a
+   different Inner raises `Program_Error`; passing `null`
+   clears the wrap so the next call can install a new one.

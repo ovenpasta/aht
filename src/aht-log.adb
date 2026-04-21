@@ -189,7 +189,24 @@ package body AHT.Log is
    function Synchronized_Sink
      (Inner : Sink_Callback) return Sink_Callback
    is
+      Current : constant Sink_Callback := Sync_Holder.Get;
    begin
+      if Inner = null then
+         Sync_Holder.Set (null);
+         return null;
+      end if;
+
+      --  Reject a second wrap with a different Inner while one is
+      --  already active. The trampoline is a single module-level
+      --  procedure; repointing it silently would invalidate every
+      --  Sink_Callback value handed out earlier. Idempotent calls
+      --  (same Inner) pass through and return the same trampoline.
+      if Current /= null and then Current /= Inner then
+         raise Program_Error with
+           "AHT.Log.Synchronized_Sink: a different callback is already "
+           & "wrapped; call Synchronized_Sink (null) first to release it";
+      end if;
+
       Sync_Holder.Set (Inner);
       return Sync_Trampoline'Access;
    end Synchronized_Sink;
