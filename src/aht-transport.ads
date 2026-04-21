@@ -38,9 +38,14 @@ package AHT.Transport is
      (Self     : in out Transport_Type;
       Deadline : Duration) is null
      with Pre'Class => Deadline >= 0.0;
-   --  Max time the next Read (and subsequent reads until reset) may
-   --  block before raising `Timeout_Error`. `Duration'Last` means no
-   --  deadline (the default initial state).
+   --  Sets a wall-clock budget, measured from this call, for every
+   --  subsequent `Read` until it is reset. When the budget elapses,
+   --  any `Read` in progress or started thereafter raises
+   --  `Timeout_Error`. The budget is **compound** — it is not
+   --  refreshed per `Read`, so a slow-drip peer that dribbles one
+   --  byte every (Deadline / N) seconds still trips the deadline on
+   --  call N+1. Pass `Duration'Last` to clear the deadline (the
+   --  default initial state).
 
    procedure Abort_Pending (Self : in out Transport_Type) is null;
    --  Unblock a Read in progress (typically from another task) by

@@ -3,6 +3,7 @@ with Ada.Strings.Unbounded;
 with AHT.Bytes;
 with AHT.URL;
 
+private with Ada.Real_Time;
 private with GNAT.Sockets;
 
 package AHT.Transport.TCP is
@@ -64,7 +65,8 @@ private
       Socket        : GNAT.Sockets.Socket_Type := GNAT.Sockets.No_Socket;
       Selector      : GNAT.Sockets.Selector_Type;
       Selector_Open : Boolean := False;
-      Read_Deadline : Duration := Duration'Last;
+      Has_Deadline  : Boolean := False;
+      Deadline_At   : Ada.Real_Time.Time;
       Connected     : Boolean := False;
    end record;
 

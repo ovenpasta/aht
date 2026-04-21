@@ -40,11 +40,18 @@ Two optional read-side hooks share a single mechanism — the TCP
 transport wires both to a persistent `GNAT.Sockets.Selector_Type`
 created on `Connect` and destroyed on `Close`:
 
-- **`Set_Read_Deadline (Duration)`** — max time the next `Read` (and
-  subsequent reads, until reset) may block before raising
-  `Timeout_Error`. `Duration'Last` means no deadline. Applied by
-  passing the stored value as `Timeout` to `Check_Selector` before
-  every `Receive_Socket`.
+- **`Set_Read_Deadline (Duration)`** — wall-clock budget, measured
+  from the call, that every subsequent `Read` collectively must
+  finish within. The deadline is **compound**: each `Read` consults
+  the time remaining, not the original `Duration`, so a slow-drip
+  peer that returns one byte every *(Deadline / N)* seconds still
+  trips `Timeout_Error` on call *N+1* instead of refreshing the
+  budget every entry. Pass `Duration'Last` to clear the deadline.
+  The TCP implementation stores the deadline as an `Ada.Real_Time`
+  instant (monotonic, so wall-clock jumps don't corrupt it) and
+  passes the remaining slice as `Timeout` to `Check_Selector`
+  before every `Receive_Socket`; an already-elapsed deadline short-
+  circuits the park and raises immediately.
 - **`Abort_Pending`** — cross-task kill-switch. Calls
   `Abort_Selector`, causing any `Check_Selector` currently parked on
   the same selector to return `Aborted`; `Read` translates that to
@@ -111,9 +118,8 @@ whenever the peer has closed cleanly, matching the abstract contract.
 `Close` is idempotent: repeated calls after the first are no-ops, and
 `Socket_Error` from `Shutdown_Socket` / `Close_Socket` is swallowed
 because the connection is going away regardless. It also tears down
-the persistent selector and resets `Read_Deadline` to
-`Duration'Last` so a fresh `Connect` on the same object starts from
-a clean state.
+the persistent selector and clears any outstanding read deadline so
+a fresh `Connect` on the same object starts from a clean state.
 
 Any `Socket_Error` or `Host_Error` during `Connect`, `Write`, or
 `Read` is re-raised as `AHT.Transport.Transport_Error` with the
@@ -137,7 +143,7 @@ The server uses `Check_Selector` with a 2-second timeout before
 `Accept_Socket` so it never hangs if a client-side failure means
 nobody ever connects.
 
-Four cases, each with its own server task (except case 4, which
+Seven cases, each with its own server task (except case 4, which
 doesn't need one). All client operations are wrapped in exception
 handlers and followed by an unconditional idempotent `Close`, so
 assertion-style early returns inside `Drive_Echo` never leak the
@@ -167,6 +173,12 @@ client socket.
 6. **timeout** — same silent peer. Client calls
    `Set_Read_Deadline (0.1)` then `Read`. Asserts `Timeout_Error`
    fires between 0.05 s and 1 s (not early, not runaway).
+7. **compound timeout** — same silent peer. Client calls
+   `Set_Read_Deadline (0.1)`, then `delay 0.25` (burning the whole
+   budget *before* `Read`), then `Read`. Asserts the raise happens
+   within 0.05 s of the `Read` call, not after another 0.1 s —
+   proves the deadline is a wall-clock budget from the `Set_`
+   call, not a fresh allowance per `Read`.
 
 ## `AHT.Transport.TLS` — to be implemented
 

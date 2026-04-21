@@ -73,10 +73,16 @@ these packages.
 ## `AHT.HTTP.IO`
 
 Transport-level helpers over `AHT.Transport.Transport_Type'Class`.
-All four operations delegate to `Transport.Read` / `Transport.Write`;
-the transport itself owns deadlines and cancel (`Set_Read_Deadline`
-/ `Abort_Pending`), so a slow or cancelled HTTP call surfaces as
-`Timeout_Error` / `Aborted_Error` through these helpers unchanged.
+All four operations delegate to `Transport.Read` / `Transport.Write`
+and, crucially, do **not** track their own deadlines. Deadlines and
+cancel live on the transport (`Set_Read_Deadline` / `Abort_Pending`);
+because the deadline is compound (a wall-clock budget from the
+`Set_` call that is not refreshed per `Read` — see
+`docs/transport.md`), the byte-by-byte `Read_Line` and the looped
+`Read_N` below honour it for the whole logical operation, not for
+each underlying `Read`. A slow-drip peer that dribbles one byte per
+(deadline / N) seconds trips `Timeout_Error` instead of tying up the
+reader forever.
 
 - `Write_All (T, Data)` — the transport's `Write` contract is
   already all-or-raise, so this is a thin named entry point plus a

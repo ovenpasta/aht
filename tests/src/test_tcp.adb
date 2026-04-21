@@ -644,6 +644,73 @@ begin
       Check_Server_Runtime ("timeout (server)", Runtime_Err);
    end;
 
+   --  Case 7: Set_Read_Deadline is compound (wall-clock from the
+   --  call), not per-Read. If the deadline has already elapsed by
+   --  the time Read is invoked, it raises Timeout_Error almost
+   --  immediately — it does not grant another full budget. This is
+   --  the semantic HTTP.IO's line/body loops rely on, so a
+   --  slow-drip peer cannot dodge the deadline by keeping each
+   --  individual Read under it.
+   declare
+      Srv         : Silent_Server;
+      Port        : AHT.URL.Port_Number;
+      Err         : Unbounded_String;
+      Runtime_Err : Unbounded_String;
+   begin
+      Srv.Get_Port (Port, Err);
+      if Length (Err) > 0 then
+         Fail ("compound-timeout: server setup — " & To_String (Err));
+      else
+         declare
+            T    : AHT.Transport.TCP.TCP_Transport;
+            Data : AHT.Bytes.Byte_Array (1 .. 64);
+            Last : Natural;
+         begin
+            begin
+               T.Connect ("127.0.0.1", Port);
+            exception
+               when E : others =>
+                  Fail ("compound-timeout: Connect — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+
+            if T.Is_Connected then
+               T.Set_Read_Deadline (0.1);
+               delay 0.25;  --  Burn the whole budget before Read.
+               declare
+                  T_Start : constant Time := Clock;
+                  Elapsed : Duration;
+               begin
+                  T.Read (Data, Last);
+                  Fail ("compound-timeout: Read returned normally, Last="
+                        & Natural'Image (Last));
+               exception
+                  when AHT.Transport.Timeout_Error =>
+                     Elapsed := Clock - T_Start;
+                     --  Deadline already gone when we called Read;
+                     --  the raise should be effectively instant, not
+                     --  another ~0.1 s. Budget covers GNAT scheduler
+                     --  jitter without admitting a fresh per-Read
+                     --  deadline interpretation.
+                     if Elapsed > 0.05 then
+                        Fail ("compound-timeout: Read waited"
+                              & Duration'Image (Elapsed)
+                              & "s past an expired deadline");
+                     end if;
+                  when E : others =>
+                     Fail ("compound-timeout: unexpected "
+                           & Ada.Exceptions.Exception_Name (E) & " — "
+                           & Ada.Exceptions.Exception_Message (E));
+               end;
+            end if;
+
+            Close_Quietly (T);
+         end;
+      end if;
+      Srv.Wait_Done (Runtime_Err);
+      Check_Server_Runtime ("compound-timeout (server)", Runtime_Err);
+   end;
+
    if Failures = 0 then
       Put_Line ("test_tcp: OK");
       Ada.Command_Line.Set_Exit_Status (0);

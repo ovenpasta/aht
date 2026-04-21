@@ -39,11 +39,14 @@ Not-Implemented exception if called.
     `Set` replaces, `Append` preserves repeats, `Values` returns each
     value individually (no lossy comma-join).
   - `tests/bin/test_tcp` — in-process Ada echo server on 127.0.0.1:
-    `Connect` → `Write` → `Read` → clean EOF → `Close`. Six cases:
+    `Connect` → `Write` → `Read` → clean EOF → `Close`. Seven cases:
     literal, DNS, `[bad,good]` multi-addr fallback, `[bad,bad]`
     all-fail / last-error-wins, `Abort_Pending` unblocks a parked
-    `Read` (sibling task, < 1 s to `Aborted_Error`), and
-    `Set_Read_Deadline (0.1)` fires `Timeout_Error` (0.05–1 s).
+    `Read` (sibling task, < 1 s to `Aborted_Error`),
+    `Set_Read_Deadline (0.1)` fires `Timeout_Error` (0.05–1 s), and
+    compound-deadline semantics — after `Set_Read_Deadline (0.1)` +
+    `delay 0.25`, `Read` raises within 0.05 s rather than granting
+    a fresh budget.
   - `tests/bin/test_log` — silent default, captured-record sink,
     global + per-subsystem level filtering, concurrent emit through
     `Synchronized_Sink` (800 bumps, zero lost).

@@ -1,4 +1,5 @@
 with Ada.Exceptions;
+with Ada.Real_Time; use Ada.Real_Time;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Streams; use Ada.Streams;
 with GNAT.Sockets; use GNAT.Sockets;
@@ -229,6 +230,7 @@ package body AHT.Transport.TCP is
       R_Set    : Socket_Set_Type;
       W_Set    : Socket_Set_Type;
       Status   : Selector_Status;
+      Timeout  : Duration := Duration'Last;
    begin
       Last := 0;
       if Data'Length = 0 then
@@ -236,6 +238,22 @@ package body AHT.Transport.TCP is
       end if;
       if not Self.Connected then
          raise Transport_Error with "TCP read on closed transport";
+      end if;
+
+      --  Resolve the compound deadline. Subtracting the stored
+      --  absolute instant from now gives *remaining* budget; if it's
+      --  gone (or just about to go), fail without even parking.
+      if Self.Has_Deadline then
+         declare
+            Remaining : constant Time_Span :=
+              Self.Deadline_At - Clock;
+         begin
+            if Remaining <= Time_Span_Zero then
+               Log.Debug ("read deadline expired (pre-park)");
+               raise Timeout_Error with "TCP read deadline expired";
+            end if;
+            Timeout := To_Duration (Remaining);
+         end;
       end if;
 
       --  Park in Check_Selector first so the read honours the
@@ -247,7 +265,7 @@ package body AHT.Transport.TCP is
          R_Socket_Set => R_Set,
          W_Socket_Set => W_Set,
          Status       => Status,
-         Timeout      => Self.Read_Deadline);
+         Timeout      => Timeout);
 
       case Status is
          when Completed =>
@@ -306,7 +324,7 @@ package body AHT.Transport.TCP is
          Self.Selector_Open := False;
       end if;
 
-      Self.Read_Deadline := Duration'Last;
+      Self.Has_Deadline := False;
    end Close;
 
    overriding function Is_Connected (Self : TCP_Transport) return Boolean is
@@ -317,7 +335,12 @@ package body AHT.Transport.TCP is
       Deadline : Duration)
    is
    begin
-      Self.Read_Deadline := Deadline;
+      if Deadline = Duration'Last then
+         Self.Has_Deadline := False;
+      else
+         Self.Has_Deadline := True;
+         Self.Deadline_At := Clock + To_Time_Span (Deadline);
+      end if;
    end Set_Read_Deadline;
 
    overriding procedure Abort_Pending (Self : in out TCP_Transport) is
