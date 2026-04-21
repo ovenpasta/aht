@@ -10,7 +10,7 @@ Packages under `AHT.HTTP`:
 | `AHT.HTTP.Headers` | implemented |
 | `AHT.HTTP.Request` | type defined (body serialization pending) |
 | `AHT.HTTP.Response` | type defined (parsing pending) |
-| `AHT.HTTP.IO` | stubbed |
+| `AHT.HTTP.IO` | implemented |
 | `AHT.HTTP.Client` | stubbed |
 
 Common exceptions (in `AHT.HTTP`): `HTTP_Error`, `Protocol_Error`,
@@ -70,19 +70,37 @@ Record types carrying `Method`/`Target`/`Headers`/`Body_B` and
 those records belongs to `AHT.HTTP.IO` and `AHT.HTTP.Client`, not to
 these packages.
 
-## `AHT.HTTP.IO` — to be implemented
+## `AHT.HTTP.IO`
 
-Transport-level helpers over `AHT.Transport.Transport_Type'Class`:
+Transport-level helpers over `AHT.Transport.Transport_Type'Class`.
+All four operations delegate to `Transport.Read` / `Transport.Write`;
+the transport itself owns deadlines and cancel (`Set_Read_Deadline`
+/ `Abort_Pending`), so a slow or cancelled HTTP call surfaces as
+`Timeout_Error` / `Aborted_Error` through these helpers unchanged.
 
-- `Write_All` — loop around `Write` until the whole byte slice is
-  sent.
-- `Read_Line (T, Max_Length)` — reads a CRLF-terminated line; raises
-  `Protocol_Error` if the terminator is not found within
-  `Max_Length`. Used for the status line and each header line.
-- `Read_N` — read exactly `Data'Length` bytes (for `Content-Length`
-  bodies).
-- `Read_Chunked_Body` — RFC 7230 §4.1 chunked-transfer decoder,
-  returning the reassembled body as a `Byte_Vector`.
+- `Write_All (T, Data)` — the transport's `Write` contract is
+  already all-or-raise, so this is a thin named entry point plus a
+  `Log.Trace` on the `"http.io"` subsystem. Empty slice is a no-op.
+- `Read_Line (T, Max_Length => 8_192) return String` — reads
+  byte-by-byte until CRLF, returns the line **without** the CRLF.
+  Byte-by-byte lets the caller transition from line-mode (status +
+  headers) to body-mode without a buffered-reader abstraction: the
+  transport is positioned exactly at the byte after CRLF with no
+  overshoot. Raises `Protocol_Error` on peer close before CRLF or
+  when `Max_Length` bytes have been consumed without finding one.
+- `Read_N (T, Data)` — fills every slot in `Data` by looping around
+  `Transport.Read`. Raises `Protocol_Error` if the peer closes
+  before `Data'Length` bytes have been received. Zero-length slice
+  is a no-op.
+- `Read_Chunked_Body (T) return Byte_Vector` — RFC 7230 §4.1
+  decoder. Each iteration reads a chunk-size line (hex digits,
+  case-insensitive; `chunk-ext` after a `;` is ignored), reads the
+  chunk-data with `Read_N`, then consumes the mandatory bare CRLF.
+  The zero-size chunk terminates the body; a trailer section
+  follows (read and discarded — trailers are not surfaced in v1)
+  until a bare CRLF ends the message. Raises `Protocol_Error` on
+  non-hex size, size overflow past `Natural'Last`, or chunk-data
+  not followed by bare CRLF.
 
 ## `AHT.HTTP.Client` — to be implemented
 

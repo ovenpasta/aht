@@ -11,7 +11,8 @@ project Tests is
       "test_url_encoding.adb",
       "test_headers.adb",
       "test_tcp.adb",
-      "test_log.adb");
+      "test_log.adb",
+      "test_http_io.adb");
 
    package Compiler renames Aht.Compiler;
    package Binder   renames Aht.Binder;

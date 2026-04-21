@@ -1,45 +1,195 @@
+with AHT.Log.Tag;
+
 package body AHT.HTTP.IO is
+
+   package Log is new AHT.Log.Tag ("http.io");
+
+   --  Parse a hexadecimal string into a Natural. Used only for the
+   --  chunk-size line, which is caller-trimmed to just the HEXDIG run.
+   --  Raises Protocol_Error on a non-hex character, an empty input, or
+   --  an overflow past Natural'Last.
+   function Parse_Hex (S : String) return Natural;
+
+   function Parse_Hex (S : String) return Natural is
+      Result : Natural := 0;
+      Digit  : Natural;
+   begin
+      if S'Length = 0 then
+         raise Protocol_Error with
+           "HTTP.IO.Parse_Hex: empty chunk-size";
+      end if;
+
+      for C of S loop
+         case C is
+            when '0' .. '9' => Digit := Character'Pos (C) - Character'Pos ('0');
+            when 'a' .. 'f' => Digit := 10 + Character'Pos (C) - Character'Pos ('a');
+            when 'A' .. 'F' => Digit := 10 + Character'Pos (C) - Character'Pos ('A');
+            when others =>
+               raise Protocol_Error with
+                 "HTTP.IO.Parse_Hex: non-hex character '" & C & "'";
+         end case;
+
+         --  Pre-check overflow: Natural'Last / 16 is the largest value
+         --  that can be safely shifted left by 4 bits without wrapping.
+         if Result > (Natural'Last - Digit) / 16 then
+            raise Protocol_Error with
+              "HTTP.IO.Parse_Hex: chunk size overflows Natural";
+         end if;
+         Result := Result * 16 + Digit;
+      end loop;
+
+      return Result;
+   end Parse_Hex;
 
    procedure Write_All
      (T    : in out AHT.Transport.Transport_Type'Class;
       Data : AHT.Bytes.Byte_Array)
    is
-      pragma Unreferenced (T, Data);
    begin
-      raise HTTP_Error with "AHT.HTTP.IO.Write_All: not yet implemented";
+      --  The Transport contract is "all-or-raise": TCP/TLS Write
+      --  either flushes every byte or raises Transport_Error. This is
+      --  a thin named entry point for the HTTP layer plus a log call.
+      if Data'Length = 0 then
+         return;
+      end if;
+      T.Write (Data);
+      if Log.Enabled (AHT.Log.Trace) then
+         Log.Trace ("wrote" & Integer'Image (Data'Length) & " bytes");
+      end if;
    end Write_All;
 
    function Read_Line
      (T          : in out AHT.Transport.Transport_Type'Class;
       Max_Length : Positive := 8_192) return String
    is
-      pragma Unreferenced (T, Max_Length);
+      Buf  : String (1 .. Max_Length);
+      Len  : Natural := 0;
+      One  : AHT.Bytes.Byte_Array (1 .. 1);
+      Last : Natural;
    begin
-      raise HTTP_Error with "AHT.HTTP.IO.Read_Line: not yet implemented";
-      return "";
+      --  Byte-by-byte read so the caller can transition to bulk body
+      --  reads without a buffered-reader abstraction: every Read_Line
+      --  leaves the transport positioned exactly at the byte after
+      --  CRLF, with no overshoot.
+      loop
+         T.Read (One, Last);
+         if Last = 0 then
+            raise Protocol_Error with
+              "HTTP.IO.Read_Line: peer closed before CRLF";
+         end if;
+
+         if Len = Max_Length then
+            raise Protocol_Error with
+              "HTTP.IO.Read_Line: line exceeds"
+              & Positive'Image (Max_Length) & " bytes";
+         end if;
+
+         Len := Len + 1;
+         Buf (Len) := Character'Val (One (1));
+
+         if Len >= 2
+           and then Buf (Len - 1) = ASCII.CR
+           and then Buf (Len)     = ASCII.LF
+         then
+            return Buf (1 .. Len - 2);
+         end if;
+      end loop;
    end Read_Line;
 
    procedure Read_N
      (T    : in out AHT.Transport.Transport_Type'Class;
       Data : out AHT.Bytes.Byte_Array)
    is
-      pragma Unreferenced (T);
+      Cursor : Positive := Data'First;
+      Last   : Natural;
    begin
-      for I in Data'Range loop
-         Data (I) := 0;
+      if Data'Length = 0 then
+         return;
+      end if;
+
+      while Cursor <= Data'Last loop
+         T.Read (Data (Cursor .. Data'Last), Last);
+         if Last = 0 then
+            raise Protocol_Error with
+              "HTTP.IO.Read_N: peer closed with"
+              & Natural'Image (Cursor - Data'First)
+              & " of" & Natural'Image (Data'Length) & " bytes read";
+         end if;
+         Cursor := Last + 1;
       end loop;
-      raise HTTP_Error with "AHT.HTTP.IO.Read_N: not yet implemented";
    end Read_N;
 
    function Read_Chunked_Body
      (T : in out AHT.Transport.Transport_Type'Class)
       return AHT.Bytes.Byte_Vector
    is
-      pragma Unreferenced (T);
-      Empty : AHT.Bytes.Byte_Vector;
+      Result : AHT.Bytes.Byte_Vector;
+
+      function Chunk_Size_From_Line (Line : String) return Natural;
+
+      function Chunk_Size_From_Line (Line : String) return Natural is
+         Semi : Natural := 0;
+      begin
+         --  Ignore chunk-ext (anything after the first ';').
+         for I in Line'Range loop
+            if Line (I) = ';' then
+               Semi := I;
+               exit;
+            end if;
+         end loop;
+         if Semi = 0 then
+            return Parse_Hex (Line);
+         else
+            return Parse_Hex (Line (Line'First .. Semi - 1));
+         end if;
+      end Chunk_Size_From_Line;
+
    begin
-      raise HTTP_Error with "AHT.HTTP.IO.Read_Chunked_Body: not yet implemented";
-      return Empty;
+      loop
+         declare
+            Line : constant String := Read_Line (T);
+            Size : constant Natural := Chunk_Size_From_Line (Line);
+         begin
+            exit when Size = 0;
+
+            declare
+               Chunk : AHT.Bytes.Byte_Array (1 .. Size);
+            begin
+               Read_N (T, Chunk);
+               for B of Chunk loop
+                  Result.Append (B);
+               end loop;
+            end;
+
+            --  RFC 7230: chunk-data is followed by CRLF.
+            declare
+               Trailing : constant String := Read_Line (T);
+            begin
+               if Trailing'Length /= 0 then
+                  raise Protocol_Error with
+                    "HTTP.IO.Read_Chunked_Body: chunk-data not followed "
+                    & "by bare CRLF (got """ & Trailing & """)";
+               end if;
+            end;
+         end;
+      end loop;
+
+      --  After the last (zero-size) chunk: read trailer lines until an
+      --  empty line terminates the chunked body.
+      loop
+         declare
+            Trailer : constant String := Read_Line (T);
+         begin
+            exit when Trailer'Length = 0;
+         end;
+      end loop;
+
+      if Log.Enabled (AHT.Log.Debug) then
+         Log.Debug
+           ("chunked body: " & Natural'Image (Natural (Result.Length))
+            & " bytes");
+      end if;
+      return Result;
    end Read_Chunked_Body;
 
 end AHT.HTTP.IO;
