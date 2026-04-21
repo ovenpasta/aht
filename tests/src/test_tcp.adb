@@ -1,3 +1,4 @@
+with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;
 with Ada.Exceptions;
 with Ada.Streams; use Ada.Streams;
@@ -125,6 +126,115 @@ procedure Test_TCP is
          Runtime_Err := Runtime_Error;
       end Wait_Done;
    end Echo_Server;
+
+   --  A server that accepts one client and then holds the connection
+   --  open without ever sending. Used by the cancel/timeout cases —
+   --  the client's Read is guaranteed to block with zero bytes in
+   --  flight, so the only way for Read to return is via
+   --  `Set_Read_Deadline` expiry or `Abort_Pending`.
+
+   task type Silent_Server is
+      entry Get_Port
+        (P   : out AHT.URL.Port_Number;
+         Err : out Unbounded_String);
+      entry Wait_Done (Runtime_Err : out Unbounded_String);
+   end Silent_Server;
+
+   task body Silent_Server is
+      Server        : Socket_Type := No_Socket;
+      Client        : Socket_Type;
+      Peer          : Sock_Addr_Type;
+      Bind_To       : Sock_Addr_Type;
+      Bound         : Port_Type := 0;
+      Setup_Error   : Unbounded_String;
+      Runtime_Error : Unbounded_String;
+   begin
+      begin
+         Create_Socket (Server, Family_Inet, Socket_Stream);
+         Set_Socket_Option
+           (Server, Socket_Level, (Name => Reuse_Address, Enabled => True));
+         Bind_To.Addr := Inet_Addr ("127.0.0.1");
+         Bind_To.Port := 0;
+         Bind_Socket (Server, Bind_To);
+         Listen_Socket (Server, 1);
+         Bound := Get_Socket_Name (Server).Port;
+      exception
+         when E : others =>
+            Setup_Error := To_Unbounded_String
+              ("Silent_Server setup: "
+               & Ada.Exceptions.Exception_Message (E));
+      end;
+
+      accept Get_Port
+        (P   : out AHT.URL.Port_Number;
+         Err : out Unbounded_String)
+      do
+         if Length (Setup_Error) > 0 then
+            P := 1;
+         else
+            P := AHT.URL.Port_Number (Bound);
+         end if;
+         Err := Setup_Error;
+      end Get_Port;
+
+      if Length (Setup_Error) = 0 then
+         declare
+            Selector : Selector_Type;
+            R_Set    : Socket_Set_Type;
+            W_Set    : Socket_Set_Type;
+            Status   : Selector_Status;
+         begin
+            Create_Selector (Selector);
+            Set (R_Set, Server);
+            Check_Selector
+              (Selector, R_Set, W_Set, Status, Timeout => 2.0);
+            Close_Selector (Selector);
+
+            if Status /= Completed then
+               Runtime_Error := To_Unbounded_String
+                 ("silent accept timed out (no client connected within 2s)");
+            else
+               begin
+                  Accept_Socket (Server, Client, Peer);
+                  --  Block here until the client closes its half: a
+                  --  single Receive on a silent connection returns
+                  --  0 bytes on peer close, ≥ 1 on data (we ignore
+                  --  either way — the point is to outlive the client's
+                  --  cancel/timeout attempt, not to interact).
+                  declare
+                     Buf  : Stream_Element_Array (1 .. 16);
+                     Last : Stream_Element_Offset;
+                  begin
+                     Receive_Socket (Client, Buf, Last);
+                  end;
+                  Shutdown_Socket (Client, Shut_Read_Write);
+                  Close_Socket (Client);
+               exception
+                  when E : others =>
+                     Runtime_Error := To_Unbounded_String
+                       ("Silent_Server runtime: "
+                        & Ada.Exceptions.Exception_Name (E) & " — "
+                        & Ada.Exceptions.Exception_Message (E));
+               end;
+            end if;
+         exception
+            when E : others =>
+               Runtime_Error := To_Unbounded_String
+                 ("Silent_Server selector: "
+                  & Ada.Exceptions.Exception_Message (E));
+         end;
+
+         begin
+            Close_Socket (Server);
+         exception
+            when others => null;
+         end;
+      end if;
+
+      accept Wait_Done (Runtime_Err : out Unbounded_String) do
+         Runtime_Err := Runtime_Error;
+      end Wait_Done;
+   end Silent_Server;
 
    Payload : constant AHT.Bytes.Byte_Array :=
                AHT.Bytes.From_String ("ping");
@@ -406,6 +516,132 @@ begin
       if Refuser_B /= No_Socket then
          begin Close_Socket (Refuser_B); exception when others => null; end;
       end if;
+   end;
+
+   --  Case 5: Abort_Pending unblocks a Read parked on a silent peer.
+   --  A sibling task calls Abort_Pending after a short delay; the
+   --  main task's Read must raise Aborted_Error without the server
+   --  sending anything.
+   declare
+      Srv         : Silent_Server;
+      Port        : AHT.URL.Port_Number;
+      Err         : Unbounded_String;
+      Runtime_Err : Unbounded_String;
+   begin
+      Srv.Get_Port (Port, Err);
+      if Length (Err) > 0 then
+         Fail ("abort: server setup — " & To_String (Err));
+      else
+         declare
+            T    : AHT.Transport.TCP.TCP_Transport;
+            Data : AHT.Bytes.Byte_Array (1 .. 64);
+            Last : Natural;
+
+            task Aborter;
+            task body Aborter is
+            begin
+               delay 0.1;
+               T.Abort_Pending;
+            exception
+               when others => null;
+            end Aborter;
+         begin
+            begin
+               T.Connect ("127.0.0.1", Port);
+            exception
+               when E : others =>
+                  Fail ("abort: Connect — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+
+            if T.Is_Connected then
+               declare
+                  T_Start : constant Time := Clock;
+                  Elapsed : Duration;
+               begin
+                  T.Read (Data, Last);
+                  Fail ("abort: Read returned normally, Last="
+                        & Natural'Image (Last));
+               exception
+                  when AHT.Transport.Aborted_Error =>
+                     Elapsed := Clock - T_Start;
+                     if Elapsed > 1.0 then
+                        Fail ("abort: took too long — "
+                              & Duration'Image (Elapsed) & "s");
+                     end if;
+                  when E : others =>
+                     Fail ("abort: unexpected "
+                           & Ada.Exceptions.Exception_Name (E) & " — "
+                           & Ada.Exceptions.Exception_Message (E));
+               end;
+            end if;
+
+            Close_Quietly (T);
+            --  Aborter is declared in this block, so the enclosing
+            --  end joins it before we return to the outer scope.
+         end;
+      end if;
+      Srv.Wait_Done (Runtime_Err);
+      Check_Server_Runtime ("abort (server)", Runtime_Err);
+   end;
+
+   --  Case 6: Set_Read_Deadline causes Read to raise Timeout_Error
+   --  after the configured duration when the peer stays silent.
+   declare
+      Srv         : Silent_Server;
+      Port        : AHT.URL.Port_Number;
+      Err         : Unbounded_String;
+      Runtime_Err : Unbounded_String;
+   begin
+      Srv.Get_Port (Port, Err);
+      if Length (Err) > 0 then
+         Fail ("timeout: server setup — " & To_String (Err));
+      else
+         declare
+            T    : AHT.Transport.TCP.TCP_Transport;
+            Data : AHT.Bytes.Byte_Array (1 .. 64);
+            Last : Natural;
+         begin
+            begin
+               T.Connect ("127.0.0.1", Port);
+            exception
+               when E : others =>
+                  Fail ("timeout: Connect — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+
+            if T.Is_Connected then
+               T.Set_Read_Deadline (0.1);
+               declare
+                  T_Start : constant Time := Clock;
+                  Elapsed : Duration;
+               begin
+                  T.Read (Data, Last);
+                  Fail ("timeout: Read returned normally, Last="
+                        & Natural'Image (Last));
+               exception
+                  when AHT.Transport.Timeout_Error =>
+                     Elapsed := Clock - T_Start;
+                     if Elapsed < 0.05 then
+                        Fail ("timeout: fired too early — "
+                              & Duration'Image (Elapsed) & "s");
+                     end if;
+                     if Elapsed > 1.0 then
+                        Fail ("timeout: took too long — "
+                              & Duration'Image (Elapsed) & "s");
+                     end if;
+                  when E : others =>
+                     Fail ("timeout: unexpected "
+                           & Ada.Exceptions.Exception_Name (E) & " — "
+                           & Ada.Exceptions.Exception_Message (E));
+               end;
+            end if;
+
+            Close_Quietly (T);
+         end;
+      end if;
+      Srv.Wait_Done (Runtime_Err);
+      Check_Server_Runtime ("timeout (server)", Runtime_Err);
    end;
 
    if Failures = 0 then

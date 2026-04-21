@@ -1,7 +1,7 @@
 # Progress
 
 Snapshot of implementation status against [`plan.md`](plan.md).
-Last updated: 2026-04-21.
+Last updated: 2026-04-22.
 
 ## Task list (from the plan)
 
@@ -13,7 +13,7 @@ Last updated: 2026-04-21.
 | 4 | `AHT.Transport` + `AHT.Transport.TCP` | done |
 | 5 | `AHT.Log` (level/subsystem facade + `Tag` generic child) | done |
 | 6 | `AHT.HTTP.IO` (line reader, chunked decode) | stubbed |
-| 7 | Transport deadline/abort retrofit | not started |
+| 7 | Transport deadline/abort retrofit | done |
 | 8 | `AHT.HTTP.Request` / `Response` / `Cancel` / streaming / `Client` | stubbed |
 | 9 | mbedTLS fetch + build script + gpr wiring | stubbed (placeholder script) |
 | 10 | `AHT.Mbedtls` bindings (generate + curate) | not started |
@@ -39,9 +39,11 @@ Not-Implemented exception if called.
     `Set` replaces, `Append` preserves repeats, `Values` returns each
     value individually (no lossy comma-join).
   - `tests/bin/test_tcp` — in-process Ada echo server on 127.0.0.1:
-    `Connect` → `Write` → `Read` → clean EOF → `Close`. Four cases:
-    literal, DNS, `[bad,good]` multi-addr fallback, and `[bad,bad]`
-    all-fail / last-error-wins.
+    `Connect` → `Write` → `Read` → clean EOF → `Close`. Six cases:
+    literal, DNS, `[bad,good]` multi-addr fallback, `[bad,bad]`
+    all-fail / last-error-wins, `Abort_Pending` unblocks a parked
+    `Read` (sibling task, < 1 s to `Aborted_Error`), and
+    `Set_Read_Deadline (0.1)` fires `Timeout_Error` (0.05–1 s).
   - `tests/bin/test_log` — silent default, captured-record sink,
     global + per-subsystem level filtering, concurrent emit through
     `Synchronized_Sink` (800 bumps, zero lost).
@@ -72,24 +74,22 @@ In the order the plan specifies:
 
 1. `AHT.HTTP.IO` — CRLF line reader, `Write_All`, chunked decoder.
    Uses `AHT.Log.Tag ("http.io")`.
-2. Transport deadline/abort retrofit — add `Set_Read_Deadline` and
-   `Abort_Pending` (default `is null`) to `AHT.Transport`; override
-   on `AHT.Transport.TCP` via persistent `Selector_Type` +
-   `Abort_Selector`. Cancellable-read test case.
-3. `AHT.HTTP.Request` / `Response` / `Cancel_Handle` / `Body_Reader`
+2. `AHT.HTTP.Request` / `Response` / `Cancel_Handle` / `Body_Reader`
    / `Response_Stream` / `Request_Handle` / `Client` — serialize
    request, parse response, build the streaming core, layer the
-   three surfaces (sync / streaming / async with cancel).
-4. Python plain-HTTP test server + integration tests for GET,
+   three surfaces (sync / streaming / async with cancel). The core
+   plumbs `Cancel_Handle` to `Transport.Abort_Pending`, now wired.
+3. Python plain-HTTP test server + integration tests for GET,
    chunked, POST, auth, streaming, cancel, async.
-5. Real `scripts/fetch_mbedtls.sh` + `scripts/regen_mbedtls_bindings.sh`
+4. Real `scripts/fetch_mbedtls.sh` + `scripts/regen_mbedtls_bindings.sh`
    (`gcc -fdump-ada-spec` over mbedTLS 2.28.9 headers, curated into
    `src/`).
-6. `AHT.Transport.TLS` + HTTPS integration test.
-7. `AHT.Websocket.Frames` RFC 6455 codec (unit-testable without
+5. `AHT.Transport.TLS` + HTTPS integration test. Overrides
+   `Abort_Pending` by aborting the underlying TCP selector.
+6. `AHT.Websocket.Frames` RFC 6455 codec (unit-testable without
    sockets).
-8. `AHT.Websocket.Client` — receiver task, `Send_Guard`, `Inbox`,
+7. `AHT.Websocket.Client` — receiver task, `Send_Guard`, `Inbox`,
    `State` POs; reuse `AHT.HTTP.*` for the upgrade.
-9. Python WS / WSS servers + WebSocket integration tests.
-10. `tests/run_tests.sh` orchestrating venv, servers, build, and
-    binaries.
+8. Python WS / WSS servers + WebSocket integration tests.
+9. `tests/run_tests.sh` orchestrating venv, servers, build, and
+   binaries.

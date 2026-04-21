@@ -17,6 +17,10 @@ procedure Write (Self, Data : Byte_Array) is abstract;
 procedure Read  (Self; Data : out Byte_Array; Last : out Natural) is abstract;
 procedure Close (Self) is abstract;
 function  Is_Connected (Self) return Boolean is abstract;
+
+procedure Set_Read_Deadline
+  (Self : in out Transport_Type; Deadline : Duration) is null;
+procedure Abort_Pending (Self : in out Transport_Type) is null;
 ```
 
 ### Read semantics
@@ -30,12 +34,35 @@ It does **not** guarantee filling the entire slice — callers that need
 exact byte counts (e.g. `AHT.HTTP.IO.Read_N`) loop until `Last = 0`
 (error) or the expected total is reached.
 
-### Shared exception
+### Deadline and cancel
 
-`AHT.Transport.Transport_Error` is raised by either implementation for
-OS-level I/O failures or protocol-level socket errors. TLS adds
-`AHT.Transport.TLS.TLS_Error` for mbedTLS-specific failures (invalid
-cert chain, handshake failure, bad record, …).
+Two optional read-side hooks share a single mechanism — the TCP
+transport wires both to a persistent `GNAT.Sockets.Selector_Type`
+created on `Connect` and destroyed on `Close`:
+
+- **`Set_Read_Deadline (Duration)`** — max time the next `Read` (and
+  subsequent reads, until reset) may block before raising
+  `Timeout_Error`. `Duration'Last` means no deadline. Applied by
+  passing the stored value as `Timeout` to `Check_Selector` before
+  every `Receive_Socket`.
+- **`Abort_Pending`** — cross-task kill-switch. Calls
+  `Abort_Selector`, causing any `Check_Selector` currently parked on
+  the same selector to return `Aborted`; `Read` translates that to
+  `Aborted_Error`. Safe to call when no read is pending; idempotent.
+
+The default bodies (`is null`) are no-ops, so implementations that
+don't support interruptible reads are silently ignored by cancel-
+aware callers and their reads block indefinitely.
+
+### Shared exceptions
+
+- `Transport_Error` — OS-level I/O failures or protocol-level socket
+  errors (connect refused, write to closed peer, …).
+- `Timeout_Error` — `Set_Read_Deadline` expired.
+- `Aborted_Error` — `Abort_Pending` fired while a `Read` was parked.
+
+TLS adds `AHT.Transport.TLS.TLS_Error` for mbedTLS-specific failures
+(invalid cert chain, handshake failure, bad record, …).
 
 ## `AHT.Transport.TCP` — implemented
 
@@ -75,13 +102,18 @@ and `URL.Port`. IPv6 literals don't need any bracket handling at the
 socket layer — `GNAT.Sockets` accepts the raw address.
 
 `Write` loops around `Send_Socket` until the whole slice is flushed;
-short sends re-enter with the remaining tail. `Read` maps to a single
-`Receive_Socket` call — `Last := 0` whenever the peer has closed
-cleanly, matching the abstract contract.
+short sends re-enter with the remaining tail. `Read` parks in
+`Check_Selector` on the transport's persistent selector first (so it
+honours `Set_Read_Deadline` and stays interruptible by
+`Abort_Pending`), then a single `Receive_Socket` — `Last := 0`
+whenever the peer has closed cleanly, matching the abstract contract.
 
 `Close` is idempotent: repeated calls after the first are no-ops, and
 `Socket_Error` from `Shutdown_Socket` / `Close_Socket` is swallowed
-because the connection is going away regardless.
+because the connection is going away regardless. It also tears down
+the persistent selector and resets `Read_Deadline` to
+`Duration'Last` so a fresh `Connect` on the same object starts from
+a clean state.
 
 Any `Socket_Error` or `Host_Error` during `Connect`, `Write`, or
 `Read` is re-raised as `AHT.Transport.Transport_Error` with the
@@ -127,6 +159,14 @@ client socket.
    `Transport_Error` *and* that the message contains the last
    candidate's port, not the first — proving the "last error wins"
    aggregation contract from `Connect_Candidates`.
+5. **abort** — a `Silent_Server` task type accepts one client and
+   then holds the socket without sending. The client calls `Read`
+   on a 64-byte buffer; a sibling `Aborter` task delays 100 ms and
+   calls `Abort_Pending`. Asserts `Aborted_Error` surfaces within
+   1 s of the abort call.
+6. **timeout** — same silent peer. Client calls
+   `Set_Read_Deadline (0.1)` then `Read`. Asserts `Timeout_Error`
+   fires between 0.05 s and 1 s (not early, not runaway).
 
 ## `AHT.Transport.TLS` — to be implemented
 

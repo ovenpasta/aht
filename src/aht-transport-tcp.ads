@@ -49,11 +49,23 @@ package AHT.Transport.TCP is
 
    overriding function Is_Connected (Self : TCP_Transport) return Boolean;
 
+   overriding procedure Set_Read_Deadline
+     (Self     : in out TCP_Transport;
+      Deadline : Duration);
+
+   overriding procedure Abort_Pending (Self : in out TCP_Transport);
+   --  Calls `Abort_Selector` on the persistent selector created in
+   --  `Connect`, unblocking any `Read` parked in `Check_Selector` and
+   --  causing it to raise `Aborted_Error`. Safe cross-task.
+
 private
 
    type TCP_Transport is new Transport_Type with record
-      Socket    : GNAT.Sockets.Socket_Type := GNAT.Sockets.No_Socket;
-      Connected : Boolean := False;
+      Socket        : GNAT.Sockets.Socket_Type := GNAT.Sockets.No_Socket;
+      Selector      : GNAT.Sockets.Selector_Type;
+      Selector_Open : Boolean := False;
+      Read_Deadline : Duration := Duration'Last;
+      Connected     : Boolean := False;
    end record;
 
 end AHT.Transport.TCP;

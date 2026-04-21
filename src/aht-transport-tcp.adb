@@ -103,6 +103,11 @@ package body AHT.Transport.TCP is
          raise Transport_Error with "TCP transport already connected";
       end if;
 
+      if not Self.Selector_Open then
+         Create_Selector (Self.Selector);
+         Self.Selector_Open := True;
+      end if;
+
       for E of Endpoints loop
          Try (E);
          exit when Success;
@@ -201,6 +206,9 @@ package body AHT.Transport.TCP is
       Buffer   : Stream_Element_Array (1 .. Stream_Element_Offset (Data'Length));
       Got_Last : Stream_Element_Offset;
       Count    : Natural;
+      R_Set    : Socket_Set_Type;
+      W_Set    : Socket_Set_Type;
+      Status   : Selector_Status;
    begin
       Last := 0;
       if Data'Length = 0 then
@@ -209,6 +217,28 @@ package body AHT.Transport.TCP is
       if not Self.Connected then
          raise Transport_Error with "TCP read on closed transport";
       end if;
+
+      --  Park in Check_Selector first so the read honours the
+      --  deadline (via Timeout) and stays interruptible by
+      --  Abort_Pending (via Abort_Selector on the same selector).
+      Set (R_Set, Self.Socket);
+      Check_Selector
+        (Selector     => Self.Selector,
+         R_Socket_Set => R_Set,
+         W_Socket_Set => W_Set,
+         Status       => Status,
+         Timeout      => Self.Read_Deadline);
+
+      case Status is
+         when Completed =>
+            null;
+         when Expired =>
+            Log.Debug ("read deadline expired");
+            raise Timeout_Error with "TCP read deadline expired";
+         when Aborted =>
+            Log.Debug ("read aborted");
+            raise Aborted_Error with "TCP read aborted";
+      end case;
 
       Receive_Socket (Self.Socket, Buffer, Got_Last);
 
@@ -227,26 +257,59 @@ package body AHT.Transport.TCP is
 
    overriding procedure Close (Self : in out TCP_Transport) is
    begin
-      if not Self.Connected then
-         return;
-      end if;
-      Self.Connected := False;
-      Log.Debug ("close");
+      if Self.Connected then
+         Self.Connected := False;
+         Log.Debug ("close");
 
-      begin
-         Shutdown_Socket (Self.Socket, Shut_Read_Write);
-      exception
-         when Socket_Error => null;
-      end;
-      begin
-         Close_Socket (Self.Socket);
-      exception
-         when Socket_Error => null;
-      end;
-      Self.Socket := No_Socket;
+         begin
+            Shutdown_Socket (Self.Socket, Shut_Read_Write);
+         exception
+            when Socket_Error => null;
+         end;
+         begin
+            Close_Socket (Self.Socket);
+         exception
+            when Socket_Error => null;
+         end;
+         Self.Socket := No_Socket;
+      end if;
+
+      --  Selector is per-transport, not per-connection. Drop it here
+      --  so Close pairs 1:1 with the Connect that created it; a fresh
+      --  Connect creates a new selector.
+      if Self.Selector_Open then
+         begin
+            Close_Selector (Self.Selector);
+         exception
+            when Socket_Error => null;
+         end;
+         Self.Selector_Open := False;
+      end if;
+
+      Self.Read_Deadline := Duration'Last;
    end Close;
 
    overriding function Is_Connected (Self : TCP_Transport) return Boolean is
      (Self.Connected);
+
+   overriding procedure Set_Read_Deadline
+     (Self     : in out TCP_Transport;
+      Deadline : Duration)
+   is
+   begin
+      Self.Read_Deadline := Deadline;
+   end Set_Read_Deadline;
+
+   overriding procedure Abort_Pending (Self : in out TCP_Transport) is
+   begin
+      if Self.Selector_Open then
+         begin
+            Abort_Selector (Self.Selector);
+            Log.Debug ("abort pending");
+         exception
+            when Socket_Error => null;
+         end;
+      end if;
+   end Abort_Pending;
 
 end AHT.Transport.TCP;
