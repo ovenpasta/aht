@@ -62,8 +62,8 @@ at `AHT.*` (e.g. `AHT.HTTP.Client`, `AHT.Websocket.Client`, `AHT.URL`,
                     │   AHT.Mbedtls.*       │  ← curated -fdump-ada-spec
                     └─────────────────────────┘
 
-   AHT.URL         AHT.URL.Encoding       AHT.Bytes
-   (parse/build)     (percent encode/decode)  (Byte_Array, subtypes)
+   AHT.URL         AHT.URL.Encoding       AHT.Bytes        AHT.Log
+   (parse/build)     (percent encode/decode)  (Byte_Array)  (cross-cutting)
         └────── used by all layers above ─────────────┘
 ```
 
@@ -73,6 +73,7 @@ at `AHT.*` (e.g. `AHT.HTTP.Client`, `AHT.Websocket.Client`, `AHT.URL`,
 |---|---|
 | `AHT` | Root: `Version` constant, project-wide exceptions. |
 | `AHT.Bytes` | `Byte_Array is array (Positive range <>) of Interfaces.Unsigned_8`; helpers. |
+| `AHT.Log` | Cross-cutting log facade. `Level` enum, user-installed `Sink_Callback`, per-subsystem level filter. Silent by default. Generic child `AHT.Log.Tag` for per-unit subsystem-bound shortcuts. |
 | `AHT.URL` | `URL_Type` (record: scheme, host, port, path, query, fragment), `Parse`, `Build`, `To_String`. Subtype `Port_Number is Positive range 1 .. 65535`. |
 | `AHT.URL.Encoding` | `Percent_Encode`/`Decode` (RFC 3986 unreserved set), `Form_Encode`/`Decode` (application/x-www-form-urlencoded). |
 | `AHT.Transport` | Tagged abstract `Transport_Type` with `Read`, `Write`, `Close`, `Is_Connected`. |
@@ -177,6 +178,10 @@ aht/
 ├── src/
 │   ├── aht.ads
 │   ├── aht-bytes.ads
+│   ├── aht-log.ads
+│   ├── aht-log.adb
+│   ├── aht-log-tag.ads
+│   ├── aht-log-tag.adb
 │   ├── aht-url.ads
 │   ├── aht-url.adb
 │   ├── aht-url-encoding.ads
@@ -213,6 +218,7 @@ aht/
 │   │   ├── test_url.adb
 │   │   ├── test_url_encoding.adb
 │   │   ├── test_headers.adb
+│   │   ├── test_log.adb
 │   │   ├── test_http_get.adb
 │   │   ├── test_http_chunked.adb
 │   │   ├── test_http_post.adb
@@ -238,13 +244,14 @@ aht/
 2. **`AHT.Bytes`, `AHT.URL.Encoding`, `AHT.URL`** — pure, trivially unit-testable. Contracts on predicates (`Port_Number`) and `Post` on `Parse`.
 3. **`AHT.HTTP.Methods`, `.Status`, `.Headers`** — pure types + case-insensitive multimap with `Type_Invariant`.
 4. **`AHT.Transport` + `.TCP`** — `GNAT.Sockets` wrapper.
-5. **`AHT.HTTP.IO`** — line reader, chunked decoder on top of a `Transport_Type'Class`.
-6. **`AHT.HTTP.Request`, `.Response`, `.Client`** — serialize request, parse response. Test against Python plain HTTP server: `test_http_get`, `test_http_chunked`, `test_http_post`, `test_http_auth`.
-7. **mbedTLS fetch + build** (`scripts/fetch_mbedtls.sh`, `alire.toml` pre-build action, link flags).
-8. **`AHT.Mbedtls`** bindings — generate via `regen_mbedtls_bindings.sh`, curate into `src/`.
-9. **`AHT.Transport.TLS`** — TLS transport. `test_http_tls` green.
-10. **`AHT.Websocket.Frames`** — RFC 6455 codec, unit-tested without sockets.
-11. **`AHT.Websocket.Client`** — receiver task, `Send_Guard`, `Inbox`, `State`; reuses `AHT.HTTP.*` to drive the upgrade. Tests: `test_ws_echo`, `test_ws_fragmentation`, `test_ws_close`, `test_ws_tls`, `test_ws_upgrade_headers`.
+5. **`AHT.Log`** — level/subsystem facade + `Tag` generic child. Unit-tested in isolation (capture sink into a buffer, assert filtering). Retrofit TCP with subsystem `"tcp"` log calls.
+6. **`AHT.HTTP.IO`** — line reader, chunked decoder on top of a `Transport_Type'Class`.
+7. **`AHT.HTTP.Request`, `.Response`, `.Client`** — serialize request, parse response. Test against Python plain HTTP server: `test_http_get`, `test_http_chunked`, `test_http_post`, `test_http_auth`.
+8. **mbedTLS fetch + build** (`scripts/fetch_mbedtls.sh`, `alire.toml` pre-build action, link flags).
+9. **`AHT.Mbedtls`** bindings — generate via `regen_mbedtls_bindings.sh`, curate into `src/`.
+10. **`AHT.Transport.TLS`** — TLS transport. `test_http_tls` green.
+11. **`AHT.Websocket.Frames`** — RFC 6455 codec, unit-tested without sockets.
+12. **`AHT.Websocket.Client`** — receiver task, `Send_Guard`, `Inbox`, `State`; reuses `AHT.HTTP.*` to drive the upgrade. Tests: `test_ws_echo`, `test_ws_fragmentation`, `test_ws_close`, `test_ws_tls`, `test_ws_upgrade_headers`.
 
 ## Critical files
 

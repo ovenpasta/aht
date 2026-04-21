@@ -5,7 +5,7 @@ Packages:
 | Unit | Status |
 |---|---|
 | `AHT.Transport` (abstract) | spec implemented |
-| `AHT.Transport.TCP` | stubbed |
+| `AHT.Transport.TCP` | implemented |
 | `AHT.Transport.TLS` | stubbed |
 
 ## Abstraction
@@ -37,17 +37,96 @@ OS-level I/O failures or protocol-level socket errors. TLS adds
 `AHT.Transport.TLS.TLS_Error` for mbedTLS-specific failures (invalid
 cert chain, handshake failure, bad record, …).
 
-## `AHT.Transport.TCP` — to be implemented
+## `AHT.Transport.TCP` — implemented
 
-Thin wrapper over `GNAT.Sockets`. Connects by `(Host, Port)`, resolves
-the hostname, opens a stream-mode IPv4/IPv6 socket, keeps a
-`Stream_Access` for reads/writes. `Close` shuts down gracefully and
-releases the socket.
+Thin wrapper over `GNAT.Sockets`. `Connect (Host, Port)`:
+
+1. Tries `Inet_Addr (Host)` — succeeds for IPv4 and IPv6 literals. If
+   the parse succeeds, only that single address is tried: a literal
+   that doesn't answer is a hard failure, not a prompt to start
+   resolving DNS for it.
+2. Otherwise calls `Get_Host_By_Name`, builds an `Endpoint_List` of
+   every resolved address paired with `Port`, and delegates to
+   `Connect_Candidates`, which iterates **all** candidates in order,
+   closing the half-open socket from any failed attempt before trying
+   the next. The first `Connect_Socket` that succeeds wins.
+3. Each attempt opens a `Socket_Stream` socket of the family that
+   matches the resolved address, so `Connect` works for `127.0.0.1`,
+   `::1`, and dual-stacked DNS names alike.
+4. If every address fails, raises `Transport_Error` carrying the
+   **last** OS error message (typically `Connection refused`).
+
+`Connect_Candidates (Self, Endpoints)` is exposed publicly: it takes an
+explicit list of `(Host, Port)` pairs where each `Host` must already be
+a numeric IP literal. It is the same iteration `Connect` uses
+internally after DNS, and exists in the public spec so tests can drive
+the multi-address fallback deterministically with a known-bad +
+known-good candidate pair (see `tests/src/test_tcp.adb` case 3).
+
+No heap-allocated stream is held: `Write` and `Read` call
+`Send_Socket` / `Receive_Socket` directly on the underlying
+`Socket_Type`. This avoids the `GNAT.Sockets.Stream` / `Free` pairing
+and keeps `TCP_Transport` leak-free across repeated connect/close
+cycles.
 
 Interaction with `AHT.URL`: `Connect` takes a plain string host, not a
 `URL_Type`. The caller passes `URL.Host` (already IPv6-bracketless)
 and `URL.Port`. IPv6 literals don't need any bracket handling at the
 socket layer — `GNAT.Sockets` accepts the raw address.
+
+`Write` loops around `Send_Socket` until the whole slice is flushed;
+short sends re-enter with the remaining tail. `Read` maps to a single
+`Receive_Socket` call — `Last := 0` whenever the peer has closed
+cleanly, matching the abstract contract.
+
+`Close` is idempotent: repeated calls after the first are no-ops, and
+`Socket_Error` from `Shutdown_Socket` / `Close_Socket` is swallowed
+because the connection is going away regardless.
+
+Any `Socket_Error` or `Host_Error` during `Connect`, `Write`, or
+`Read` is re-raised as `AHT.Transport.Transport_Error` with the
+underlying OS message appended, so callers never have to know about
+`GNAT.Sockets` directly.
+
+### Covered by `tests/bin/test_tcp`
+
+An in-process Ada echo-server task type binds `127.0.0.1:0`
+(OS-assigned port) and exposes two entries:
+
+- `Get_Port` hands the port back along with any setup error as an
+  `Unbounded_String`, so bind/listen denial surfaces as a `Fail (...)`
+  line rather than a `TASKING_ERROR` at rendezvous.
+- `Wait_Done` returns a runtime-error `Unbounded_String` captured
+  after `Get_Port`, so a failure on the server side (accept timeout,
+  receive/send error) contributes to the test's `Failures` counter
+  instead of only printing a line.
+
+The server uses `Check_Selector` with a 2-second timeout before
+`Accept_Socket` so it never hangs if a client-side failure means
+nobody ever connects.
+
+Four cases, each with its own server task (except case 4, which
+doesn't need one). All client operations are wrapped in exception
+handlers and followed by an unconditional idempotent `Close`, so
+assertion-style early returns inside `Drive_Echo` never leak the
+client socket.
+
+1. **literal** — `Connect ("127.0.0.1", Port)`: `Inet_Addr` parses,
+   single-candidate path.
+2. **DNS** — `Connect ("localhost", Port)`: `Inet_Addr` fails,
+   `Get_Host_By_Name` iterates. On dual-stack boxes this also
+   exercises the IPv4/IPv6 fallback.
+3. **multi-addr [bad, good]** — drives `Connect_Candidates` directly
+   with `[(127.0.0.1, bad_port), (127.0.0.1, good_port)]`, where
+   `bad_port` is reserved by a bound-but-not-listening socket so
+   connects to it are refused by the kernel. Proves the
+   first-fails-second-succeeds path plus the per-attempt socket
+   cleanup, independent of DNS state on the host.
+4. **multi-addr [bad, bad]** — two bound-but-not-listening ports so
+   every candidate is refused. Asserts `Connect_Candidates` raises
+   `Transport_Error` *and* that the message contains the last
+   candidate's port, not the first — proving the "last error wins"
+   aggregation contract from `Connect_Candidates`.
 
 ## `AHT.Transport.TLS` — to be implemented
 

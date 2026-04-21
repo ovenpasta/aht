@@ -9,7 +9,9 @@ project Tests is
    for Main use
      ("test_url.adb",
       "test_url_encoding.adb",
-      "test_headers.adb");
+      "test_headers.adb",
+      "test_tcp.adb",
+      "test_log.adb");
 
    package Compiler renames Aht.Compiler;
    package Binder   renames Aht.Binder;

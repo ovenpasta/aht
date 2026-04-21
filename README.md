@@ -43,6 +43,8 @@ bash tests/run_tests.sh
   what's next, which tests pass.
 - Subsystem references (one file per subsystem):
   - [`docs/url.md`](docs/url.md) — URL parsing + percent/form encoding.
+  - [`docs/log.md`](docs/log.md) — cross-cutting log facade
+    (level × subsystem filter, user-installed sink).
   - [`docs/http.md`](docs/http.md) — HTTP methods, status, headers, IO
     helpers, client.
   - [`docs/transport.md`](docs/transport.md) — `Transport_Type`
