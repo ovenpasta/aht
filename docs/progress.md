@@ -21,7 +21,7 @@ Last updated: 2026-04-21.
 | 12 | `AHT.Websocket.Frames` codec | stubbed |
 | 13 | `AHT.Websocket.Client` (receiver task + POs) | stubbed |
 | 14 | Python test servers + cert generation | not started |
-| 15 | Ada integration tests + `run_tests.sh` | partial (5 tests, no run_tests.sh yet) |
+| 15 | Ada integration tests + `run_tests.sh` | partial (6 tests, no run_tests.sh yet) |
 
 "Stubbed" = spec is final, body compiles and raises a
 Not-Implemented exception if called.
