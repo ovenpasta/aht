@@ -12,7 +12,8 @@ project Tests is
       "test_headers.adb",
       "test_tcp.adb",
       "test_log.adb",
-      "test_http_io.adb");
+      "test_http_io.adb",
+      "test_http_wire.adb");
 
    package Compiler renames Aht.Compiler;
    package Binder   renames Aht.Binder;

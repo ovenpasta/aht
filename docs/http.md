@@ -8,8 +8,8 @@ Packages under `AHT.HTTP`:
 | `AHT.HTTP.Methods` | implemented |
 | `AHT.HTTP.Status` | implemented |
 | `AHT.HTTP.Headers` | implemented |
-| `AHT.HTTP.Request` | type defined (body serialization pending) |
-| `AHT.HTTP.Response` | type defined (parsing pending) |
+| `AHT.HTTP.Request` | implemented (wire write) |
+| `AHT.HTTP.Response` | implemented (wire read) |
 | `AHT.HTTP.IO` | implemented |
 | `AHT.HTTP.Client` | stubbed |
 
@@ -63,12 +63,64 @@ public call that may mutate the map.
 - `Iterate (Self, Process)` — yields each stored entry; names arrive
   lowercase.
 
-## `AHT.HTTP.Request` / `AHT.HTTP.Response` — types
+## `AHT.HTTP.Request`
 
-Record types carrying `Method`/`Target`/`Headers`/`Body_B` and
-`Status`/`Reason`/`Headers`/`Body_B`. Serialization and parsing of
-those records belongs to `AHT.HTTP.IO` and `AHT.HTTP.Client`, not to
-these packages.
+```ada
+type Request_Type is tagged record
+   Method  : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET;
+   Target  : AHT.URL.URL_Type;
+   Headers : AHT.HTTP.Headers.Map;
+   Body_B  : AHT.Bytes.Byte_Vector;
+end record;
+
+procedure Write
+  (Self : Request_Type;
+   T    : in out AHT.Transport.Transport_Type'Class);
+```
+
+`Write` emits the HTTP/1.1 wire form — request line
+(`METHOD SP request-target SP HTTP/1.1 CRLF`), stored headers in
+insertion order, blank line, body. Header names are written in
+their stored lowercase form (RFC 7230 §3.2 allows it; case is
+insensitive on the wire).
+
+If `Body_B` is non-empty and the caller did not set either
+`Content-Length` or `Transfer-Encoding`, `Write` synthesises a
+`Content-Length` so the request is always framed. It does **not**
+invent `Host`, `User-Agent`, `Connection`, or `Authorization`:
+routing and policy headers stay the caller's job (the `Client`
+layer above is the one that merges them in).
+
+## `AHT.HTTP.Response`
+
+```ada
+type Response_Type is tagged record
+   Status  : AHT.HTTP.Status.Status_Code := 200;
+   Reason  : Ada.Strings.Unbounded.Unbounded_String;
+   Headers : AHT.HTTP.Headers.Map;
+   Body_B  : AHT.Bytes.Byte_Vector;
+end record;
+
+procedure Read
+  (Self : out Response_Type;
+   T    : in out AHT.Transport.Transport_Type'Class);
+```
+
+`Read` parses a status line (`HTTP/1.x SP status SP [reason]`),
+header lines until a blank line, then picks body framing:
+
+1. `Transfer-Encoding: chunked` → `AHT.HTTP.IO.Read_Chunked_Body`.
+2. `Content-Length: N` → `Read_N` for exactly *N* bytes.
+3. otherwise → read until the peer closes (for
+   `Connection: close` responses).
+
+Only `chunked` is understood in v1 — any other
+`Transfer-Encoding` (gzip, compress, chunked+gzip, …) raises
+`Protocol_Error` rather than hand back decoded bytes for a codec
+we don't have. A `Status` outside `100..599`, a missing colon on
+a header line, or a non-numeric `Content-Length` also raise
+`Protocol_Error`. The status line with an empty reason phrase
+(`HTTP/1.1 204 CRLF`) is legal and leaves `Reason` empty.
 
 ## `AHT.HTTP.IO`
 
