@@ -45,16 +45,27 @@ package body AHT.HTTP.Request is
       Put (" HTTP/1.1");
       Put_CRLF;
 
+      --  v1 does not support Transfer-Encoding on outbound requests:
+      --  Request.Write emits Body_B as raw bytes, which would be
+      --  malformed against a chunked framing header. Fail loudly
+      --  instead of producing invalid-but-plausible wire bytes.
+      --  The streaming-upload API that will own chunked request
+      --  bodies is a separate surface still to land.
+      if Self.Headers.Contains ("transfer-encoding") then
+         raise Protocol_Error with
+           "HTTP.Request.Write: Transfer-Encoding on requests is not "
+           & "supported; use Content-Length (auto-added if absent)";
+      end if;
+
       --  Caller-supplied headers, in insertion order, lowercase names.
       Self.Headers.Iterate (Emit_Stored'Access);
 
-      --  Synthesise Content-Length if the caller didn't already choose
-      --  a framing. Without this a request with a body but no framing
-      --  header is a protocol error — easy to forget, cheap to fix
-      --  here.
+      --  Synthesise Content-Length if the caller didn't already
+      --  frame the body explicitly. Without this a request with a
+      --  body and no Content-Length is a protocol error — easy to
+      --  forget, cheap to fix here.
       if Natural (Self.Body_B.Length) > 0
         and then not Self.Headers.Contains ("content-length")
-        and then not Self.Headers.Contains ("transfer-encoding")
       then
          Emit_Header
            ("content-length",

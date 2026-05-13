@@ -1,7 +1,7 @@
 # Progress
 
 Snapshot of implementation status against [`plan.md`](plan.md).
-Last updated: 2026-04-21.
+Last updated: 2026-04-22.
 
 ## Task list (from the plan)
 
@@ -51,16 +51,24 @@ Not-Implemented exception if called.
     global + per-subsystem level filtering, concurrent emit through
     `Synchronized_Sink` (800 bumps, zero lost).
   - `tests/bin/test_http_wire` — mock-transport unit test of the
-    request/response wire codec. Ten cases: GET with no body (no
-    auto Content-Length, final CRLFCRLF present), POST with a body
-    (auto Content-Length = `Body_B'Length`, body follows the head
-    separator), caller-supplied `Transfer-Encoding` wins (no
-    auto Content-Length), Content-Length response, chunked
-    response reassembled, read-until-EOF fallback when no framing
-    header is present, `Protocol_Error` on non-numeric
-    Content-Length / out-of-range status / malformed header line,
-    and a valid status line with an empty reason phrase
-    (`HTTP/1.1 204`).
+    request/response wire codec. Fifteen cases: GET with no body
+    (no auto Content-Length, final CRLFCRLF present), POST with a
+    body (auto Content-Length = `Body_B'Length`, body follows the
+    head separator), caller-supplied `Transfer-Encoding` on a
+    request raises `Protocol_Error` (v1 doesn't do chunked
+    uploads), Content-Length response, chunked response
+    reassembled, read-until-EOF fallback when no framing header is
+    present, `Protocol_Error` on non-numeric Content-Length /
+    out-of-range status / malformed header line, a valid status
+    line with an empty reason phrase (`HTTP/1.1 204`), 101
+    Switching Protocols leaves post-header bytes on the wire (WS
+    upgrade case), 204 with no framing header doesn't spin into
+    the EOF fallback, 204 with an erroneous `Content-Length: 5 +
+    body` ignores the CL and leaves the body bytes on the wire
+    (RFC 7230 §3.3.3), 205 Reset Content with erroneous
+    `Content-Length: 4 + body` does the same (RFC 9110 §15.3.6),
+    304 with erroneous `Transfer-Encoding: chunked` does not
+    invoke the chunked decoder.
   - `tests/bin/test_http_io` — mock-transport unit test of HTTP.IO:
     `Write_All` forwards bytes (empty is a no-op); `Read_Line`
     returns status / header lines without CRLF and leaves the
@@ -101,6 +109,21 @@ In the order the plan specifies:
    round-trip. Needs the Python test server to validate
    end-to-end. `Cancel_Handle` / streaming / async surfaces remain
    to layer on this core afterwards.
+
+   Two codec caveats the client must absorb (the codec is
+   deliberately method-agnostic, so these can't live below it):
+
+   - **Interim 1xx**: `Response.Read` returns on every 1xx (100,
+     103, ...). `Client.Send` must loop, re-reading until the
+     status is not 1xx — except for **101 Switching Protocols**,
+     which is terminal and returns with post-header bytes still
+     buffered on the transport for `Websocket.Client` to consume.
+   - **HEAD / CONNECT**: `Response.Read` has no way to know the
+     request method, so it can't suppress the body on HEAD
+     responses or skip body framing on a successful CONNECT
+     tunnel. Plan: add a `Method` (or small `Body_Policy` flag)
+     parameter on `Response.Read` and have `Client.Send` pass it.
+     Cleaner than splitting the codec API for one edge case.
 2. Python plain-HTTP test server + integration tests for GET,
    chunked, POST, auth, streaming, cancel, async.
 3. Real `scripts/fetch_mbedtls.sh` + `scripts/regen_mbedtls_bindings.sh`

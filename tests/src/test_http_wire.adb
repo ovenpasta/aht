@@ -200,8 +200,10 @@ begin
       end;
    end;
 
-   --  Case 3: POST where the caller already set Transfer-Encoding —
-   --  Request.Write must not overwrite the framing decision.
+   --  Case 3: POST where the caller set Transfer-Encoding — v1 does
+   --  not chunk-encode request bodies, so Request.Write transcribing
+   --  Body_B verbatim would produce malformed wire. Expect a clean
+   --  Protocol_Error rather than silently-invalid bytes on the wire.
    declare
       T    : Transport;
       Req  : AHT.HTTP.Request.Request_Type;
@@ -211,18 +213,14 @@ begin
       Req.Headers.Set ("transfer-encoding", "chunked");
       Req.Body_B.Append (16#41#);  --  "A"
 
-      Req.Write (T);
-
-      declare
-         Wire : constant String := Written_To_String (T);
       begin
-         if Contains (Wire, "content-length") then
-            Fail ("TE: Content-Length injected despite caller's "
-                  & "transfer-encoding: """ & Wire & """");
-         end if;
-         if not Contains (Wire, "transfer-encoding: chunked" & ASCII.CR & ASCII.LF) then
-            Fail ("TE: caller's Transfer-Encoding lost: """ & Wire & """");
-         end if;
+         Req.Write (T);
+         Fail ("TE-request: Write returned normally");
+      exception
+         when AHT.HTTP.Protocol_Error => null;
+         when E : others =>
+            Fail ("TE-request: wrong exception: "
+                  & Ada.Exceptions.Exception_Name (E));
       end;
    end;
 
@@ -372,6 +370,161 @@ begin
       end if;
       if Natural (Resp.Body_B.Length) /= 0 then
          Fail ("no-reason: body length ="
+               & Natural'Image (Natural (Resp.Body_B.Length)));
+      end if;
+   end;
+
+   --  Case 11: 101 Switching Protocols. Body framing must not run:
+   --  the bytes after CRLFCRLF belong to the upgraded protocol
+   --  (e.g. a WebSocket frame). Load a "frame" after the headers
+   --  and verify (a) the response body is empty, (b) the transport
+   --  still has those bytes available for the next Read.
+   declare
+      T    : Transport;
+      Resp : AHT.HTTP.Response.Response_Type;
+      Leftover : AHT.Bytes.Byte_Array (1 .. 8);
+      Last     : Natural;
+   begin
+      Load (T,
+            "HTTP/1.1 101 Switching Protocols" & ASCII.CR & ASCII.LF
+            & "Upgrade: websocket" & ASCII.CR & ASCII.LF
+            & "Connection: Upgrade" & ASCII.CR & ASCII.LF
+            & ASCII.CR & ASCII.LF
+            & "FRAME001");
+      Resp.Read (T);
+
+      if Resp.Status /= 101 then
+         Fail ("101: status =" & Resp.Status'Image);
+      end if;
+      if Natural (Resp.Body_B.Length) /= 0 then
+         Fail ("101: body not empty, length ="
+               & Natural'Image (Natural (Resp.Body_B.Length)));
+      end if;
+      T.Read (Leftover, Last);
+      if Last /= Leftover'First + 7 then
+         Fail ("101: post-header bytes consumed; Last =" & Last'Image);
+      else
+         declare
+            S : String (1 .. 8);
+         begin
+            for I in S'Range loop
+               S (I) := Character'Val
+                 (Natural (Leftover (Leftover'First + I - 1)));
+            end loop;
+            if S /= "FRAME001" then
+               Fail ("101: next bytes corrupted: """ & S & """");
+            end if;
+         end;
+      end if;
+   end;
+
+   --  Case 12: 204 No Content with no framing headers. Without the
+   --  no-body short-circuit, the EOF fallback would consume any
+   --  bytes that follow (e.g. the status line of the next response
+   --  on a persistent connection). Assert the body is empty and the
+   --  trailing bytes stay on the wire.
+   declare
+      T    : Transport;
+      Resp : AHT.HTTP.Response.Response_Type;
+      Leftover : AHT.Bytes.Byte_Array (1 .. 8);
+      Last     : Natural;
+   begin
+      Load (T,
+            "HTTP/1.1 204 No Content" & ASCII.CR & ASCII.LF
+            & ASCII.CR & ASCII.LF
+            & "NEXTRESP");
+      Resp.Read (T);
+
+      if Resp.Status /= 204 then
+         Fail ("204-no-CL: status =" & Resp.Status'Image);
+      end if;
+      if Natural (Resp.Body_B.Length) /= 0 then
+         Fail ("204-no-CL: body non-empty, length ="
+               & Natural'Image (Natural (Resp.Body_B.Length)));
+      end if;
+      T.Read (Leftover, Last);
+      if Last /= Leftover'First + 7 then
+         Fail ("204-no-CL: trailing bytes consumed; Last =" & Last'Image);
+      end if;
+   end;
+
+   --  Case 13: 204 with an erroneous Content-Length: 5 plus five
+   --  "body" bytes. Per RFC 7230 §3.3.3 the CL must be ignored;
+   --  those five bytes must remain on the wire for the next parse.
+   declare
+      T    : Transport;
+      Resp : AHT.HTTP.Response.Response_Type;
+      Leftover : AHT.Bytes.Byte_Array (1 .. 5);
+      Last     : Natural;
+   begin
+      Load (T,
+            "HTTP/1.1 204 No Content" & ASCII.CR & ASCII.LF
+            & "Content-Length: 5" & ASCII.CR & ASCII.LF
+            & ASCII.CR & ASCII.LF
+            & "hello");
+      Resp.Read (T);
+
+      if Resp.Status /= 204 then
+         Fail ("204-bad-CL: status =" & Resp.Status'Image);
+      end if;
+      if Natural (Resp.Body_B.Length) /= 0 then
+         Fail ("204-bad-CL: body non-empty, length ="
+               & Natural'Image (Natural (Resp.Body_B.Length)));
+      end if;
+      T.Read (Leftover, Last);
+      if Last /= Leftover'First + 4 then
+         Fail ("204-bad-CL: erroneous body consumed; Last =" & Last'Image);
+      end if;
+   end;
+
+   --  Case 14: 205 Reset Content — same no-body rule as 204. An
+   --  erroneous `Content-Length: 4` with four "body" bytes must be
+   --  ignored (RFC 9110 §15.3.6 "The 205 response MUST NOT include
+   --  content"); those bytes remain on the wire.
+   declare
+      T    : Transport;
+      Resp : AHT.HTTP.Response.Response_Type;
+      Leftover : AHT.Bytes.Byte_Array (1 .. 4);
+      Last     : Natural;
+   begin
+      Load (T,
+            "HTTP/1.1 205 Reset Content" & ASCII.CR & ASCII.LF
+            & "Content-Length: 4" & ASCII.CR & ASCII.LF
+            & ASCII.CR & ASCII.LF
+            & "keep");
+      Resp.Read (T);
+
+      if Resp.Status /= 205 then
+         Fail ("205-bad-CL: status =" & Resp.Status'Image);
+      end if;
+      if Natural (Resp.Body_B.Length) /= 0 then
+         Fail ("205-bad-CL: body non-empty, length ="
+               & Natural'Image (Natural (Resp.Body_B.Length)));
+      end if;
+      T.Read (Leftover, Last);
+      if Last /= Leftover'First + 3 then
+         Fail ("205-bad-CL: erroneous body consumed; Last =" & Last'Image);
+      end if;
+   end;
+
+   --  Case 15: 304 Not Modified with an erroneous Transfer-Encoding:
+   --  chunked. Must not invoke the chunked decoder.
+   declare
+      T    : Transport;
+      Resp : AHT.HTTP.Response.Response_Type;
+   begin
+      Load (T,
+            "HTTP/1.1 304 Not Modified" & ASCII.CR & ASCII.LF
+            & "Transfer-Encoding: chunked" & ASCII.CR & ASCII.LF
+            & "ETag: ""abc""" & ASCII.CR & ASCII.LF
+            & ASCII.CR & ASCII.LF);
+      Resp.Read (T);
+
+      if Resp.Status /= 304 then
+         Fail ("304: status =" & Resp.Status'Image);
+      end if;
+      if Natural (Resp.Body_B.Length) /= 0 then
+         Fail ("304: body non-empty, length ="
                & Natural'Image (Natural (Resp.Body_B.Length)));
       end if;
    end;

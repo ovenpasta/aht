@@ -84,12 +84,18 @@ insertion order, blank line, body. Header names are written in
 their stored lowercase form (RFC 7230 §3.2 allows it; case is
 insensitive on the wire).
 
-If `Body_B` is non-empty and the caller did not set either
-`Content-Length` or `Transfer-Encoding`, `Write` synthesises a
-`Content-Length` so the request is always framed. It does **not**
-invent `Host`, `User-Agent`, `Connection`, or `Authorization`:
-routing and policy headers stay the caller's job (the `Client`
-layer above is the one that merges them in).
+If `Body_B` is non-empty and the caller did not set `Content-Length`,
+`Write` synthesises a `Content-Length` so the request is always
+framed. It does **not** invent `Host`, `User-Agent`, `Connection`,
+or `Authorization`: routing and policy headers stay the caller's job
+(the `Client` layer above is the one that merges them in).
+
+If the caller sets `Transfer-Encoding`, `Write` raises
+`Protocol_Error`. v1 does not do chunked request bodies — `Write`
+transcribes `Body_B` verbatim, and emitting a TE-chunked header
+with raw body bytes would produce malformed wire that the peer
+would reject (or worse, misparse). Streaming upload is a separate
+API still to land.
 
 ## `AHT.HTTP.Response`
 
@@ -109,6 +115,16 @@ procedure Read
 `Read` parses a status line (`HTTP/1.x SP status SP [reason]`),
 header lines until a blank line, then picks body framing:
 
+0. `Status` in 1xx / 204 / 205 / 304 → no body. The message ends
+   at the empty line; any `Content-Length` or `Transfer-Encoding`
+   the peer sent is ignored per RFC 7230 §3.3.3 (and RFC 9110
+   §15.3.6 for 205). This is load-bearing for **101 Switching
+   Protocols** (bytes after CRLFCRLF belong to the upgraded
+   protocol, e.g. a WebSocket frame — reading them as body would
+   consume the first frame) and for 204/205/304 on
+   `Connection: close` streams (otherwise the EOF fallback would
+   block until the peer closes even though the message is already
+   complete).
 1. `Transfer-Encoding: chunked` → `AHT.HTTP.IO.Read_Chunked_Body`.
 2. `Content-Length: N` → `Read_N` for exactly *N* bytes.
 3. otherwise → read until the peer closes (for

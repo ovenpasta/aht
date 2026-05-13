@@ -184,6 +184,25 @@ package body AHT.HTTP.Response is
          end;
       end loop;
 
+      --  RFC 7230 §3.3.3 rule 1 + RFC 9110 §15.3.6: 1xx, 204, 205,
+      --  and 304 responses never carry a message body. The empty
+      --  line after the header block ends the message regardless of
+      --  any Content-Length or Transfer-Encoding the peer may have
+      --  erroneously sent. This is load-bearing for two cases:
+      --    * 101 Switching Protocols — bytes after CRLFCRLF belong to
+      --      the new protocol (e.g. WebSocket frames). Reading them
+      --      as HTTP body would consume the first frame.
+      --    * 204 / 205 / 304 on a Connection: close stream with no
+      --      framing header — the EOF fallback would block until the
+      --      peer closes, even though the message is complete.
+      if Self.Status in 100 .. 199
+        or else Self.Status = 204
+        or else Self.Status = 205
+        or else Self.Status = 304
+      then
+         return;
+      end if;
+
       --  Body framing: chunked wins, then Content-Length, then EOF.
       if Self.Headers.Contains ("transfer-encoding") then
          declare

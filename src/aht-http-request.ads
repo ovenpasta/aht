@@ -25,12 +25,19 @@ package AHT.HTTP.Request is
    --
    --  Headers are written in their stored lowercase form (RFC 7230
    --  §3.2 lets us: field names are case-insensitive on the wire).
-   --  If `Body_B` is non-empty and `Self.Headers` contains neither
-   --  `Content-Length` nor `Transfer-Encoding`, a `Content-Length:
-   --  {Body_B'Length}` line is synthesised so the request is not
-   --  a framing error.
+   --  If `Body_B` is non-empty and `Self.Headers` does not already
+   --  contain `Content-Length`, a `Content-Length: {Body_B'Length}`
+   --  line is synthesised so the request is always framed.
    --
-   --  The caller is responsible for `Host`, `User-Agent`,
+   --  Raises `AHT.HTTP.Protocol_Error` if `Self.Headers` contains
+   --  `Transfer-Encoding`: v1 does not do chunked request bodies.
+   --  `Write` transcribes `Body_B` verbatim, so a TE header with no
+   --  matching encoder would emit malformed wire bytes — a clean
+   --  refusal beats a plausible-looking request the peer will
+   --  reject (or worse, misparse). Streaming upload will be a
+   --  separate API.
+   --
+   --  The caller remains responsible for `Host`, `User-Agent`,
    --  `Connection`, `Authorization`, and any other policy headers —
    --  `Write` transcribes what's in the record, it does not invent
    --  routing.

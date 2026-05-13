@@ -24,7 +24,13 @@ package AHT.HTTP.Response is
    --     \r\n
    --     {body}
    --
-   --  Body framing (per RFC 7230 §3.3.3):
+   --  Body framing (per RFC 7230 §3.3.3 and RFC 9110 §15.3.6):
+   --    0. 1xx / 204 / 205 / 304 ⇒ no body, regardless of any
+   --       framing header the peer sent. The message ends at the
+   --       empty line. Matters for 101 (next bytes are the upgraded
+   --       protocol — e.g. WebSocket frames — not HTTP body) and
+   --       for 204/205/304 on `Connection: close` streams (the EOF
+   --       fallback would otherwise block until the peer closes).
    --    1. `Transfer-Encoding: chunked` ⇒ chunked-decode via
    --       `AHT.HTTP.IO.Read_Chunked_Body`.
    --    2. else `Content-Length: N` ⇒ read exactly N bytes.
