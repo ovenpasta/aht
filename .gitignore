@@ -26,6 +26,10 @@ scratch/
 /review_encoding
 /review_urls
 
+# Python bytecode (tests/server/server.py)
+__pycache__/
+*.pyc
+
 # Editor / OS
 *.swp
 *~
