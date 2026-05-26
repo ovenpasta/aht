@@ -529,6 +529,39 @@ begin
       end if;
    end;
 
+   --  Case 16: HEAD response. The peer typically advertises the
+   --  GET-equivalent Content-Length but sends no body bytes. With
+   --  Method => HEAD, Response.Read must skip body framing entirely;
+   --  any bytes after CRLFCRLF (e.g. a next response on a persistent
+   --  connection) must stay on the wire. Without the suppression the
+   --  Content-Length path would try to Read_N and either hang or
+   --  consume the next response's status line.
+   declare
+      T    : Transport;
+      Resp : AHT.HTTP.Response.Response_Type;
+      Leftover : AHT.Bytes.Byte_Array (1 .. 8);
+      Last     : Natural;
+   begin
+      Load (T,
+            "HTTP/1.1 200 OK" & ASCII.CR & ASCII.LF
+            & "Content-Length: 1234" & ASCII.CR & ASCII.LF
+            & ASCII.CR & ASCII.LF
+            & "NEXTRESP");
+      Resp.Read (T, Method => AHT.HTTP.Methods.HEAD);
+
+      if Resp.Status /= 200 then
+         Fail ("HEAD: status =" & Resp.Status'Image);
+      end if;
+      if Natural (Resp.Body_B.Length) /= 0 then
+         Fail ("HEAD: body non-empty, length ="
+               & Natural'Image (Natural (Resp.Body_B.Length)));
+      end if;
+      T.Read (Leftover, Last);
+      if Last /= Leftover'First + 7 then
+         Fail ("HEAD: trailing bytes consumed; Last =" & Last'Image);
+      end if;
+   end;
+
    if Failures = 0 then
       Put_Line ("test_http_wire: OK");
       Ada.Command_Line.Set_Exit_Status (0);

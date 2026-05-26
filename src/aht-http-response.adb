@@ -162,8 +162,9 @@ package body AHT.HTTP.Response is
    end Read_Until_EOF;
 
    procedure Read
-     (Self : out Response_Type;
-      T    : in out AHT.Transport.Transport_Type'Class) is
+     (Self   : out Response_Type;
+      T      : in out AHT.Transport.Transport_Type'Class;
+      Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET) is
    begin
       --  Start from a default state so repeated Reads can't leak
       --  residue from a prior response.
@@ -184,24 +185,31 @@ package body AHT.HTTP.Response is
          end;
       end loop;
 
-      --  RFC 7230 §3.3.3 rule 1 + RFC 9110 §15.3.6: 1xx, 204, 205,
-      --  and 304 responses never carry a message body. The empty
-      --  line after the header block ends the message regardless of
-      --  any Content-Length or Transfer-Encoding the peer may have
-      --  erroneously sent. This is load-bearing for two cases:
+      --  RFC 7230 §3.3.3 rule 1 + RFC 9110 §15.3.6: HEAD responses
+      --  never carry a body (the peer may still send Content-Length
+      --  to advertise the GET body size, and we must not consume any
+      --  bytes after CRLFCRLF). Same rule covers 1xx, 204, 205, and
+      --  304. The empty line after the header block ends the message
+      --  regardless of any framing header. Load-bearing for:
+      --    * HEAD — the peer typically sends the GET Content-Length;
+      --      reading it would block forever (no body coming).
       --    * 101 Switching Protocols — bytes after CRLFCRLF belong to
-      --      the new protocol (e.g. WebSocket frames). Reading them
-      --      as HTTP body would consume the first frame.
+      --      the upgraded protocol (e.g. WebSocket frames).
       --    * 204 / 205 / 304 on a Connection: close stream with no
       --      framing header — the EOF fallback would block until the
       --      peer closes, even though the message is complete.
-      if Self.Status in 100 .. 199
-        or else Self.Status = 204
-        or else Self.Status = 205
-        or else Self.Status = 304
-      then
-         return;
-      end if;
+      declare
+         use type AHT.HTTP.Methods.Method_Type;
+      begin
+         if Method = AHT.HTTP.Methods.HEAD
+           or else Self.Status in 100 .. 199
+           or else Self.Status = 204
+           or else Self.Status = 205
+           or else Self.Status = 304
+         then
+            return;
+         end if;
+      end;
 
       --  Body framing: chunked wins, then Content-Length, then EOF.
       if Self.Headers.Contains ("transfer-encoding") then

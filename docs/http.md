@@ -11,7 +11,7 @@ Packages under `AHT.HTTP`:
 | `AHT.HTTP.Request` | implemented (wire write) |
 | `AHT.HTTP.Response` | implemented (wire read) |
 | `AHT.HTTP.IO` | implemented |
-| `AHT.HTTP.Client` | stubbed |
+| `AHT.HTTP.Client` | implemented (HTTP, sync); HTTPS pending TLS |
 
 Common exceptions (in `AHT.HTTP`): `HTTP_Error`, `Protocol_Error`,
 `Handshake_Error`.
@@ -108,23 +108,28 @@ type Response_Type is tagged record
 end record;
 
 procedure Read
-  (Self : out Response_Type;
-   T    : in out AHT.Transport.Transport_Type'Class);
+  (Self   : out Response_Type;
+   T      : in out AHT.Transport.Transport_Type'Class;
+   Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET);
 ```
 
 `Read` parses a status line (`HTTP/1.x SP status SP [reason]`),
 header lines until a blank line, then picks body framing:
 
-0. `Status` in 1xx / 204 / 205 / 304 → no body. The message ends
-   at the empty line; any `Content-Length` or `Transfer-Encoding`
-   the peer sent is ignored per RFC 7230 §3.3.3 (and RFC 9110
-   §15.3.6 for 205). This is load-bearing for **101 Switching
-   Protocols** (bytes after CRLFCRLF belong to the upgraded
-   protocol, e.g. a WebSocket frame — reading them as body would
-   consume the first frame) and for 204/205/304 on
-   `Connection: close` streams (otherwise the EOF fallback would
-   block until the peer closes even though the message is already
-   complete).
+0. `Method = HEAD`, or `Status` in 1xx / 204 / 205 / 304 → no body.
+   The message ends at the empty line; any `Content-Length` or
+   `Transfer-Encoding` the peer sent is ignored per RFC 7230 §3.3.3
+   (and RFC 9110 §15.3.6 for 205). This is load-bearing for:
+   - **HEAD** — the peer usually advertises the GET-equivalent
+     `Content-Length`; the codec can't infer the request method,
+     so the caller passes it. Reading the announced bytes would
+     block forever (no body is coming).
+   - **101 Switching Protocols** — bytes after CRLFCRLF belong to
+     the upgraded protocol, e.g. a WebSocket frame; reading them
+     as body would consume the first frame.
+   - 204 / 205 / 304 on `Connection: close` — the EOF fallback
+     would otherwise block until the peer closes even though the
+     message is already complete.
 1. `Transfer-Encoding: chunked` → `AHT.HTTP.IO.Read_Chunked_Body`.
 2. `Content-Length: N` → `Read_N` for exactly *N* bytes.
 3. otherwise → read until the peer closes (for
@@ -176,7 +181,7 @@ reader forever.
   non-hex size, size overflow past `Natural'Last`, or chunk-data
   not followed by bare CRLF.
 
-## `AHT.HTTP.Client` — to be implemented
+## `AHT.HTTP.Client`
 
 ```ada
 type Client_Type is tagged record
@@ -195,11 +200,52 @@ function  Get  (Self, URL) return Response_Type;
 
 - **Synchronous, one request per call.** Each `Send` owns a fresh
   transport for the duration of the call, so multiple tasks can share
-  one `Client_Type` without extra synchronization.
-- **Scheme dispatch**: `http://` → `AHT.Transport.TCP`; `https://` →
-  `AHT.Transport.TLS` with `CA_Path` / `Insecure`.
-- **Wire**: `Connection: close` in v1. No keep-alive, no HTTP/2.
-- **Body**: reads via `Content-Length` *or* chunked transfer encoding.
-- **Errors**: non-2xx status is **not** an exception — the `Response`
-  carries the status. `HTTP_Error` / `Protocol_Error` are for
-  malformed wire data or transport failures.
+  one `Client_Type` without extra synchronization. `Connection: close`
+  in v1 — no keep-alive, no HTTP/2.
+
+- **Scheme dispatch** on `Req.Target.Scheme`:
+  - `http://` → `AHT.Transport.TCP`.
+  - `https://` → not yet wired; raises `HTTP_Error` until mbedTLS
+    integration lands (planned `AHT.Transport.TLS` with `CA_Path` /
+    `Insecure`).
+  - `ws://` / `wss://` → raises `HTTP_Error`; route those through
+    `AHT.Websocket.Client`.
+
+- **Header merging.** `Send` builds a working copy of `Req` and fills
+  in three classes of headers, *only where not already present*, so
+  the order of precedence is `Req` > `Default_Headers` > auto:
+  1. Each entry of `Self.Default_Headers` whose name is absent from
+     `Req.Headers` is appended (preserving multi-valued defaults
+     like repeated `Accept`).
+  2. `Host` from the URL (`host[:port]`, omitting the default port).
+  3. `User-Agent` from `Self.User_Agent`.
+  4. `Connection: close`.
+
+- **Interim 1xx loop.** `Send` reads responses in a loop and only
+  exits when the status is not 1xx. `101 Switching Protocols` is
+  the one **terminal** 1xx — it returns as-is with the post-header
+  bytes still buffered on the transport for a WebSocket layer to
+  consume. `100 Continue`, `103 Early Hints`, and friends are read
+  and discarded.
+
+- **HEAD bodies.** `Req.Method` is threaded into `Response.Read` so
+  HEAD responses skip body framing even when the peer sends a
+  Content-Length (which it commonly does, advertising the
+  GET-equivalent size).
+
+- **Deadline.** When `Timeout_Seconds > 0`, `Send` calls
+  `Set_Read_Deadline` on the transport before writing. The deadline
+  is the wall-clock budget for the whole response (status line +
+  headers + body), not per-`Read`.
+
+- **Body framing.** Inherited from `Response.Read` — chunked >
+  Content-Length > read-until-EOF for `Connection: close`.
+
+- **Errors.** Non-2xx status is **not** an exception — `Resp.Status`
+  carries it. Exceptions are reserved for malformed wire or
+  transport failure: `HTTP_Error`, `Protocol_Error`,
+  `Transport_Error`, `Timeout_Error`, `Aborted_Error`. The transport
+  is closed in every exit path (success or exception).
+
+- **`Get (URL)`** — convenience: parses `URL`, builds a GET with no
+  body, calls `Send`. Raises `AHT.URL.Parse_Error` on malformed URL.
