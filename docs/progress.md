@@ -1,7 +1,7 @@
 # Progress
 
 Snapshot of implementation status against [`plan.md`](plan.md).
-Last updated: 2026-05-26.
+Last updated: 2026-05-26 (Python HTTP fixture + integration tests).
 
 ## Task list (from the plan)
 
@@ -20,8 +20,8 @@ Last updated: 2026-05-26.
 | 11 | `AHT.Transport.TLS` | stubbed |
 | 12 | `AHT.Websocket.Frames` codec | stubbed |
 | 13 | `AHT.Websocket.Client` (receiver task + POs) | stubbed |
-| 14 | Python test servers + cert generation | not started |
-| 15 | Ada integration tests + `run_tests.sh` | partial (8 tests, no run_tests.sh yet) |
+| 14 | Python test servers + cert generation | partial (plain HTTP fixture done; TLS / WS servers + certs to come) |
+| 15 | Ada integration tests + `run_tests.sh` | done for HTTP (12 tests; orchestrator brings up the fixture and runs all binaries) |
 
 "Stubbed" = spec is final, body compiles and raises a
 Not-Implemented exception if called.
@@ -84,6 +84,30 @@ Not-Implemented exception if called.
     `Self.User_Agent` while an explicit `Connection: keep-alive`
     on the request beats the auto `Connection: close` default;
     `wss://` URL passed to `Send` raises `HTTP_Error`.
+
+End-to-end integration suite against `tests/server/server.py`
+(plain HTTP on 127.0.0.1:8764, started by `tests/run_tests.sh`):
+
+  - `tests/bin/test_http_get` — GET `/hello`, asserts 200 +
+    `text/plain` + body `"hello, world\n"`.
+  - `tests/bin/test_http_chunked` — GET `/chunked` (three uneven
+    chunks `"AHT "`, `"rocks"`, `"!\n"`), asserts the decoder
+    reassembles them to `"AHT rocks!\n"` and that no
+    `Content-Length` leaks into the response headers.
+  - `tests/bin/test_http_post` — POST `/echo` with a
+    form-urlencoded body; asserts the server echoes the body and
+    the round-tripped `Content-Type`.
+  - `tests/bin/test_http_auth` — GET `/protected` without
+    `Authorization` → 401 with `WWW-Authenticate`; same URL with
+    `Authorization: Bearer …` → 200 echoing the header value
+    verbatim (so a server that flipped on header presence alone
+    wouldn't pass — the echo proves AHT actually transmitted the
+    value).
+
+`tests/run_tests.sh` builds the library and tests, starts the
+fixture (waiting on the `READY` line for sync, killing it on
+exit), runs every binary in `tests/bin/`, and reports
+pass/fail.
   - `tests/bin/test_http_io` — mock-transport unit test of HTTP.IO:
     `Write_All` forwards bytes (empty is a no-op); `Read_Line`
     returns status / header lines without CRLF and leaves the
@@ -118,27 +142,24 @@ are treated as byte sequences (UTF-8 is caller's responsibility).
 
 In the order the plan specifies:
 
-1. Python plain-HTTP test server + integration tests for GET,
-   chunked, POST, auth — the in-process Ada server in
-   `test_http_client` covers the wire-glue cases that don't need a
-   real protocol stack on the peer (Content-Length / HEAD / 1xx
-   loop / header precedence), but chunked-transfer responses,
-   gzip, redirects, and `Authorization` should be exercised
-   against a real server.
-2. `Cancel_Handle` / streaming / async surfaces of task 8 on top
+1. `Cancel_Handle` / streaming / async surfaces of task 8 on top
    of the existing sync `Client.Send`. Cancel maps to
-   `Transport.Abort_Pending`; the transport hooks are in place.
-3. Real `scripts/fetch_mbedtls.sh` + `scripts/regen_mbedtls_bindings.sh`
+   `Transport.Abort_Pending` (already wired and tested in
+   `test_tcp`); streaming/async layer on top of the shared sync
+   core.
+2. Real `scripts/fetch_mbedtls.sh` + `scripts/regen_mbedtls_bindings.sh`
    (`gcc -fdump-ada-spec` over mbedTLS 2.28.9 headers, curated into
    `src/`).
-4. `AHT.Transport.TLS` + HTTPS wiring in `Client.Send` + HTTPS
+3. `AHT.Transport.TLS` + HTTPS wiring in `Client.Send` + HTTPS
    integration test. `Transport.TLS.Abort_Pending` aborts the
-   underlying TCP selector.
-5. `AHT.Websocket.Frames` RFC 6455 codec (unit-testable without
+   underlying TCP selector. Will need `tests/server/server_tls.py`
+   and `tests/server/generate_cert.sh` (the orchestrator can take
+   on a venv step there if pip deps appear).
+4. `AHT.Websocket.Frames` RFC 6455 codec (unit-testable without
    sockets).
-6. `AHT.Websocket.Client` — receiver task, `Send_Guard`, `Inbox`,
+5. `AHT.Websocket.Client` — receiver task, `Send_Guard`, `Inbox`,
    `State` POs; reuse `AHT.HTTP.*` for the upgrade (the 101
    carve-out in the 1xx loop is in place).
-7. Python WS / WSS servers + WebSocket integration tests.
-8. `tests/run_tests.sh` orchestrating venv, servers, build, and
-   binaries.
+6. Python WS / WSS servers + WebSocket integration tests; pin
+   `websockets>=12.0` in `tests/server/requirements.txt` and
+   teach `run_tests.sh` to create the venv.

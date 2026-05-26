@@ -1,0 +1,6 @@
+# AHT test-server dependencies.
+#
+# Plain HTTP is served by tests/server/server.py using only the
+# Python standard library (http.server), so this file is empty
+# until the WebSocket server lands. When that arrives this file
+# will pin `websockets>=12.0` for tests/server/server_ws.py.
