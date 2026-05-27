@@ -1,8 +1,8 @@
 # Progress
 
 Snapshot of implementation status against [`plan.md`](plan.md).
-Last updated: 2026-05-27 (Websocket.Client.Connect handshake +
-Python WS fixture + base64 + venv-aware run_tests.sh).
+Last updated: 2026-05-27 (Websocket.Client receiver task,
+Send_Text/Binary/Ping, Receive, RFC 6455 §1.4 close handshake).
 
 ## Task list (from the plan)
 
@@ -20,9 +20,9 @@ Python WS fixture + base64 + venv-aware run_tests.sh).
 | 10 | `AHT.Mbedtls` bindings (generate + curate) | not started |
 | 11 | `AHT.Transport.TLS` | stubbed |
 | 12 | `AHT.Websocket.Frames` codec | done (direction-neutral encode + decode with masking, 7/16/64-bit lengths, control-frame validation including Close-payload structural + code-range checks, RSV-bit rejection, incomplete-buffer signalling) |
-| 13 | `AHT.Websocket.Client` (receiver task + POs) | partial (Connect handshake done — generates Sec-WebSocket-Key, validates 101 + Upgrade + Connection + Sec-WebSocket-Accept; Send_*/Receive/Close still stubbed pending the receiver task) |
+| 13 | `AHT.Websocket.Client` (receiver task + POs) | done for plain WS — receiver task with frame reassembly + auto-Pong + RFC 6455 §1.4 close handshake on top of Send_Guard / Inbox / State POs; Send_Text / Send_Binary / Send_Ping / Receive / Close all wired |
 | 14 | Python test servers + cert generation | partial (plain HTTP + plain WS fixtures done; TLS fixtures + certs to come) |
-| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + WS handshake (17 tests; orchestrator creates a venv on first run, installs the requirements, brings up both fixtures, and runs all binaries) |
+| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + plain WS (18 tests; orchestrator creates a venv on first run, installs the requirements, brings up both fixtures, and runs all binaries) |
 
 "Stubbed" = spec is final, body compiles and raises a
 Not-Implemented exception if called.
@@ -127,8 +127,26 @@ In-process Ada-only test of the cancel surface:
     `Is_Cancelled` flips to true). (4) **Fresh handle**:
     `Is_Cancelled` is false on a never-cancelled handle.
 
+End-to-end WebSocket round-trip against the Python `websockets`
+echo fixture (commit 2 of the WS client work):
+
+  - `tests/bin/test_ws_echo` — seven cases. (1–5) Text +
+    Binary round-trips, idle-connection `Receive` timeout
+    surfacing `AHT.Transport.Timeout_Error`, `Receive` after
+    `Close` raising `Closed_Error`, and three-message ordering.
+    (6) **Single-use lifecycle**: after `Close`, a second
+    `Connect` on the same `Client_Type` raises
+    `Handshake_Error` upfront — no second TCP dial, no
+    Tasking_Error from the one-shot receiver. (7) **Callback
+    firing**: `Set_On_Message` + `Set_On_Close` install
+    callbacks that fire from the receiver task. A round-trip
+    + clean Close drives `On_Message` once (payload matches
+    what was sent) and `On_Close` once. The push API runs
+    alongside the pull `Receive`, so both modes see the
+    message.
+
 WebSocket handshake integration test (commit 1 of the WS client
-work — frame I/O lands in commit 2):
+work — frame I/O landed in commit 2):
 
   - `tests/bin/test_ws_handshake` — eleven cases. (1) **RFC 4648
     §10 base64 vectors** ("" / "f" / "fo" / "foo" / "foob" /
@@ -147,11 +165,12 @@ work — frame I/O lands in commit 2):
     `Sec-WebSocket-Key` via Extra_Headers is silently ignored —
     the handshake still succeeds because the client's
     internally-generated Key is what the server's Accept echoes.
-    Cases 8–11 use an **in-process Ada "fake handshake server"**
+    Cases 8–12 use an **in-process Ada "fake handshake server"**
     that reads the client's `Sec-WebSocket-Key`, computes the
     correct Accept (so the response is valid up to the
     subprotocol check), and emits a 101 with a test-controlled
-    extra header line. (8) **Unsolicited subprotocol** — server
+    extra header line — and optionally a test-controlled chunk
+    of post-handshake bytes (case 12 below). (8) **Unsolicited subprotocol** — server
     returns `Sec-WebSocket-Protocol: evil-proto` when the client
     offered none → `Handshake_Error`. (9) **Not-offered
     subprotocol** — client offers `good-proto-v1, good-proto-v2`
@@ -159,8 +178,17 @@ work — frame I/O lands in commit 2):
     **Two Sec-WebSocket-Protocol header lines** (RFC §4.1 allows
     at most one) → `Handshake_Error`. (11) **Positive subprotocol
     negotiation** — client offers `aht.echo.v1, aht.echo.v2`,
-    server picks `aht.echo.v1`; Connect succeeds, `Is_Open` is
-    true, and `Selected_Subprotocol` returns `"aht.echo.v1"`.
+    server picks `aht.echo.v1`; Connect succeeds and
+    `Selected_Subprotocol` returns `"aht.echo.v1"`. (12)
+    **Server sends a masked frame** post-handshake — RFC 6455
+    §5.1 forbids server-side masking; the receiver task
+    rejects it, marks the connection Closed, and `Receive`
+    raises `Closed_Error` instead of delivering the "evil"
+    payload. (13) **`Close (Timeout => 0.1)` honours the
+    knob** — the fake server holds the socket silently for
+    2 s after the handshake; `Close` falls through to
+    `Abort_Pending` and returns in well under 0.5 s instead
+    of waiting the default 5.0 s.
 
 Pure unit test of the WS framing codec (no sockets — works
 entirely over `Byte_Array` / `Byte_Vector`):
@@ -274,22 +302,21 @@ are treated as byte sequences (UTF-8 is caller's responsibility).
 
 In the order the plan specifies:
 
-1. Finish `AHT.Websocket.Client` (commit 2 of the WS work):
-   receiver task with frame reassembly + auto-Pong, `Send_Guard`
-   PO, `Inbox` PO, `State` PO, RFC 6455 §1.4 close handshake.
-   `Send_Text` / `Send_Binary` / `Receive` / `Close` fill in
-   over those. `test_ws_echo.adb` will exercise the round trip
-   against the existing `server_ws.py`.
-2. Real `scripts/fetch_mbedtls.sh` + `scripts/regen_mbedtls_bindings.sh`
+1. Real `scripts/fetch_mbedtls.sh` + `scripts/regen_mbedtls_bindings.sh`
    (`gcc -fdump-ada-spec` over mbedTLS 2.28.9 headers, curated into
    `src/`).
-4. `AHT.Transport.TLS` + HTTPS wiring in `Client.Send` + HTTPS
+2. `AHT.Transport.TLS` + HTTPS wiring in `Client.Send` + HTTPS
    integration test. `Transport.TLS.Abort_Pending` aborts the
    underlying TCP selector. Will need `tests/server/server_tls.py`
    and `tests/server/generate_cert.sh`.
-5. WSS server + WebSocket TLS integration tests once TLS is in.
+3. `wss://` wiring in `Websocket.Client.Connect` + WS-over-TLS
+   integration test once TLS is in.
 
-Possible follow-ups that didn't make v1: `Send_Streaming_Async`
-(buffered async is here; streaming async wasn't worth the extra
-surface vs. "spawn your own task that calls `Send_Streaming`"),
-re-usable `Async_Handle` (currently single-use).
+Possible follow-ups that didn't make v1: HTTP
+`Send_Streaming_Async` (buffered async is here; streaming async
+wasn't worth the extra surface vs. "spawn your own task that
+calls `Send_Streaming`"), re-usable `Async_Handle` (currently
+single-use). For WebSocket: push-mode callbacks (the API is
+plumbed but the receiver doesn't fire them — pull `Receive` is
+the only delivery path in v1); user-driven `Send_Ping` is
+implemented but isn't covered by `test_ws_echo` yet.

@@ -12,6 +12,7 @@
 --    * wss://… — refused with Handshake_Error pending TLS.
 --    * http://…/… — refused with Handshake_Error (not a WS URL).
 
+with Ada.Calendar; use Ada.Calendar;
 with Ada.Characters.Handling;
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -28,6 +29,7 @@ with AHT.HTTP.Headers;
 with AHT.URL;
 with AHT.Websocket;
 with AHT.Websocket.Client;
+with AHT.Websocket.Frames;
 
 procedure Test_WS_Handshake is
 
@@ -107,8 +109,17 @@ procedure Test_WS_Handshake is
    --  header lines come from `Extra` — verbatim, so the test can
    --  inject a malformed or unsolicited Sec-WebSocket-Protocol and
    --  watch the client reject the handshake.
+   --
+   --  After the 101 head section, the server optionally writes
+   --  `Post_Bytes` to the wire so tests of the post-handshake
+   --  receiver path (e.g. "what does the client do when the
+   --  server sends a masked frame?") can inject any frame bytes
+   --  they need.
    task type Fake_Server is
-      entry Configure (Extra_Headers : String);
+      entry Configure
+        (Extra_Headers : String;
+         Post_Bytes    : AHT.Bytes.Byte_Array;
+         Hold_Seconds  : Duration := 0.0);
       entry Get_Port
         (P   : out AHT.URL.Port_Number;
          Err : out Unbounded_String);
@@ -124,9 +135,19 @@ procedure Test_WS_Handshake is
       Setup_Error    : Unbounded_String;
       Runtime_Error  : Unbounded_String;
       Extra          : Unbounded_String;
+      Post           : AHT.Bytes.Byte_Vector;
+      Hold           : Duration := 0.0;
    begin
-      accept Configure (Extra_Headers : String) do
+      accept Configure
+        (Extra_Headers : String;
+         Post_Bytes    : AHT.Bytes.Byte_Array;
+         Hold_Seconds  : Duration := 0.0)
+      do
          Extra := To_Unbounded_String (Extra_Headers);
+         for B of Post_Bytes loop
+            Post.Append (B);
+         end loop;
+         Hold := Hold_Seconds;
       end Configure;
 
       begin
@@ -223,6 +244,37 @@ procedure Test_WS_Handshake is
                         end loop;
                         Send_Socket (Client, R_Buf, Sent);
                      end;
+
+                     --  After the 101 head section, write any
+                     --  configured post-handshake bytes (e.g. a
+                     --  malformed frame to exercise the receiver
+                     --  side).
+                     if Natural (Post.Length) > 0 then
+                        declare
+                           P_Buf : Stream_Element_Array
+                             (1 .. Stream_Element_Offset
+                                     (Post.Length));
+                           Sent  : Stream_Element_Offset;
+                        begin
+                           for I in 1 .. Natural (Post.Length) loop
+                              P_Buf
+                                (Stream_Element_Offset (I)) :=
+                                Stream_Element
+                                  (Post.Element
+                                     (Post.First_Index + I - 1));
+                           end loop;
+                           Send_Socket (Client, P_Buf, Sent);
+                        end;
+                     end if;
+
+                     --  Hold the connection open silently for the
+                     --  configured duration before tearing it
+                     --  down. Lets tests of the client's
+                     --  close-handshake timeout exercise a
+                     --  non-echoing peer.
+                     if Hold > 0.0 then
+                        delay Hold;
+                     end if;
                   end;
                   Shutdown_Socket (Client, Shut_Read_Write);
                   Close_Socket (Client);
@@ -440,7 +492,9 @@ begin
       C        : AHT.Websocket.Client.Client_Type;
       Headers  : AHT.HTTP.Headers.Map;
    begin
-      Server.Configure ("Sec-WebSocket-Protocol: evil-proto");
+      Server.Configure
+        (Extra_Headers => "Sec-WebSocket-Protocol: evil-proto",
+         Post_Bytes    => AHT.Bytes.Byte_Array'(1 .. 0 => 0));
       Server.Get_Port (Port, Setup_Err);
       if Length (Setup_Err) > 0 then
          Fail ("unsolicited: server setup: "
@@ -475,7 +529,9 @@ begin
       C        : AHT.Websocket.Client.Client_Type;
       Headers  : AHT.HTTP.Headers.Map;
    begin
-      Server.Configure ("Sec-WebSocket-Protocol: evil-proto");
+      Server.Configure
+        (Extra_Headers => "Sec-WebSocket-Protocol: evil-proto",
+         Post_Bytes    => AHT.Bytes.Byte_Array'(1 .. 0 => 0));
       Server.Get_Port (Port, Setup_Err);
       if Length (Setup_Err) > 0 then
          Fail ("not-offered: server setup: "
@@ -508,9 +564,11 @@ begin
       Headers  : AHT.HTTP.Headers.Map;
    begin
       Server.Configure
-        ("Sec-WebSocket-Protocol: a"
-         & ASCII.CR & ASCII.LF
-         & "Sec-WebSocket-Protocol: b");
+        (Extra_Headers =>
+           "Sec-WebSocket-Protocol: a"
+           & ASCII.CR & ASCII.LF
+           & "Sec-WebSocket-Protocol: b",
+         Post_Bytes => AHT.Bytes.Byte_Array'(1 .. 0 => 0));
       Server.Get_Port (Port, Setup_Err);
       if Length (Setup_Err) > 0 then
          Fail ("two-proto: server setup: "
@@ -543,7 +601,9 @@ begin
       C        : AHT.Websocket.Client.Client_Type;
       Headers  : AHT.HTTP.Headers.Map;
    begin
-      Server.Configure ("Sec-WebSocket-Protocol: aht.echo.v1");
+      Server.Configure
+        (Extra_Headers => "Sec-WebSocket-Protocol: aht.echo.v1",
+         Post_Bytes    => AHT.Bytes.Byte_Array'(1 .. 0 => 0));
       Server.Get_Port (Port, Setup_Err);
       if Length (Setup_Err) > 0 then
          Fail ("proto-good: server setup: "
@@ -562,9 +622,13 @@ begin
                      & Ada.Exceptions.Exception_Message (E));
          end;
          Server.Wait_Done (Run_Err);
-         if not AHT.Websocket.Client.Is_Open (C) then
-            Fail ("proto-good: Is_Open false after Connect");
-         end if;
+         --  Is_Open is not a stable post-Connect predicate
+         --  against the fake server: it closes the TCP
+         --  connection right after sending the 101, so the
+         --  receiver task races to mark State => Closed.
+         --  Selected_Subprotocol is set during Connect (before
+         --  the receiver starts) and is the meaningful
+         --  assertion for this case.
          if AHT.Websocket.Client.Selected_Subprotocol (C)
             /= "aht.echo.v1"
          then
@@ -573,6 +637,111 @@ begin
                   & """");
          end if;
          AHT.Websocket.Client.Close (C);
+      end if;
+   end;
+
+   --  Case 12: server sends a masked Text frame after the 101.
+   --  RFC 6455 §5.1 forbids server-side masking, so the receiver
+   --  task should reject it and shut the connection. The user
+   --  observes that via Receive raising Closed_Error (the
+   --  receiver Mark_Closed's the Inbox on its way out).
+   declare
+      Server   : Fake_Server;
+      Port     : AHT.URL.Port_Number;
+      Setup_Err, Run_Err : Unbounded_String;
+      C        : AHT.Websocket.Client.Client_Type;
+      Headers  : AHT.HTTP.Headers.Map;
+      Msg      : AHT.Websocket.Client.Message_Type;
+      --  Build the masked frame the same way a (misbehaving)
+      --  server would. Frames.Encode is direction-neutral, so we
+      --  can ask it for Masked=True even though we're emulating
+      --  the server side.
+      Bad_Frame : constant AHT.Bytes.Byte_Array :=
+        AHT.Websocket.Frames.Encode
+          (Hdr =>
+             (FIN     => True,
+              Op      => AHT.Websocket.Text,
+              Masked  => True,
+              Mask_Key => [16#37#, 16#FA#, 16#21#, 16#3D#],
+              others  => <>),
+           Payload => AHT.Bytes.From_String ("evil"));
+   begin
+      Server.Configure
+        (Extra_Headers => "",
+         Post_Bytes    => Bad_Frame);
+      Server.Get_Port (Port, Setup_Err);
+      if Length (Setup_Err) > 0 then
+         Fail ("server-mask: server setup: "
+               & To_String (Setup_Err));
+      else
+         begin
+            AHT.Websocket.Client.Connect
+              (Self          => C,
+               URL           => URL_For (Port),
+               Extra_Headers => Headers);
+         exception
+            when E : others =>
+               Fail ("server-mask: Connect raised "
+                     & Ada.Exceptions.Exception_Name (E));
+         end;
+         Server.Wait_Done (Run_Err);
+
+         --  The receiver should see the masked frame, raise
+         --  Protocol_Error internally, Mark_Closed the Inbox.
+         --  Our Receive then surfaces Closed_Error rather than
+         --  delivering "evil" as a valid message.
+         begin
+            AHT.Websocket.Client.Receive (C, Msg, Timeout => 1.0);
+            Fail ("server-mask: Receive returned without "
+                  & "raising (delivered """
+                  & Integer'Image (Natural (Msg.Payload.Length))
+                  & " bytes)");
+         exception
+            when AHT.Websocket.Closed_Error => null;
+            when E : others =>
+               Fail ("server-mask: wrong exception "
+                     & Ada.Exceptions.Exception_Name (E));
+         end;
+      end if;
+   end;
+
+   --  Case 13: Close's `Timeout` parameter is honoured. The fake
+   --  server completes the handshake and then holds the socket
+   --  silently for 2 s — long enough that the default 5.0 s
+   --  close-echo grace would dominate. With Timeout => 0.1, Close
+   --  must return well under 0.5 s via the Abort_Pending fallback
+   --  path.
+   declare
+      Server   : Fake_Server;
+      Port     : AHT.URL.Port_Number;
+      Setup_Err, Run_Err : Unbounded_String;
+      C        : AHT.Websocket.Client.Client_Type;
+      Headers  : AHT.HTTP.Headers.Map;
+      Started, Ended : Time;
+   begin
+      Server.Configure
+        (Extra_Headers => "",
+         Post_Bytes    => AHT.Bytes.Byte_Array'(1 .. 0 => 0),
+         Hold_Seconds  => 2.0);
+      Server.Get_Port (Port, Setup_Err);
+      if Length (Setup_Err) > 0 then
+         Fail ("close-timeout: server setup: "
+               & To_String (Setup_Err));
+      else
+         AHT.Websocket.Client.Connect
+           (Self          => C,
+            URL           => URL_For (Port),
+            Extra_Headers => Headers);
+         Started := Clock;
+         AHT.Websocket.Client.Close (C, Timeout => 0.1);
+         Ended := Clock;
+         Server.Wait_Done (Run_Err);
+         if Ended - Started > 0.5 then
+            Fail ("close-timeout: Close took"
+                  & Duration'Image (Ended - Started)
+                  & "s (Timeout was 0.1, should fall through "
+                  & "to Abort_Pending fast)");
+         end if;
       end if;
    end;
 

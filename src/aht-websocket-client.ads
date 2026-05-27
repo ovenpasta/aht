@@ -1,7 +1,10 @@
+with Ada.Containers.Doubly_Linked_Lists;
+with Ada.Numerics.Discrete_Random;
 with Ada.Strings.Unbounded;
 
 with AHT.Bytes;
 with AHT.HTTP.Headers;
+with AHT.Transport;
 with AHT.Transport.TCP;
 
 package AHT.Websocket.Client is
@@ -51,11 +54,26 @@ package AHT.Websocket.Client is
      with Pre => Is_Open (Self);
 
    procedure Close
-     (Self   : in out Client_Type;
-      Code   : Valid_Close_Code := 1000;
-      Reason : String := "");
-   --  The synthetic codes 1005/1006/1015 are ruled out by the subtype
-   --  so they cannot be sent on the wire.
+     (Self    : in out Client_Type;
+      Code    : Valid_Close_Code := 1000;
+      Reason  : String := "";
+      Timeout : Duration := 5.0);
+   --  Runs the RFC 6455 §1.4 close handshake: send our Close frame
+   --  (if we haven't already), then wait up to `Timeout` seconds
+   --  for the peer's echo before forcing the receiver out via
+   --  Transport.Abort_Pending and tearing the TCP transport down.
+   --
+   --  Timeout knobs:
+   --    * Default 5.0 s — safe for a cooperating peer on a LAN
+   --      / loopback.
+   --    * Duration'Last — wait indefinitely (only sensible when
+   --      you trust the peer to echo).
+   --    * 0.0 — don't wait at all; tear the receiver out via
+   --      Abort_Pending immediately. Useful when the caller
+   --      already knows the peer is unresponsive.
+   --
+   --  The synthetic codes 1005/1006/1015 are ruled out by the
+   --  Valid_Close_Code subtype so they cannot be sent on the wire.
 
    --  Blocking pull API: blocks up to Timeout for the next decoded message.
    --  Raises Closed_Error if the connection has been closed.
@@ -64,7 +82,16 @@ package AHT.Websocket.Client is
       Msg     : out Message_Type;
       Timeout : Duration := Duration'Last);
 
-   --  Push API: callbacks invoked from the internal receiver task.
+   --  Push API: callbacks fire from inside the receiver task on
+   --  every inbound message / close / fatal error. Both modes
+   --  (push + pull) are active simultaneously — Receive still
+   --  sees every message and Closed_Error / timeouts still apply.
+   --
+   --  Callbacks run on the receiver task, so they must be
+   --  task-safe and should not block (a slow callback delays
+   --  every subsequent inbound frame for this connection).
+   --  Exceptions raised inside a callback are swallowed by the
+   --  receiver so the task can keep draining the wire.
    procedure Set_On_Message (Self : in out Client_Type; CB : On_Message_Callback);
    procedure Set_On_Close   (Self : in out Client_Type; CB : On_Close_Callback);
    procedure Set_On_Error   (Self : in out Client_Type; CB : On_Error_Callback);
@@ -73,12 +100,96 @@ package AHT.Websocket.Client is
 
 private
 
+   --  Connection state machine (RFC 6455 §1.4).
+   --    Connecting → Open    : on successful handshake.
+   --    Open       → Closing : on a Close frame sent (locally or
+   --                           echoed by the receiver).
+   --    *          → Closed  : receiver has exited; no more
+   --                           messages will arrive.
+   type State_Kind is (Connecting, Open, Closing, Closed);
+
+   protected type State_PO is
+      procedure Set (S : State_Kind);
+      function  Get return State_Kind;
+      entry     Wait_Closed;
+      --  Atomic "did we already send a Close on the wire?". Both
+      --  the user-initiated Close path and the receiver's echo
+      --  path call this; whichever wins (returns True via the
+      --  out parameter) is the one that emits the Close frame.
+      procedure Try_Mark_Local_Close (Should_Send : out Boolean);
+      function  Local_Close_Sent return Boolean;
+   private
+      Current      : State_Kind := Connecting;
+      Local_Closed : Boolean    := False;
+   end State_PO;
+
+   --  Random-byte source for client-side frame masks. Per-Client
+   --  generator state lives in the Send_Guard PO; seeded lazily on
+   --  the first Random_Mask call. RFC 6455 §5.3 doesn't require
+   --  cryptographic randomness.
+   package Random_Bytes is new Ada.Numerics.Discrete_Random
+     (AHT.Bytes.Octet);
+
+   protected type Send_Guard is
+      --  Acquire / Release serialize the actual socket writes
+      --  across tasks (Client.Send_*, Receiver echoing Pong /
+      --  Close). The Write is performed *outside* the lock so a
+      --  slow socket doesn't hold up the protected region.
+      entry Acquire;
+      procedure Release;
+      --  Fresh 4-byte mask per frame, drawn under the protected
+      --  lock so concurrent senders can't share generator state.
+      procedure Random_Mask (Mask : out AHT.Bytes.Byte_Array);
+   private
+      Busy   : Boolean := False;
+      Gen    : Random_Bytes.Generator;
+      Seeded : Boolean := False;
+   end Send_Guard;
+
+   package Message_Lists is new Ada.Containers.Doubly_Linked_Lists
+     (Message_Type);
+
+   --  Bounded-ish FIFO of decoded messages. Receiver pushes; the
+   --  user's Receive entry pulls. Mark_Closed flips the barrier so
+   --  a parked Receive wakes and raises Closed_Error if the
+   --  connection went away while it was blocked.
+   protected type Inbox_PO is
+      entry Receive (Msg : out Message_Type);
+      procedure Push (Msg : Message_Type);
+      procedure Mark_Closed;
+      function  Count return Natural;
+      function  Is_Closed return Boolean;
+   private
+      Q        : Message_Lists.List;
+      Closed_F : Boolean := False;
+   end Inbox_PO;
+
+   --  Per-connection task. Auto-started when Client_Type is
+   --  elaborated; blocks at `accept Start or terminate` until
+   --  Connect kicks it off after a successful handshake. Reads
+   --  frames off the transport, reassembles fragmented messages,
+   --  handles control frames in place, surfaces complete data
+   --  messages to the Inbox, and fires the push-mode callbacks
+   --  (Owner.On_Message / On_Close / On_Error) if the user
+   --  installed any. Takes a single Client_Access so the body
+   --  has access to every component plus the callback slots —
+   --  RM 9.5.2 forbids anonymous access on entry parameters,
+   --  but Client_Access is a named access already declared
+   --  publicly.
+   task type Receiver_Task is
+      entry Start (Owner : Client_Access);
+   end Receiver_Task;
+
    type Client_Type is tagged limited record
       --  v1 plain only — wss:// will replace this with a TLS
-      --  transport once mbedTLS is wired. Inline (not heap) so the
-      --  Client owns its transport for its full lifetime; Connect
-      --  populates it on success, Close tears it down.
-      Transport          : AHT.Transport.TCP.TCP_Transport;
+      --  transport once mbedTLS is wired. Inline (not heap) so
+      --  the Client owns its transport for its full lifetime;
+      --  Connect populates it on success, Close tears it down.
+      Transport          : aliased AHT.Transport.TCP.TCP_Transport;
+      State              : aliased State_PO;
+      Inbox              : aliased Inbox_PO;
+      Guard              : aliased Send_Guard;
+      Receiver           : Receiver_Task;
       Open               : Boolean := False;
       Selected_Protocol  : Ada.Strings.Unbounded.Unbounded_String;
       On_Message         : On_Message_Callback := null;

@@ -23,7 +23,8 @@ project Tests is
       "test_http_streaming.adb",
       "test_http_async.adb",
       "test_ws_frames.adb",
-      "test_ws_handshake.adb");
+      "test_ws_handshake.adb",
+      "test_ws_echo.adb");
 
    package Compiler renames Aht.Compiler;
    package Binder   renames Aht.Binder;

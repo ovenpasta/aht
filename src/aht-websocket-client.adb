@@ -1,6 +1,5 @@
 with Ada.Characters.Handling;
 with Ada.Exceptions;
-with Ada.Numerics.Discrete_Random;
 with Ada.Strings;
 with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
@@ -11,31 +10,19 @@ with AHT.HTTP.Methods;
 with AHT.HTTP.Request;
 with AHT.HTTP.Response;
 with AHT.URL;
+with AHT.Websocket.Frames;
 
 package body AHT.Websocket.Client is
 
    ---------------------------------------------------------------
-   --  Local helpers (commit 1 — handshake only)
+   --  Local helpers
    ---------------------------------------------------------------
 
-   --  Fixed string the WebSocket handshake mixes into the Accept
-   --  computation (RFC 6455 §1.3 / §4.2.2).
    WS_GUID : constant String := "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-
-   --  Non-cryptographic random byte source for Sec-WebSocket-Key.
-   --  RFC 6455 §4.1 calls for 16 random bytes, base64-encoded. It
-   --  isn't a secret; it's a transport-layer nonce the server must
-   --  echo through SHA1+base64 in Sec-WebSocket-Accept. Quality of
-   --  randomness only matters to the extent that an off-path
-   --  attacker can't pre-compute the Accept value, which any
-   --  halfway-decent PRNG defeats.
-   package Random_Bytes is new Ada.Numerics.Discrete_Random
-     (AHT.Bytes.Octet);
 
    function To_Lower (S : String) return String renames
      Ada.Characters.Handling.To_Lower;
 
-   --  Strip ASCII HT/SP from both ends of S (RFC 7230 "OWS").
    function Strip_OWS (S : String) return String is
       First : Natural := S'First;
       Last  : Integer := S'Last;
@@ -53,10 +40,6 @@ package body AHT.Websocket.Client is
       return S (First .. Last);
    end Strip_OWS;
 
-   --  True iff Haystack contains Needle as a comma-separated token
-   --  (with optional OWS), case-insensitive. Used to validate the
-   --  server's `Connection: Upgrade` — which may list extra tokens
-   --  on either side of the literal "Upgrade".
    function Contains_Token (Haystack, Needle : String) return Boolean is
       Lower_Hay  : constant String := To_Lower (Haystack);
       Lower_Need : constant String := To_Lower (Needle);
@@ -85,47 +68,6 @@ package body AHT.Websocket.Client is
       return False;
    end Contains_Token;
 
-   --  Convert a 40-char hex string (GNAT.SHA1.Digest's output) into
-   --  the 20 raw bytes. Inverse of "format hex". Used to feed the
-   --  digest into Base64_Encode.
-   function Hex_To_Bytes (Hex : String) return AHT.Bytes.Byte_Array is
-      function Val (C : Character) return Natural is
-        (case C is
-           when '0' .. '9' =>
-             Character'Pos (C) - Character'Pos ('0'),
-           when 'a' .. 'f' =>
-             10 + Character'Pos (C) - Character'Pos ('a'),
-           when 'A' .. 'F' =>
-             10 + Character'Pos (C) - Character'Pos ('A'),
-           when others =>
-             raise Program_Error
-               with "Hex_To_Bytes: non-hex character '" & C & "'");
-      Bytes : AHT.Bytes.Byte_Array (1 .. Hex'Length / 2);
-   begin
-      for I in 0 .. Bytes'Length - 1 loop
-         Bytes (Bytes'First + I) :=
-           AHT.Bytes.Octet
-             (16 * Val (Hex (Hex'First + 2 * I))
-              +    Val (Hex (Hex'First + 2 * I + 1)));
-      end loop;
-      return Bytes;
-   end Hex_To_Bytes;
-
-   --  base64( SHA1( Key & WS_GUID ) ) — the server's expected
-   --  echo per RFC 6455 §4.2.2.
-   function Expected_Accept (Key : String) return String is
-      Hex : constant String := GNAT.SHA1.Digest (Key & WS_GUID);
-      --  Hex is 40 chars (20 bytes). Convert to raw bytes, then
-      --  base64. The RFC asks for base64 of the raw digest, not of
-      --  the hex representation.
-   begin
-      return AHT.Bytes.Base64_Encode (Hex_To_Bytes (Hex));
-   end Expected_Accept;
-
-   --  True iff Wanted appears as a case-sensitive token in the
-   --  comma-separated Subprotocols list. Subprotocol names are
-   --  registry tokens matched case-sensitively (RFC 6455 §11.5);
-   --  this is *not* the case-insensitive Connection-header check.
    function Is_Offered_Subprotocol
      (Wanted : String; Subprotocols : String) return Boolean
    is
@@ -154,8 +96,35 @@ package body AHT.Websocket.Client is
       return False;
    end Is_Offered_Subprotocol;
 
-   --  Host[:port] for the `Host:` header. Default port is elided
-   --  (browsers + curl do the same).
+   function Hex_To_Bytes (Hex : String) return AHT.Bytes.Byte_Array is
+      function Val (C : Character) return Natural is
+        (case C is
+           when '0' .. '9' =>
+             Character'Pos (C) - Character'Pos ('0'),
+           when 'a' .. 'f' =>
+             10 + Character'Pos (C) - Character'Pos ('a'),
+           when 'A' .. 'F' =>
+             10 + Character'Pos (C) - Character'Pos ('A'),
+           when others =>
+             raise Program_Error
+               with "Hex_To_Bytes: non-hex character '" & C & "'");
+      B : AHT.Bytes.Byte_Array (1 .. Hex'Length / 2);
+   begin
+      for I in 0 .. B'Length - 1 loop
+         B (B'First + I) :=
+           AHT.Bytes.Octet
+             (16 * Val (Hex (Hex'First + 2 * I))
+              +    Val (Hex (Hex'First + 2 * I + 1)));
+      end loop;
+      return B;
+   end Hex_To_Bytes;
+
+   function Expected_Accept (Key : String) return String is
+      Hex : constant String := GNAT.SHA1.Digest (Key & WS_GUID);
+   begin
+      return AHT.Bytes.Base64_Encode (Hex_To_Bytes (Hex));
+   end Expected_Accept;
+
    function Host_Header (U : AHT.URL.URL_Type) return String is
       Default : constant AHT.URL.Port_Number :=
         AHT.URL.Default_Port (U.Scheme);
@@ -164,17 +133,11 @@ package body AHT.Websocket.Client is
       if U.Port = Default then
          return Host_S;
       end if;
-      return Host_S
-        & ":"
+      return Host_S & ":"
         & Ada.Strings.Fixed.Trim
             (AHT.URL.Port_Number'Image (U.Port), Ada.Strings.Both);
    end Host_Header;
 
-   --  Fill B with non-cryptographic random bytes for Sec-WebSocket-Key.
-   --  A fresh generator + Reset (seeds from Ada.Calendar.Clock by
-   --  default) per call is fine — Connect runs at most once per
-   --  Client and we just need each connection to pick a different
-   --  key.
    procedure Fill_Random (B : out AHT.Bytes.Byte_Array) is
       Gen : Random_Bytes.Generator;
    begin
@@ -183,6 +146,459 @@ package body AHT.Websocket.Client is
          B (I) := Random_Bytes.Random (Gen);
       end loop;
    end Fill_Random;
+
+   --  Slice a Byte_Array out of a Byte_Vector's first N elements.
+   --  Used by the receiver to feed Frames.Decode without each
+   --  decode attempt allocating from scratch.
+   function Vector_To_Array
+     (V : AHT.Bytes.Byte_Vector; N : Natural)
+      return AHT.Bytes.Byte_Array
+   is
+      R : AHT.Bytes.Byte_Array (1 .. N);
+   begin
+      for I in 1 .. N loop
+         R (I) := V.Element (V.First_Index + I - 1);
+      end loop;
+      return R;
+   end Vector_To_Array;
+
+   --  Build + send one masked frame on the active transport.
+   --  Caller MUST hold the Send_Guard (Acquire / Release wrap this).
+   --  The mask is drawn from the guard's PRNG; the encode happens
+   --  inside the lock; the transport Write happens *outside* the
+   --  lock so a slow socket can't block other tasks' Acquires.
+   procedure Send_Frame
+     (Transport : in out AHT.Transport.Transport_Type'Class;
+      Guard     : in out Send_Guard;
+      Op        : AHT.Websocket.Opcode;
+      FIN       : Boolean;
+      Payload   : AHT.Bytes.Byte_Array)
+   is
+      Hdr : AHT.Websocket.Frames.Frame_Header :=
+        (FIN    => FIN,
+         Op     => Op,
+         Masked => True,
+         others => <>);
+   begin
+      Guard.Random_Mask (Hdr.Mask_Key);
+      declare
+         Wire : constant AHT.Bytes.Byte_Array :=
+           AHT.Websocket.Frames.Encode (Hdr, Payload);
+      begin
+         Transport.Write (Wire);
+      end;
+   end Send_Frame;
+
+   --  Build the 2-byte Close-frame payload (code + optional reason).
+   --  Caller must pass a Valid_Close_Code; the Frames layer
+   --  re-validates on Encode.
+   function Build_Close_Payload
+     (Code : AHT.Websocket.Valid_Close_Code; Reason : String)
+      return AHT.Bytes.Byte_Array
+   is
+      Total : constant Natural := 2 + Reason'Length;
+      P     : AHT.Bytes.Byte_Array (1 .. Total);
+   begin
+      P (1) := AHT.Bytes.Octet (Code / 256);
+      P (2) := AHT.Bytes.Octet (Code mod 256);
+      for I in 0 .. Reason'Length - 1 loop
+         P (3 + I) := AHT.Bytes.Octet
+           (Character'Pos (Reason (Reason'First + I)));
+      end loop;
+      return P;
+   end Build_Close_Payload;
+
+   ---------------------------------------------------------------
+   --  Protected bodies
+   ---------------------------------------------------------------
+
+   protected body State_PO is
+
+      procedure Set (S : State_Kind) is
+      begin
+         Current := S;
+      end Set;
+
+      function Get return State_Kind is (Current);
+
+      entry Wait_Closed when Current = Closed is
+      begin
+         null;
+      end Wait_Closed;
+
+      procedure Try_Mark_Local_Close (Should_Send : out Boolean) is
+      begin
+         if Local_Closed then
+            Should_Send := False;
+         else
+            Local_Closed := True;
+            Should_Send  := True;
+         end if;
+      end Try_Mark_Local_Close;
+
+      function Local_Close_Sent return Boolean is (Local_Closed);
+
+   end State_PO;
+
+   protected body Send_Guard is
+
+      entry Acquire when not Busy is
+      begin
+         Busy := True;
+      end Acquire;
+
+      procedure Release is
+      begin
+         Busy := False;
+      end Release;
+
+      procedure Random_Mask (Mask : out AHT.Bytes.Byte_Array) is
+      begin
+         if not Seeded then
+            Random_Bytes.Reset (Gen);
+            Seeded := True;
+         end if;
+         for I in Mask'Range loop
+            Mask (I) := Random_Bytes.Random (Gen);
+         end loop;
+      end Random_Mask;
+
+   end Send_Guard;
+
+   protected body Inbox_PO is
+
+      entry Receive (Msg : out Message_Type)
+        when Closed_F or else not Q.Is_Empty
+      is
+      begin
+         if Q.Is_Empty then
+            --  Closed_F is the only other thing that could open
+            --  the barrier — raise so the caller observes the
+            --  closed connection.
+            raise AHT.Websocket.Closed_Error
+              with "Websocket.Client.Receive: connection closed";
+         end if;
+         Msg := Q.First_Element;
+         Q.Delete_First;
+      end Receive;
+
+      procedure Push (Msg : Message_Type) is
+      begin
+         Q.Append (Msg);
+      end Push;
+
+      procedure Mark_Closed is
+      begin
+         Closed_F := True;
+      end Mark_Closed;
+
+      function Count return Natural is (Natural (Q.Length));
+
+      function Is_Closed return Boolean is (Closed_F);
+
+   end Inbox_PO;
+
+   ---------------------------------------------------------------
+   --  Receiver task
+   ---------------------------------------------------------------
+
+   task body Receiver_Task is
+      --  Cached pointer to the Client_Type that owns this task.
+      --  Named Conn to avoid shadowing the entry parameter Owner.
+      Conn : Client_Access := null;
+
+      --  Frame-decoding accumulator: bytes read from the transport
+      --  but not yet consumed by a successful Frames.Decode.
+      Stream : AHT.Bytes.Byte_Vector;
+
+      --  Reassembly state for fragmented messages (RFC 6455 §5.4).
+      --  A Text/Binary frame with FIN=0 starts a reassembly; later
+      --  Continuation frames append; FIN=1 closes it.
+      In_Reassembly   : Boolean        := False;
+      Reassembly_Kind : Message_Kind   := Binary_Message;
+      Reassembly_Buf  : AHT.Bytes.Byte_Vector;
+
+      Stop_Loop : Boolean := False;
+
+      --  Fire a user-installed callback inside a guard so the
+      --  receiver task keeps draining the wire if the callback
+      --  raises. Documented contract.
+      procedure Fire_On_Message (Msg : Message_Type) is
+      begin
+         if Conn.On_Message /= null then
+            begin
+               Conn.On_Message (Msg);
+            exception
+               when others => null;
+            end;
+         end if;
+      end Fire_On_Message;
+
+      procedure Fire_On_Close (Info : Close_Info; Reason : String) is
+      begin
+         if Conn.On_Close /= null then
+            begin
+               Conn.On_Close (Info, Reason);
+            exception
+               when others => null;
+            end;
+         end if;
+      end Fire_On_Close;
+
+      procedure Fire_On_Error (Message : String) is
+      begin
+         if Conn.On_Error /= null then
+            begin
+               Conn.On_Error (Message);
+            exception
+               when others => null;
+            end;
+         end if;
+      end Fire_On_Error;
+
+      procedure Read_More is
+         Chunk : AHT.Bytes.Byte_Array (1 .. 4_096);
+         Last  : Natural;
+      begin
+         Conn.Transport.Read (Chunk, Last);
+         if Last = 0 then
+            --  Peer closed without a Close frame. Surface as a
+            --  connection-closed event; users in Receive wake and
+            --  see Closed_Error.
+            Fire_On_Close ((Has_Code => False), "");
+            Stop_Loop := True;
+            return;
+         end if;
+         for I in Chunk'First .. Last loop
+            Stream.Append (Chunk (I));
+         end loop;
+      end Read_More;
+
+      --  Send a Close echo (or initial Close) if we haven't yet.
+      --  Acquires the Send_Guard around the actual Write.
+      procedure Maybe_Send_Close_Echo
+        (Code : AHT.Websocket.Valid_Close_Code := 1000)
+      is
+         Should_Send : Boolean;
+      begin
+         Conn.State.Try_Mark_Local_Close (Should_Send);
+         if not Should_Send then
+            return;
+         end if;
+         Conn.Guard.Acquire;
+         begin
+            Send_Frame
+              (Conn.Transport, Conn.Guard,
+               Op      => AHT.Websocket.Close_Op,
+               FIN     => True,
+               Payload => Build_Close_Payload (Code, ""));
+         exception
+            when others =>
+               --  If the echo can't go out (peer already torn the
+               --  transport down, etc.), we still want to release
+               --  the guard and exit cleanly.
+               Conn.Guard.Release;
+               return;
+         end;
+         Conn.Guard.Release;
+      end Maybe_Send_Close_Echo;
+
+      procedure Send_Pong (Payload : AHT.Bytes.Byte_Array) is
+      begin
+         Conn.Guard.Acquire;
+         begin
+            Send_Frame
+              (Conn.Transport, Conn.Guard,
+               Op      => AHT.Websocket.Pong_Op,
+               FIN     => True,
+               Payload => Payload);
+         exception
+            when others =>
+               Conn.Guard.Release;
+               return;
+         end;
+         Conn.Guard.Release;
+      end Send_Pong;
+
+      procedure Deliver
+        (Kind : Message_Kind; Payload : AHT.Bytes.Byte_Vector)
+      is
+         Msg : constant Message_Type :=
+           (Kind => Kind, Payload => Payload);
+      begin
+         --  Inbox first so a pull-mode Receive doesn't starve if
+         --  the push callback runs slow.
+         Conn.Inbox.Push (Msg);
+         Fire_On_Message (Msg);
+      end Deliver;
+
+      procedure Handle_Close_Frame
+        (Payload : AHT.Bytes.Byte_Vector)
+      is
+         Len    : constant Natural := Natural (Payload.Length);
+         Info   : Close_Info;
+         Reason : Unbounded_String;
+      begin
+         --  Frames.Decode has already validated len /= 1 and
+         --  the code range, so this is structural extraction.
+         if Len = 0 then
+            Info := (Has_Code => False);
+         else
+            declare
+               Hi : constant Natural :=
+                 Natural (Payload.Element (Payload.First_Index));
+               Lo : constant Natural :=
+                 Natural (Payload.Element (Payload.First_Index + 1));
+            begin
+               Info := (Has_Code => True, Code => 256 * Hi + Lo);
+            end;
+            for I in 3 .. Len loop
+               Append
+                 (Reason,
+                  Character'Val
+                    (Natural
+                       (Payload.Element
+                          (Payload.First_Index + I - 1))));
+            end loop;
+         end if;
+
+         Maybe_Send_Close_Echo;
+         Fire_On_Close (Info, To_String (Reason));
+         Conn.State.Set (Closed);
+         Stop_Loop := True;
+      end Handle_Close_Frame;
+
+      procedure Handle_Frame
+        (Hdr : AHT.Websocket.Frames.Frame_Header;
+         Payload : AHT.Bytes.Byte_Vector)
+      is
+         function To_Array
+           (V : AHT.Bytes.Byte_Vector) return AHT.Bytes.Byte_Array
+         is (Vector_To_Array (V, Natural (V.Length)));
+      begin
+         --  RFC 6455 §5.1: a client MUST NOT accept a masked
+         --  frame from the server. The Frames codec is
+         --  direction-neutral (it'll happily unmask), so the
+         --  direction-specific check is ours.
+         if Hdr.Masked then
+            raise AHT.Websocket.Protocol_Error
+              with "Receiver: server sent a masked frame "
+                & "(RFC 6455 §5.1 forbids server-side masking)";
+         end if;
+
+         case Hdr.Op is
+            when AHT.Websocket.Text | AHT.Websocket.Binary =>
+               if In_Reassembly then
+                  raise AHT.Websocket.Protocol_Error
+                    with "Receiver: data frame received while a "
+                      & "fragmented message was in progress";
+               end if;
+               if Hdr.FIN then
+                  --  Single-frame message.
+                  Deliver
+                    ((if Hdr.Op = AHT.Websocket.Text
+                      then Text_Message else Binary_Message),
+                     Payload);
+               else
+                  --  Start a reassembly.
+                  In_Reassembly := True;
+                  Reassembly_Kind :=
+                    (if Hdr.Op = AHT.Websocket.Text
+                     then Text_Message else Binary_Message);
+                  Reassembly_Buf := Payload;
+               end if;
+
+            when AHT.Websocket.Continuation =>
+               if not In_Reassembly then
+                  raise AHT.Websocket.Protocol_Error
+                    with "Receiver: Continuation frame without "
+                      & "a preceding fragmented data frame";
+               end if;
+               for I in 1 .. Natural (Payload.Length) loop
+                  Reassembly_Buf.Append
+                    (Payload.Element (Payload.First_Index + I - 1));
+               end loop;
+               if Hdr.FIN then
+                  Deliver (Reassembly_Kind, Reassembly_Buf);
+                  In_Reassembly := False;
+                  Reassembly_Buf.Clear;
+               end if;
+
+            when AHT.Websocket.Ping_Op =>
+               Send_Pong (To_Array (Payload));
+
+            when AHT.Websocket.Pong_Op =>
+               --  Unsolicited Pong → drop (v1 doesn't track Pings).
+               null;
+
+            when AHT.Websocket.Close_Op =>
+               Handle_Close_Frame (Payload);
+         end case;
+      end Handle_Frame;
+
+   begin
+      select
+         accept Start (Owner : Client_Access) do
+            Conn := Owner;
+         end Start;
+      or
+         terminate;
+      end select;
+
+      Main_Loop :
+      loop
+         exit Main_Loop when Stop_Loop;
+
+         declare
+            Have : constant Natural := Natural (Stream.Length);
+            Hdr  : AHT.Websocket.Frames.Frame_Header;
+            Payload : AHT.Bytes.Byte_Vector;
+            Last : Natural;
+         begin
+            if Have = 0 then
+               Read_More;
+            else
+               declare
+                  Slice : constant AHT.Bytes.Byte_Array :=
+                    Vector_To_Array (Stream, Have);
+               begin
+                  AHT.Websocket.Frames.Decode
+                    (Slice, Hdr, Payload, Last);
+                  if Last = 0 then
+                     Read_More;
+                  else
+                     for I in 1 .. Last loop
+                        Stream.Delete_First;
+                     end loop;
+                     Handle_Frame (Hdr, Payload);
+                  end if;
+               end;
+            end if;
+         exception
+            when E : AHT.Websocket.Protocol_Error
+               | AHT.HTTP.Protocol_Error
+               | AHT.Transport.Transport_Error
+               | AHT.Transport.Aborted_Error
+            =>
+               --  Any of these means the connection is unusable.
+               --  Fire On_Error, mark Closed, exit; Inbox.Mark_Closed
+               --  below wakes any parked Receive caller with
+               --  Closed_Error.
+               Fire_On_Error
+                 (Ada.Exceptions.Exception_Name (E) & ": "
+                  & Ada.Exceptions.Exception_Message (E));
+               Stop_Loop := True;
+            when E : others =>
+               Fire_On_Error
+                 (Ada.Exceptions.Exception_Name (E) & ": "
+                  & Ada.Exceptions.Exception_Message (E));
+               Stop_Loop := True;
+         end;
+      end loop Main_Loop;
+
+      Conn.State.Set (Closed);
+      Conn.Inbox.Mark_Closed;
+   end Receiver_Task;
 
    ---------------------------------------------------------------
    --  Public surface
@@ -198,9 +614,6 @@ package body AHT.Websocket.Client is
       CA_Path       : String := "")
    is
       pragma Unreferenced (Insecure, CA_Path);
-      --  Insecure / CA_Path only matter for wss:// (TLS). v1 plain
-      --  WS doesn't use them; accepted-but-ignored here and wired
-      --  through once TLS lands.
 
       Parsed    : constant AHT.URL.URL_Type := AHT.URL.Parse (URL);
       Key_Bytes : AHT.Bytes.Byte_Array (1 .. 16);
@@ -210,8 +623,6 @@ package body AHT.Websocket.Client is
 
       procedure Add_Extra (Name, Value : String) is
       begin
-         --  Skip headers we set ourselves so the caller can't break
-         --  the handshake by overriding (e.g.) Sec-WebSocket-Key.
          if Name = "host"
            or else Name = "upgrade"
            or else Name = "connection"
@@ -224,14 +635,23 @@ package body AHT.Websocket.Client is
       end Add_Extra;
 
    begin
-      if Self.Open then
+      --  Single-use lifecycle. A Client_Type owns a one-shot
+      --  Receiver_Task; after the first successful Connect the
+      --  task is past its `accept Start` and either running or
+      --  already terminated. Reusing the same Client_Type would
+      --  surface as a wrapped Handshake_Error when we try to
+      --  call Start again — reject upfront instead so the user
+      --  gets a clear lifecycle error before we dial. A
+      --  *failed* Connect leaves State = Connecting, so retries
+      --  on a fresh URL still work.
+      if Self.State.Get /= Connecting then
          raise AHT.Websocket.Handshake_Error
-           with "Websocket.Client.Connect: Client_Type is already "
-             & "open; declare a fresh Client per connection";
+           with "Websocket.Client.Connect: Client_Type has "
+             & "already been Connect'd (state = "
+             & State_Kind'Image (Self.State.Get)
+             & "); declare a fresh Client per connection";
       end if;
 
-      --  Scheme dispatch. http/https aren't WS URLs (RFC 6455 §3
-      --  requires ws or wss); wss is plumbed but not yet wired.
       case Parsed.Scheme is
          when AHT.URL.WS =>
             null;
@@ -245,17 +665,13 @@ package body AHT.Websocket.Client is
                 & "(or wss://); got " & URL;
       end case;
 
-      --  Fresh Sec-WebSocket-Key per connection.
       Fill_Random (Key_Bytes);
       declare
          Key_B64 : constant String :=
            AHT.Bytes.Base64_Encode (Key_Bytes);
       begin
-         --  HTTP upgrade request. Method GET with the WS URL's
-         --  path; Request.Write only emits path+query so leaving
-         --  the WS scheme on Req.Target doesn't reach the wire.
-         Req.Method  := AHT.HTTP.Methods.GET;
-         Req.Target  := Parsed;
+         Req.Method := AHT.HTTP.Methods.GET;
+         Req.Target := Parsed;
          Req.Headers.Set ("host", Host_Header (Parsed));
          Req.Headers.Set ("upgrade", "websocket");
          Req.Headers.Set ("connection", "Upgrade");
@@ -269,7 +685,6 @@ package body AHT.Websocket.Client is
          end if;
          Extra_Headers.Iterate (Add_Extra'Access);
 
-         --  TCP connect (plain only in v1).
          AHT.Transport.TCP.Connect
            (Self.Transport,
             Host => To_String (Parsed.Host),
@@ -277,12 +692,6 @@ package body AHT.Websocket.Client is
 
          begin
             AHT.HTTP.Request.Write (Req, Self.Transport);
-
-            --  Method => GET keeps the 101 no-body suppression
-            --  fast-path in Response.Read: it parses status +
-            --  headers and stops at byte-after-CRLFCRLF without
-            --  consuming any frame bytes. Commit 2's receiver
-            --  will pick up from that exact position.
             AHT.HTTP.Response.Read
               (Resp, Self.Transport,
                Method => AHT.HTTP.Methods.GET);
@@ -325,17 +734,6 @@ package body AHT.Websocket.Client is
                end if;
             end;
 
-            --  Validate Sec-WebSocket-Protocol per RFC 6455 §4.1:
-            --
-            --   * If the response carries the header, its value
-            --     MUST match exactly one of the subprotocols the
-            --     client offered. Anything else is a server
-            --     protocol violation — the client must not
-            --     silently accept semantics it never asked for.
-            --   * The server MUST select at most one. Multiple
-            --     Sec-WebSocket-Protocol header lines are illegal.
-            --   * Empty (server elected not to pick one, or the
-            --     client offered none) is fine.
             declare
                Values : constant AHT.HTTP.Headers.Value_List :=
                  Resp.Headers.Values ("sec-websocket-protocol");
@@ -370,11 +768,18 @@ package body AHT.Websocket.Client is
                Self.Selected_Protocol := To_Unbounded_String (Got);
             end;
 
+            --  Handshake good — flip the state machine, hand the
+            --  open transport to the receiver task, mark Open.
+            Self.State.Set (Open);
             Self.Open := True;
+            --  'Unchecked_Access is safe by the same argument as
+            --  Async_Handle: the Receiver task is itself a
+            --  component of Self, so the parent master waits for
+            --  the task before finalizing the other components
+            --  (RM 9.3). The Client_Access never outlives Self.
+            Self.Receiver.Start (Owner => Self'Unchecked_Access);
          exception
             when AHT.Websocket.Handshake_Error =>
-               --  Drop the TCP transport on a failed handshake so
-               --  HTTP-layer state doesn't linger on the socket.
                Self.Transport.Close;
                raise;
             when E : others =>
@@ -403,77 +808,146 @@ package body AHT.Websocket.Client is
          CA_Path       => CA_Path);
    end Connect;
 
-   function Is_Open (Self : Client_Type) return Boolean is (Self.Open);
+   function Is_Open (Self : Client_Type) return Boolean is
+     (Self.Open and then Self.State.Get = Open);
 
    function Selected_Subprotocol (Self : Client_Type) return String is
      (To_String (Self.Selected_Protocol));
 
-   ---------------------------------------------------------------
-   --  Stubs — bodies land in commit 2 (frames + receiver task +
-   --  send guard + close handshake).
-   ---------------------------------------------------------------
-
    procedure Send_Text
      (Self : in out Client_Type;
-      Text : String)
-   is
-      pragma Unreferenced (Self, Text);
+      Text : String) is
    begin
-      raise AHT.Websocket.Protocol_Error
-        with "Websocket.Client.Send_Text: not yet implemented "
-          & "(commit 2)";
+      Self.Guard.Acquire;
+      begin
+         Send_Frame
+           (Self.Transport, Self.Guard,
+            Op      => AHT.Websocket.Text,
+            FIN     => True,
+            Payload => AHT.Bytes.From_String (Text));
+      exception
+         when others =>
+            Self.Guard.Release;
+            raise;
+      end;
+      Self.Guard.Release;
    end Send_Text;
 
    procedure Send_Binary
      (Self : in out Client_Type;
-      Data : AHT.Bytes.Byte_Array)
-   is
-      pragma Unreferenced (Self, Data);
+      Data : AHT.Bytes.Byte_Array) is
    begin
-      raise AHT.Websocket.Protocol_Error
-        with "Websocket.Client.Send_Binary: not yet implemented "
-          & "(commit 2)";
+      Self.Guard.Acquire;
+      begin
+         Send_Frame
+           (Self.Transport, Self.Guard,
+            Op      => AHT.Websocket.Binary,
+            FIN     => True,
+            Payload => Data);
+      exception
+         when others =>
+            Self.Guard.Release;
+            raise;
+      end;
+      Self.Guard.Release;
    end Send_Binary;
 
    procedure Send_Ping
      (Self    : in out Client_Type;
-      Payload : AHT.Bytes.Byte_Array := [])
-   is
-      pragma Unreferenced (Self, Payload);
+      Payload : AHT.Bytes.Byte_Array := []) is
    begin
-      raise AHT.Websocket.Protocol_Error
-        with "Websocket.Client.Send_Ping: not yet implemented "
-          & "(commit 2)";
+      Self.Guard.Acquire;
+      begin
+         Send_Frame
+           (Self.Transport, Self.Guard,
+            Op      => AHT.Websocket.Ping_Op,
+            FIN     => True,
+            Payload => Payload);
+      exception
+         when others =>
+            Self.Guard.Release;
+            raise;
+      end;
+      Self.Guard.Release;
    end Send_Ping;
 
    procedure Close
-     (Self   : in out Client_Type;
-      Code   : Valid_Close_Code := 1000;
-      Reason : String := "")
+     (Self    : in out Client_Type;
+      Code    : AHT.Websocket.Valid_Close_Code := 1000;
+      Reason  : String := "";
+      Timeout : Duration := 5.0)
    is
-      pragma Unreferenced (Code, Reason);
+      Should_Send : Boolean;
    begin
-      --  Commit 1 has no Send path so we can't emit a proper Close
-      --  frame; tear the TCP transport down instead. Commit 2 will
-      --  replace this with the RFC 6455 §1.4 close handshake (send
-      --  Close frame, wait for peer echo, then close transport).
-      if Self.Open then
-         Self.Open := False;
-         Self.Transport.Close;
+      if Self.State.Get = Connecting then
+         --  Never handshook; nothing to do.
+         return;
       end if;
+
+      if Self.State.Get not in Open | Closing then
+         --  Already Closed (receiver wound up first). Just make
+         --  sure the transport is down.
+         if Self.Transport.Is_Connected then
+            Self.Transport.Close;
+         end if;
+         Self.Open := False;
+         return;
+      end if;
+
+      --  RFC 6455 §1.4 close: send our Close (if we haven't yet),
+      --  then wait for the receiver to see the peer's echo before
+      --  tearing the TCP transport down. Abort_Pending guarantees
+      --  Wait_Closed doesn't hang forever if the peer goes silent.
+      Self.State.Try_Mark_Local_Close (Should_Send);
+      if Should_Send then
+         Self.Guard.Acquire;
+         begin
+            Send_Frame
+              (Self.Transport, Self.Guard,
+               Op      => AHT.Websocket.Close_Op,
+               FIN     => True,
+               Payload => Build_Close_Payload (Code, Reason));
+         exception
+            when others =>
+               --  Best effort. Continue with the local teardown
+               --  regardless.
+               null;
+         end;
+         Self.Guard.Release;
+      end if;
+      Self.State.Set (Closing);
+
+      --  Bounded wait: if the peer never echoes our Close in
+      --  `Timeout` seconds, kick the receiver out via
+      --  Abort_Pending so we eventually finalize. Duration'Last
+      --  effectively disables the bound; 0.0 fires the abort
+      --  path immediately without waiting at all.
+      select
+         Self.State.Wait_Closed;
+      or
+         delay Timeout;
+         Self.Transport.Abort_Pending;
+         Self.State.Wait_Closed;
+      end select;
+
+      Self.Open := False;
+      Self.Transport.Close;
    end Close;
 
    procedure Receive
      (Self    : in out Client_Type;
       Msg     : out Message_Type;
-      Timeout : Duration := Duration'Last)
-   is
-      pragma Unreferenced (Self, Timeout);
+      Timeout : Duration := Duration'Last) is
    begin
-      Msg := (Kind => Binary_Message, Payload => <>);
-      raise AHT.Websocket.Protocol_Error
-        with "Websocket.Client.Receive: not yet implemented "
-          & "(commit 2)";
+      select
+         Self.Inbox.Receive (Msg);
+      or
+         delay Timeout;
+         Msg := (Kind => Binary_Message, Payload => <>);
+         raise AHT.Transport.Timeout_Error
+           with "Websocket.Client.Receive: timeout after"
+             & Duration'Image (Timeout) & "s";
+      end select;
    end Receive;
 
    procedure Set_On_Message
