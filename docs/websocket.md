@@ -80,7 +80,7 @@ end record;
 
 `Reason : String` is passed alongside — empty when no reason was sent.
 
-## `AHT.Websocket.Frames` — to be implemented
+## `AHT.Websocket.Frames`
 
 Pure codec — no socket I/O, so unit-testable in isolation.
 
@@ -103,26 +103,68 @@ Pure codec — no socket I/O, so unit-testable in isolation.
 
 ### Operations
 
-- `Encode (Fin, Opcode, Payload, Mask) return Byte_Array` — always
-  client-masked (MASK bit = 1) with a fresh 32-bit mask.
-  **Post**: length in `2 .. Payload'Length + 14`.
-- `Decode (Input) return Decode_Result` — returns either a parsed frame
-  or `Needs_More` when `Input` is a partial frame. Server-origin frames
-  must have MASK = 0; masked server frames raise `Protocol_Error`.
-- `Random_Mask return Mask_Type` — 32 random bytes per frame from
-  `Ada.Numerics.Discrete_Random`. Not cryptographic (RFC 6455 doesn't
-  require it).
+```ada
+function Encode
+  (Hdr     : Frame_Header;
+   Payload : Byte_Array) return Byte_Array;
+procedure Decode
+  (Input   : Byte_Array;
+   Hdr     : out Frame_Header;
+   Payload : out Byte_Vector;
+   Last    : out Natural);
+```
 
-### Control-frame validation
+The codec is **direction-neutral** on masking: `Encode` honours
+`Hdr.Masked` / `Hdr.Mask_Key` as given, and `Decode` parses
+whatever's on the wire (unmasking when MASK is set). The
+"client MUST mask outgoing" rule (RFC §5.3) and the "client
+MUST reject masked incoming" rule (RFC §5.1) live one layer
+up in `AHT.Websocket.Client`, which sets `Hdr.Masked := True`
+with a fresh `Random_Mask` on every send and treats a masked
+inbound frame as a `Protocol_Error`. Keeping direction enforcement
+out of the codec lets the round-trip tests build either side of
+the wire without bouncing through a real peer.
 
-- Payload ≤ 125 bytes.
-- Never fragmented (`FIN` must be 1).
-- `Close` payload: 0 bytes, or ≥ 2 bytes (2-byte code + optional UTF-8
-  reason).
-- Reserved bits `RSV1..3` must be 0 (no extensions negotiated in v1).
+`Decode` reports the index of the last consumed byte through
+`Last`; `Last = 0` is the sentinel for "buffer holds a valid
+prefix but is incomplete — feed me more bytes and call again".
 
-Violations raise `AHT.HTTP.Protocol_Error` (shared with HTTP so callers
-can catch either at the same layer).
+### Protocol-level validation (direction-agnostic)
+
+These checks live in the codec and raise
+`AHT.Websocket.Protocol_Error` on violation:
+
+- Reserved opcodes (RFC §5.2 reserved ranges 0x3..0x7 and
+  0xB..0xF) are rejected on Decode.
+- `RSV1`/`RSV2`/`RSV3` set without negotiated extension — v1
+  negotiates none, so any RSV bit is an error.
+- Control frame (`Close`/`Ping`/`Pong`) with `FIN = 0` or
+  payload > 125 bytes (RFC §5.5). Enforced by both Encode (so
+  callers can't accidentally emit a malformed control frame)
+  and Decode.
+- `Close` payload of exactly 1 byte — illegal per RFC §5.5.1.
+  Allowed: 0 bytes (no code, no reason) or ≥ 2 bytes (2-byte
+  status code + optional UTF-8 reason).
+- `Close` code outside the valid wire range:
+  - Encode requires `Valid_Close_Code` (1000..1015 ∪ 3000..4999
+    excluding the synthetic 1005 / 1006 / 1015 that must never
+    appear on the wire).
+  - Decode requires `Any_Close_Code` (the full range including
+    1005 / 1006 / 1015, since a peer might wrongly send them
+    and we want the Client layer to see them rather than
+    silently coerce).
+- Non-minimal length encoding — 16-bit ext used for a value
+  that fits in 7 bits, 64-bit ext used for a value that fits
+  in 16 bits (RFC §5.2). Decode only; Encode picks the minimal
+  encoding by construction.
+- 64-bit ext length with the top bit set (RFC §5.2) or
+  overflowing `Natural`.
+
+A `Random_Mask : Byte_Array (1 .. 4)` helper backed by
+`Ada.Numerics.Discrete_Random` is exposed on the Client layer
+(not the codec — the codec is happy to take any caller-supplied
+mask); the mask isn't cryptographic and the RFC doesn't require
+it to be.
 
 ## `AHT.Websocket.Client` — to be implemented
 

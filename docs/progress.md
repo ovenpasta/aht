@@ -1,7 +1,7 @@
 # Progress
 
 Snapshot of implementation status against [`plan.md`](plan.md).
-Last updated: 2026-05-27 (HTTP.Client.Send_Async).
+Last updated: 2026-05-27 (Websocket.Frames codec).
 
 ## Task list (from the plan)
 
@@ -18,10 +18,10 @@ Last updated: 2026-05-27 (HTTP.Client.Send_Async).
 | 9 | mbedTLS fetch + build script + gpr wiring | stubbed (placeholder script) |
 | 10 | `AHT.Mbedtls` bindings (generate + curate) | not started |
 | 11 | `AHT.Transport.TLS` | stubbed |
-| 12 | `AHT.Websocket.Frames` codec | stubbed |
+| 12 | `AHT.Websocket.Frames` codec | done (direction-neutral encode + decode with masking, 7/16/64-bit lengths, control-frame validation including Close-payload structural + code-range checks, RSV-bit rejection, incomplete-buffer signalling) |
 | 13 | `AHT.Websocket.Client` (receiver task + POs) | stubbed |
 | 14 | Python test servers + cert generation | partial (plain HTTP fixture done; TLS / WS servers + certs to come) |
-| 15 | Ada integration tests + `run_tests.sh` | done for HTTP (15 tests; orchestrator brings up the fixture and runs all binaries) |
+| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + WS frames (16 tests; orchestrator brings up the fixture and runs all binaries) |
 
 "Stubbed" = spec is final, body compiles and raises a
 Not-Implemented exception if called.
@@ -126,6 +126,35 @@ In-process Ada-only test of the cancel surface:
     `Is_Cancelled` flips to true). (4) **Fresh handle**:
     `Is_Cancelled` is false on a never-cancelled handle.
 
+Pure unit test of the WS framing codec (no sockets — works
+entirely over `Byte_Array` / `Byte_Vector`):
+
+  - `tests/bin/test_ws_frames` — 23 cases covering (1–2) byte-
+    exact RFC 6455 §5.7 encode vectors (unmasked + masked
+    "Hello"), (3–4) §5.7 decode vectors, (5–6) round-trip 200-
+    and 70 000-byte masked frames (exercising the 2- and 8-byte
+    extended-length paths), (7) empty masked Ping → exact
+    `89 80 11 22 33 44`, (8) fragmented decode (Text/Continuation
+    back-to-back, advancing `Last`), (9) five incomplete-buffer
+    boundaries → `Last = 0` without raising, (10) reserved
+    opcode 0x3 → `Protocol_Error`, (11) control frame with
+    `FIN = 0` → `Protocol_Error`, (12) oversized control frame
+    → `Protocol_Error`, (13) non-minimal length encoding →
+    `Protocol_Error`, (14) `RSV1` set → `Protocol_Error`, (15)
+    outbound fragmented Close `Encode` → `Protocol_Error`,
+    (16) Close with empty payload and Close with `1000`+reason
+    both encode successfully, (17) Close `Encode` with 1-byte
+    payload → `Protocol_Error` (RFC §5.5.1), (18) Close `Encode`
+    with synthetic code 1005 → `Protocol_Error` (`Valid_Close_Code`
+    excludes 1005/1006/1015), (19) Close `Encode` with
+    out-of-range code 999 → `Protocol_Error`, (20) Decode a
+    normal Close with code 1000 succeeds, (21) Decode a Close
+    with 1-byte payload → `Protocol_Error`, (22) Decode a Close
+    with out-of-range code 999 → `Protocol_Error`, (23) Decode
+    accepts a Close with code 1006 (`Any_Close_Code` covers the
+    synthetic codes as inbound observations — the Client layer
+    decides what to do with them).
+
 End-to-end test of the async surface (mixes the Python fixture
 with one in-process silent server for the cancel case):
 
@@ -209,22 +238,21 @@ are treated as byte sequences (UTF-8 is caller's responsibility).
 
 In the order the plan specifies:
 
-1. Real `scripts/fetch_mbedtls.sh` + `scripts/regen_mbedtls_bindings.sh`
+1. `AHT.Websocket.Client` — receiver task, `Send_Guard`, `Inbox`,
+   `State` POs; reuse `AHT.HTTP.*` for the upgrade (the 101
+   carve-out in the 1xx loop is in place; the Frames codec just
+   landed).
+2. Python WS server + WebSocket integration tests; pin
+   `websockets>=12.0` in `tests/server/requirements.txt` and
+   teach `run_tests.sh` to create the venv on first use.
+3. Real `scripts/fetch_mbedtls.sh` + `scripts/regen_mbedtls_bindings.sh`
    (`gcc -fdump-ada-spec` over mbedTLS 2.28.9 headers, curated into
    `src/`).
-2. `AHT.Transport.TLS` + HTTPS wiring in `Client.Send` + HTTPS
+4. `AHT.Transport.TLS` + HTTPS wiring in `Client.Send` + HTTPS
    integration test. `Transport.TLS.Abort_Pending` aborts the
    underlying TCP selector. Will need `tests/server/server_tls.py`
-   and `tests/server/generate_cert.sh` (the orchestrator can take
-   on a venv step there if pip deps appear).
-3. `AHT.Websocket.Frames` RFC 6455 codec (unit-testable without
-   sockets).
-4. `AHT.Websocket.Client` — receiver task, `Send_Guard`, `Inbox`,
-   `State` POs; reuse `AHT.HTTP.*` for the upgrade (the 101
-   carve-out in the 1xx loop is in place).
-5. Python WS / WSS servers + WebSocket integration tests; pin
-   `websockets>=12.0` in `tests/server/requirements.txt` and
-   teach `run_tests.sh` to create the venv.
+   and `tests/server/generate_cert.sh`.
+5. WSS server + WebSocket TLS integration tests once TLS is in.
 
 Possible follow-ups that didn't make v1: `Send_Streaming_Async`
 (buffered async is here; streaming async wasn't worth the extra
