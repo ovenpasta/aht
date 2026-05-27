@@ -1,7 +1,7 @@
 # Progress
 
 Snapshot of implementation status against [`plan.md`](plan.md).
-Last updated: 2026-05-26 (Python HTTP fixture + integration tests).
+Last updated: 2026-05-26 (HTTP.Client.Cancel_Handle).
 
 ## Task list (from the plan)
 
@@ -14,14 +14,14 @@ Last updated: 2026-05-26 (Python HTTP fixture + integration tests).
 | 5 | `AHT.Log` (level/subsystem facade + `Tag` generic child) | done |
 | 6 | `AHT.HTTP.IO` (line reader, chunked decode) | done |
 | 7 | Transport deadline/abort retrofit | done |
-| 8 | `AHT.HTTP.Request` / `Response` / `Cancel` / streaming / `Client` | partial (sync `Client.Send`/`Get` done over HTTP; HTTPS, Cancel, streaming, async to come) |
+| 8 | `AHT.HTTP.Request` / `Response` / `Cancel` / streaming / `Client` | partial (sync `Client.Send`/`Get` + `Cancel_Handle` overload done over HTTP; HTTPS, streaming, async to come) |
 | 9 | mbedTLS fetch + build script + gpr wiring | stubbed (placeholder script) |
 | 10 | `AHT.Mbedtls` bindings (generate + curate) | not started |
 | 11 | `AHT.Transport.TLS` | stubbed |
 | 12 | `AHT.Websocket.Frames` codec | stubbed |
 | 13 | `AHT.Websocket.Client` (receiver task + POs) | stubbed |
 | 14 | Python test servers + cert generation | partial (plain HTTP fixture done; TLS / WS servers + certs to come) |
-| 15 | Ada integration tests + `run_tests.sh` | done for HTTP (12 tests; orchestrator brings up the fixture and runs all binaries) |
+| 15 | Ada integration tests + `run_tests.sh` | done for HTTP (13 tests; orchestrator brings up the fixture and runs all binaries) |
 
 "Stubbed" = spec is final, body compiles and raises a
 Not-Implemented exception if called.
@@ -108,6 +108,23 @@ End-to-end integration suite against `tests/server/server.py`
 fixture (waiting on the `READY` line for sync, killing it on
 exit), runs every binary in `tests/bin/`, and reports
 pass/fail.
+
+In-process Ada-only test of the cancel surface:
+
+  - `tests/bin/test_http_cancel` — four cases against in-process
+    Ada server tasks. (1) **Cancel during a blocked Read**: a
+    silent server holds the TCP connection without writing; a
+    sibling task fires `Cancel` after 200 ms; `Send` raises
+    `Aborted_Error` in well under the 1.5 s safety window, and
+    `Is_Cancelled` reflects the call. (2) **Pre-cancel**: handle
+    is cancelled *before* `Send`; the call raises immediately
+    against `http://127.0.0.1:1/never` and stays under 0.5 s,
+    proving the short-circuit happens before any connect attempt.
+    (3) **Post-Send cancel is a no-op**: a fast in-process server
+    responds 200 quickly, `Send` returns normally, then `Cancel`
+    on the now-unbound handle runs without raising (and
+    `Is_Cancelled` flips to true). (4) **Fresh handle**:
+    `Is_Cancelled` is false on a never-cancelled handle.
   - `tests/bin/test_http_io` — mock-transport unit test of HTTP.IO:
     `Write_All` forwards bytes (empty is a no-op); `Read_Line`
     returns status / header lines without CRLF and leaves the
@@ -142,11 +159,11 @@ are treated as byte sequences (UTF-8 is caller's responsibility).
 
 In the order the plan specifies:
 
-1. `Cancel_Handle` / streaming / async surfaces of task 8 on top
-   of the existing sync `Client.Send`. Cancel maps to
-   `Transport.Abort_Pending` (already wired and tested in
-   `test_tcp`); streaming/async layer on top of the shared sync
-   core.
+1. Streaming + async surfaces of task 8 on top of the existing
+   sync `Client.Send` (Cancel landed in the 4-arg `Send`
+   overload). Streaming swaps `Response.Read`'s buffered `Body_B`
+   for a per-chunk callback; async wraps the whole `Send` in a
+   task and returns a future-like.
 2. Real `scripts/fetch_mbedtls.sh` + `scripts/regen_mbedtls_bindings.sh`
    (`gcc -fdump-ada-spec` over mbedTLS 2.28.9 headers, curated into
    `src/`).

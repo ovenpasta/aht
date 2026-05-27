@@ -3,6 +3,7 @@ with Ada.Strings.Unbounded;
 with AHT.HTTP.Headers;
 with AHT.HTTP.Request;
 with AHT.HTTP.Response;
+with AHT.Transport;
 
 package AHT.HTTP.Client is
 
@@ -14,6 +15,33 @@ package AHT.HTTP.Client is
       Insecure        : Boolean := False;
       Timeout_Seconds : Natural := 30;
    end record;
+
+   --  Cross-task cancel for an in-flight Send. Owned by the caller,
+   --  passed by reference to the cancellable Send overload below.
+   --
+   --  Lifecycle:
+   --    * `Cancel` from any task aborts a Send currently running with
+   --      this handle (Send raises `AHT.Transport.Aborted_Error`).
+   --    * `Cancel` before Send starts arms the handle: the next Send
+   --      raises `Aborted_Error` immediately without dialing.
+   --    * `Cancel` after Send returns is a harmless no-op.
+   --    * `Is_Cancelled` reflects whether `Cancel` has ever been
+   --      called on this handle.
+   --
+   --  v1 caveats:
+   --    * Cancel takes effect during the response Read; it does not
+   --      interrupt the TCP connect (`Abort_Pending` is a Read-side
+   --      hook). A pre-cancelled handle short-circuits before connect.
+   --    * Single-use: once `Cancel` has been called, every subsequent
+   --      Send with this handle aborts immediately. Declare a fresh
+   --      handle per cancellable operation.
+   --    * Single-Send-at-a-time: sharing one handle across two
+   --      concurrent Sends races on the bound-transport slot — Cancel
+   --      will only abort one of them, unpredictably.
+   type Cancel_Handle is limited private;
+
+   procedure Cancel (Self : in out Cancel_Handle);
+   function  Is_Cancelled (Self : Cancel_Handle) return Boolean;
 
    procedure Send
      (Self : in out Client_Type;
@@ -54,11 +82,49 @@ package AHT.HTTP.Client is
    --  expiry, or external cancel. The transport is closed in every
    --  exit path.
 
+   procedure Send
+     (Self   : in out Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Cancel : in out Cancel_Handle);
+   --  Same as the 3-argument Send, plus cross-task cancellation via
+   --  `Cancel` (see `Cancel_Handle` above for the lifecycle rules).
+   --  Raises `AHT.Transport.Aborted_Error` if cancelled before or
+   --  during the request; the transport is closed on the abort path
+   --  just like any other exception exit.
+
    function Get
      (Self : in out Client_Type;
       URL  : String) return AHT.HTTP.Response.Response_Type;
    --  Convenience wrapper: parses `URL`, builds a GET request with
    --  no body, and calls `Send`. Raises `AHT.URL.Parse_Error` on a
    --  malformed URL.
+
+private
+
+   --  Holds the transport currently bound to a Send and the sticky
+   --  Cancelled flag. All access is serialized by the protected
+   --  object so Cancel / Bind / Unbind are race-free across tasks.
+   --
+   --  Bind passes a stack-local transport pointer (via
+   --  'Unchecked_Access) into the protected state for the duration
+   --  of the Send call; Unbind clears it before Send returns.
+   --  The Bound pointer is therefore always either null or pointing
+   --  at a live transport on the active Send's stack — never
+   --  dangling.
+   protected type Cancel_State is
+      procedure Cancel_Internal;
+      procedure Bind (T : AHT.Transport.Transport_Access);
+      procedure Unbind;
+      function  Was_Cancelled return Boolean;
+      function  Is_Bound return Boolean;
+   private
+      Bound     : AHT.Transport.Transport_Access := null;
+      Cancelled : Boolean := False;
+   end Cancel_State;
+
+   type Cancel_Handle is limited record
+      State : aliased Cancel_State;
+   end record;
 
 end AHT.HTTP.Client;

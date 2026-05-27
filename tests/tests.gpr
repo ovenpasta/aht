@@ -18,7 +18,8 @@ project Tests is
       "test_http_get.adb",
       "test_http_chunked.adb",
       "test_http_post.adb",
-      "test_http_auth.adb");
+      "test_http_auth.adb",
+      "test_http_cancel.adb");
 
    package Compiler renames Aht.Compiler;
    package Binder   renames Aht.Binder;

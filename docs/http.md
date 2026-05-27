@@ -249,3 +249,59 @@ function  Get  (Self, URL) return Response_Type;
 
 - **`Get (URL)`** — convenience: parses `URL`, builds a GET with no
   body, calls `Send`. Raises `AHT.URL.Parse_Error` on malformed URL.
+
+### Cancellation — `Cancel_Handle`
+
+The 4-argument `Send` takes a `Cancel_Handle` for cross-task abort:
+
+```ada
+type Cancel_Handle is limited private;
+procedure Cancel        (Self : in out Cancel_Handle);
+function  Is_Cancelled  (Self : Cancel_Handle) return Boolean;
+
+procedure Send
+  (Self   : in out Client_Type;
+   Req    : Request_Type;
+   Resp   : out Response_Type;
+   Cancel : in out Cancel_Handle);
+```
+
+Internally the handle wraps a protected object holding the
+currently-bound transport and a sticky `Cancelled` flag. `Send`
+binds the transport after `Connect` and unbinds before `Close`;
+`Cancel` from any task sets the flag and dispatches
+`Transport.Abort_Pending` on the bound transport, which is what
+unblocks a parked `Read` (the same mechanism `test_tcp` exercises
+at the transport layer).
+
+Lifecycle:
+
+- **Cancel during the request** → `Send` raises
+  `AHT.Transport.Aborted_Error` from inside the response `Read`.
+  The transport is closed on the abort path.
+- **Cancel before Send** → handle is armed; the next `Send` raises
+  immediately *before* dialing. Without this, a pre-cancelled
+  handle would still cost a TCP connect.
+- **Cancel after Send returns** → handle's `Bound` is null;
+  `Cancel` is a quiet no-op (the flag still flips so
+  `Is_Cancelled` reports the call happened).
+- **Bind race** — if `Cancel` lands between `Connect` returning
+  and `Bind` running, the `Bind` body re-checks `Cancelled` under
+  the protected lock and fires `Abort_Pending` on the
+  freshly-bound transport. The very first `Read` then raises.
+
+Caveats:
+
+- **Single-use.** Once `Cancel` has been called, every subsequent
+  `Send` with this handle aborts immediately. Declare a fresh
+  handle per cancellable operation.
+- **No connect cancellation in v1.** `Abort_Pending` is a Read-
+  side hook; `Cancel` can't interrupt a `Connect` in flight. A
+  hung connect waits for the OS connect timeout (the client has
+  no connect-side timeout of its own — `Timeout_Seconds` only
+  feeds `Set_Read_Deadline`, which runs after `Connect` returns).
+  The cancel then takes effect on the first Read.
+- **Don't share a handle across concurrent `Send`s.** The
+  protected `Bound` slot is overwritten by whichever Send binds
+  last; `Cancel` will only abort that one. Use one handle per
+  call.

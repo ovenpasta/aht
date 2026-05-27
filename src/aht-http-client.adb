@@ -3,11 +3,12 @@ with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 
 with AHT.HTTP.Methods;
-with AHT.Transport;
 with AHT.Transport.TCP;
 with AHT.URL;
 
 package body AHT.HTTP.Client is
+
+   use type AHT.Transport.Transport_Access;
 
    --  "host" or "host:port" — only emits the port when it differs
    --  from the URL scheme's default, matching how browsers and curl
@@ -88,31 +89,63 @@ package body AHT.HTTP.Client is
       end loop;
    end Wire_Round_Trip;
 
-   procedure Send
-     (Self : in out Client_Type;
-      Req  : AHT.HTTP.Request.Request_Type;
-      Resp : out AHT.HTTP.Response.Response_Type)
+   --  Single core for both Send overloads. When `Cancel` is null,
+   --  behaves exactly like the no-cancel path. When `Cancel` is
+   --  non-null, threads the live transport into the protected state
+   --  so a concurrent Cancel can Abort_Pending on it.
+   --
+   --  Pre-cancel is honoured *before* connect — a handle that was
+   --  Cancelled before Send started must not even dial.
+   procedure Run_Request
+     (Self   : Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Cancel : access Cancel_State)
    is
       Working : AHT.HTTP.Request.Request_Type := Req;
    begin
       Merge_Headers (Self, Req, Working);
 
+      if Cancel /= null and then Cancel.Was_Cancelled then
+         raise AHT.Transport.Aborted_Error
+           with "HTTP.Client.Send: Cancel_Handle was triggered "
+             & "before the request started";
+      end if;
+
       case Req.Target.Scheme is
          when AHT.URL.HTTP =>
             declare
-               T : AHT.Transport.TCP.TCP_Transport;
+               T : aliased AHT.Transport.TCP.TCP_Transport;
             begin
                AHT.Transport.TCP.Connect
                  (T,
                   Host => To_String (Req.Target.Host),
                   Port => Req.Target.Port);
+
+               --  Race window: Cancel could fire between Connect
+                --  returning and Bind running. Bind itself
+                --  re-checks Cancelled under the protected lock and
+                --  triggers Abort_Pending on the freshly-bound
+                --  transport, so a Cancel landing here still takes
+                --  effect on the next Read.
+               if Cancel /= null then
+                  Cancel.Bind (T'Unchecked_Access);
+               end if;
+
                begin
                   Wire_Round_Trip (Self, Working, Req.Method, T, Resp);
                exception
                   when others =>
+                     if Cancel /= null then
+                        Cancel.Unbind;
+                     end if;
                      T.Close;
                      raise;
                end;
+
+               if Cancel /= null then
+                  Cancel.Unbind;
+               end if;
                T.Close;
             end;
 
@@ -126,6 +159,23 @@ package body AHT.HTTP.Client is
               with "ws/wss URL passed to HTTP.Client.Send; "
                 & "use AHT.Websocket.Client for WebSocket connections";
       end case;
+   end Run_Request;
+
+   procedure Send
+     (Self : in out Client_Type;
+      Req  : AHT.HTTP.Request.Request_Type;
+      Resp : out AHT.HTTP.Response.Response_Type) is
+   begin
+      Run_Request (Self, Req, Resp, Cancel => null);
+   end Send;
+
+   procedure Send
+     (Self   : in out Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Cancel : in out Cancel_Handle) is
+   begin
+      Run_Request (Self, Req, Resp, Cancel => Cancel.State'Access);
    end Send;
 
    function Get
@@ -140,5 +190,48 @@ package body AHT.HTTP.Client is
       Send (Self, Req, Resp);
       return Resp;
    end Get;
+
+   procedure Cancel (Self : in out Cancel_Handle) is
+   begin
+      Self.State.Cancel_Internal;
+   end Cancel;
+
+   function Is_Cancelled (Self : Cancel_Handle) return Boolean is
+     (Self.State.Was_Cancelled);
+
+   protected body Cancel_State is
+
+      procedure Cancel_Internal is
+      begin
+         Cancelled := True;
+         if Bound /= null then
+            --  Dispatching call into the bound transport's
+            --  Abort_Pending. Idempotent on the transport side; safe
+            --  if called multiple times.
+            Bound.Abort_Pending;
+         end if;
+      end Cancel_Internal;
+
+      procedure Bind (T : AHT.Transport.Transport_Access) is
+      begin
+         Bound := T;
+         --  If Cancel landed before Bind (between Connect and here),
+         --  fire Abort_Pending now so the very first Read on this
+         --  transport raises Aborted_Error instead of blocking.
+         if Cancelled and then T /= null then
+            T.Abort_Pending;
+         end if;
+      end Bind;
+
+      procedure Unbind is
+      begin
+         Bound := null;
+      end Unbind;
+
+      function Was_Cancelled return Boolean is (Cancelled);
+
+      function Is_Bound return Boolean is (Bound /= null);
+
+   end Cancel_State;
 
 end AHT.HTTP.Client;
