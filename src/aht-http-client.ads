@@ -1,3 +1,4 @@
+with Ada.Exceptions;
 with Ada.Strings.Unbounded;
 
 with AHT.Bytes;
@@ -143,6 +144,70 @@ package AHT.HTTP.Client is
    --  no body, and calls `Send`. Raises `AHT.URL.Parse_Error` on a
    --  malformed URL.
 
+   --  Async surface: kick off a buffered Send in a worker task and
+   --  collect the response later via Await. Same wire behaviour as
+   --  the sync Send (header merging, 1xx loop, HEAD suppression,
+   --  scheme dispatch); the worker just runs on its own task so the
+   --  caller can do other work in the meantime.
+   --
+   --  Lifecycle:
+   --    * Declare an Async_Handle. The worker task auto-starts and
+   --      waits at an internal `accept Start or terminate`.
+   --    * Send_Async snapshots Self + Req into the worker and kicks
+   --      off the request. Returns immediately.
+   --    * Await blocks until the worker is done; returns the
+   --      response or re-raises the worker's exception (with
+   --      original identity preserved via Save_Occurrence).
+   --    * Cancel from any task aborts the in-flight request the
+   --      same way Cancel_Handle.Cancel does (Transport.Abort_Pending
+   --      on the bound transport, with the same pre-cancel and
+   --      bind-race semantics).
+   --
+   --  Caveats:
+   --    * Single-use. Each handle services exactly one Send_Async.
+   --      A second call raises HTTP_Error. Declare a fresh handle.
+   --    * Self and Req are snapshotted into the worker at Start;
+   --      mutating them in the caller after Send_Async has no
+   --      effect on the in-flight call.
+   --    * If the handle goes out of scope before Await, the
+   --      enclosing master waits for the worker to finish
+   --      Run_Request (the natural Ada behaviour). Cancel + Await
+   --      if you want to abandon a request without blocking on it.
+   type Async_Handle is limited private;
+
+   procedure Send_Async
+     (Self  : in out Client_Type;
+      Req   : AHT.HTTP.Request.Request_Type;
+      Async : in out Async_Handle);
+
+   procedure Await
+     (Self : in out Async_Handle;
+      Resp : out AHT.HTTP.Response.Response_Type);
+   --  Blocks until the worker finishes. On success returns the
+   --  response; on failure re-raises whatever Run_Request raised
+   --  (Aborted_Error / Transport_Error / HTTP_Error / etc.) with
+   --  the original exception identity intact.
+   --
+   --  Raises `HTTP_Error` if the handle has not been `Send_Async`'d
+   --  yet — otherwise the worker is still parked at its Start
+   --  rendezvous and Await would deadlock.
+   --
+   --  Safe to call any number of times. The worker stashes the
+   --  result in the handle's protected state before terminating,
+   --  so subsequent calls just re-read it without blocking
+   --  (success returns the same response; failure re-raises the
+   --  same exception).
+
+   procedure Cancel (Self : in out Async_Handle);
+   --  Same semantics as Cancel_Handle.Cancel.
+
+   function Is_Done       (Self : Async_Handle) return Boolean;
+   --  True once the worker has returned from Run_Request (success
+   --  or exception). Await on a Done handle returns without
+   --  blocking.
+
+   function Is_Cancelled  (Self : Async_Handle) return Boolean;
+
 private
 
    --  Holds the transport currently bound to a Send and the sticky
@@ -156,18 +221,68 @@ private
    --  at a live transport on the active Send's stack — never
    --  dangling.
    protected type Cancel_State is
+
+      --  Cancel-side (used by both sync Cancel_Handle and async
+      --  Async_Handle).
       procedure Cancel_Internal;
       procedure Bind (T : AHT.Transport.Transport_Access);
       procedure Unbind;
       function  Was_Cancelled return Boolean;
       function  Is_Bound return Boolean;
+
+      --  Async-only (sync Cancel_Handle never invokes these). The
+      --  worker stores its result here and then terminates; Await
+      --  waits on the entry barrier and reads the stored state, so
+      --  multiple Awaits all see the same outcome.
+      procedure Mark_Done_OK  (R : AHT.HTTP.Response.Response_Type);
+      procedure Mark_Done_Err
+        (E : Ada.Exceptions.Exception_Occurrence);
+      entry     Wait_Until_Done;
+      procedure Read_Result
+        (Out_Resp   : out AHT.HTTP.Response.Response_Type;
+         Out_OK     : out Boolean;
+         Out_Caught : out Ada.Exceptions.Exception_Occurrence);
+      function  Is_Done_Flag return Boolean;
+
    private
-      Bound     : AHT.Transport.Transport_Access := null;
-      Cancelled : Boolean := False;
+      Bound         : AHT.Transport.Transport_Access := null;
+      Cancelled     : Boolean := False;
+      Done_Flag     : Boolean := False;
+      Result_OK     : Boolean := False;
+      Result_Resp   : AHT.HTTP.Response.Response_Type;
+      Result_Caught : Ada.Exceptions.Exception_Occurrence;
    end Cancel_State;
+
+   type Cancel_State_Access is access all Cancel_State;
+   --  Named access so a pointer to Cancel_State can appear in task
+   --  entry parameter lists (RM 9.5.2: anonymous access parameters
+   --  are forbidden on entries).
 
    type Cancel_Handle is limited record
       State : aliased Cancel_State;
+   end record;
+
+   --  Worker task that owns one in-flight Send for an Async_Handle.
+   --  Auto-started on Async_Handle elaboration; blocks at Start
+   --  until Send_Async kicks the request off, then runs
+   --  Run_Request, stashes the result (response or exception) in
+   --  the shared Cancel_State via Mark_Done_OK / Mark_Done_Err,
+   --  and terminates. The result lives in the protected state, so
+   --  Await reads it from there instead of through a second
+   --  rendezvous — multiple Awaits and "drop without Await" both
+   --  work cleanly. The terminate alternative on Start lets a
+   --  never-Send_Async'd handle collapse when its master ends.
+   task type Worker_Task is
+      entry Start
+        (Client_Snapshot  : Client_Type;
+         Request_Snapshot : AHT.HTTP.Request.Request_Type;
+         State_Ref        : Cancel_State_Access);
+   end Worker_Task;
+
+   type Async_Handle is limited record
+      State   : aliased Cancel_State;
+      Worker  : Worker_Task;
+      Started : Boolean := False;
    end record;
 
 end AHT.HTTP.Client;

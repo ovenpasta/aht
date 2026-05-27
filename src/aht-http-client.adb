@@ -285,10 +285,160 @@ package body AHT.HTTP.Client is
          Bound := null;
       end Unbind;
 
+      procedure Mark_Done_OK
+        (R : AHT.HTTP.Response.Response_Type) is
+      begin
+         Result_Resp := R;
+         Result_OK   := True;
+         Done_Flag   := True;
+      end Mark_Done_OK;
+
+      procedure Mark_Done_Err
+        (E : Ada.Exceptions.Exception_Occurrence) is
+      begin
+         Ada.Exceptions.Save_Occurrence (Result_Caught, E);
+         Result_OK := False;
+         Done_Flag := True;
+      end Mark_Done_Err;
+
+      entry Wait_Until_Done when Done_Flag is
+      begin
+         null;
+         --  Caller wakes when the worker has stored a result.
+         --  Multiple callers all proceed because the barrier
+         --  stays open once Done_Flag is True.
+      end Wait_Until_Done;
+
+      procedure Read_Result
+        (Out_Resp   : out AHT.HTTP.Response.Response_Type;
+         Out_OK     : out Boolean;
+         Out_Caught : out Ada.Exceptions.Exception_Occurrence) is
+      begin
+         Out_Resp := Result_Resp;
+         Out_OK   := Result_OK;
+         Ada.Exceptions.Save_Occurrence (Out_Caught, Result_Caught);
+      end Read_Result;
+
       function Was_Cancelled return Boolean is (Cancelled);
+
+      function Is_Done_Flag return Boolean is (Done_Flag);
 
       function Is_Bound return Boolean is (Bound /= null);
 
    end Cancel_State;
+
+   ---------------------------------------------------------------------
+   --  Async
+   ---------------------------------------------------------------------
+
+   task body Worker_Task is
+      Client_Snap : Client_Type;
+      Req_Snap    : AHT.HTTP.Request.Request_Type;
+      State       : Cancel_State_Access := null;
+      Resp        : AHT.HTTP.Response.Response_Type;
+
+      procedure Append_To_Resp (Chunk : AHT.Bytes.Byte_Array) is
+      begin
+         for B of Chunk loop
+            Resp.Body_B.Append (B);
+         end loop;
+      end Append_To_Resp;
+   begin
+      --  Wait for Send_Async to fire Start. If the handle goes out
+      --  of scope without ever calling Send_Async, the terminate
+      --  alternative fires when the master finalizes us and we
+      --  collapse cleanly.
+      select
+         accept Start
+           (Client_Snapshot  : Client_Type;
+            Request_Snapshot : AHT.HTTP.Request.Request_Type;
+            State_Ref        : Cancel_State_Access)
+         do
+            Client_Snap := Client_Snapshot;
+            Req_Snap    := Request_Snapshot;
+            State       := State_Ref;
+         end Start;
+      or
+         terminate;
+      end select;
+
+      --  Run the request, stash the result in the shared state,
+      --  and terminate. Await reads from the protected state, so
+      --  there's no second rendezvous — multiple Awaits and
+      --  "drop without Await" both work cleanly.
+      begin
+         Run_Request (Client_Snap, Req_Snap, Resp,
+                      Sink   => Append_To_Resp'Access,
+                      Cancel => State);
+         if State /= null then
+            State.Mark_Done_OK (Resp);
+         end if;
+      exception
+         when E : others =>
+            if State /= null then
+               State.Mark_Done_Err (E);
+            end if;
+      end;
+   end Worker_Task;
+
+   procedure Send_Async
+     (Self  : in out Client_Type;
+      Req   : AHT.HTTP.Request.Request_Type;
+      Async : in out Async_Handle) is
+   begin
+      if Async.Started then
+         raise HTTP_Error
+           with "HTTP.Client.Send_Async: Async_Handle already "
+             & "started; declare a fresh handle per request";
+      end if;
+      Async.Started := True;
+      --  'Unchecked_Access bypasses Ada's static accessibility check
+      --  because the named Cancel_State_Access type has library-level
+      --  accessibility but Async.State is on the caller's stack. The
+      --  unsafety the check guards against is the access outliving
+      --  the designated object — that can't happen here: the only
+      --  holder of State_Ref is Async.Worker, which is also a
+      --  component of Async_Handle and is finalized together with
+      --  Async.State when the handle goes out of scope (master waits
+      --  for the task before component finalization, RM 9.3).
+      Async.Worker.Start
+        (Client_Snapshot  => Self,
+         Request_Snapshot => Req,
+         State_Ref        => Async.State'Unchecked_Access);
+   end Send_Async;
+
+   procedure Await
+     (Self : in out Async_Handle;
+      Resp : out AHT.HTTP.Response.Response_Type)
+   is
+      OK         : Boolean;
+      Caught_Exn : Ada.Exceptions.Exception_Occurrence;
+   begin
+      --  Reject a never-started handle: the worker is parked at
+      --  its Start rendezvous and Wait_Until_Done would block
+      --  forever (Done_Flag stays False until Run_Request runs).
+      if not Self.Started then
+         raise HTTP_Error
+           with "HTTP.Client.Await: Async_Handle has not been "
+             & "Send_Async'd";
+      end if;
+
+      Self.State.Wait_Until_Done;
+      Self.State.Read_Result (Resp, OK, Caught_Exn);
+      if not OK then
+         Ada.Exceptions.Reraise_Occurrence (Caught_Exn);
+      end if;
+   end Await;
+
+   procedure Cancel (Self : in out Async_Handle) is
+   begin
+      Self.State.Cancel_Internal;
+   end Cancel;
+
+   function Is_Done (Self : Async_Handle) return Boolean is
+     (Self.State.Is_Done_Flag);
+
+   function Is_Cancelled (Self : Async_Handle) return Boolean is
+     (Self.State.Was_Cancelled);
 
 end AHT.HTTP.Client;

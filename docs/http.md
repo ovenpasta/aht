@@ -11,7 +11,7 @@ Packages under `AHT.HTTP`:
 | `AHT.HTTP.Request` | implemented (wire write) |
 | `AHT.HTTP.Response` | implemented (wire read) |
 | `AHT.HTTP.IO` | implemented (chunked decoder has streaming + buffered overloads) |
-| `AHT.HTTP.Client` | implemented (HTTP, sync + streaming, with cancel); HTTPS pending TLS |
+| `AHT.HTTP.Client` | implemented (HTTP, sync + streaming + async, with cancel); HTTPS pending TLS |
 
 Common exceptions (in `AHT.HTTP`): `HTTP_Error`, `Protocol_Error`,
 `Handshake_Error`.
@@ -349,3 +349,59 @@ Caveats:
   protected `Bound` slot is overwritten by whichever Send binds
   last; `Cancel` will only abort that one. Use one handle per
   call.
+
+### Async — `Send_Async` / `Await`
+
+```ada
+type Async_Handle is limited private;
+procedure Send_Async  (Self : in out Client_Type;
+                       Req  : Request_Type;
+                       Async : in out Async_Handle);
+procedure Await       (Self : in out Async_Handle;
+                       Resp : out Response_Type);
+procedure Cancel      (Self : in out Async_Handle);
+function  Is_Done     (Self : Async_Handle) return Boolean;
+function  Is_Cancelled (Self : Async_Handle) return Boolean;
+```
+
+`Async_Handle` wraps a worker task plus a `Cancel_State`. The
+worker auto-starts when the handle is elaborated and blocks at an
+internal `accept Start or terminate`. `Send_Async` snapshots
+`Self` and `Req` into the worker, kicks off the request, and
+returns immediately. The worker runs the same `Run_Request` core
+as the sync surface, stashes the response (or the exception via
+`Ada.Exceptions.Save_Occurrence`) in the shared `Cancel_State`,
+flips `Done_Flag`, and **terminates**. `Await` waits on the
+`Done_Flag` barrier and reads the stored result; multiple Awaits
+all read the same state. `Cancel` is the same Cancel_State
+mechanism as the sync handle.
+
+Lifecycle:
+
+- **One Send per handle.** A second `Send_Async` on a started
+  handle raises `HTTP_Error`. Declare a fresh handle per request.
+- **`Await` before `Send_Async` raises.** A fresh handle's worker
+  is parked at its `Start` rendezvous and `Wait_Until_Done` would
+  block forever, so `Await` checks `Started` first and raises
+  `HTTP_Error` rather than deadlocking.
+- **`Await` is replayable.** Subsequent Awaits on a Done handle
+  re-read the cached response (or re-raise the cached
+  exception); no second rendezvous, no block.
+- **Snapshot at Start.** `Self` and `Req` are copied into the
+  worker by the entry call; mutating them in the caller after
+  `Send_Async` has no effect on the in-flight request.
+- **Cancel before, during, or after.** Same Cancel_State rules:
+  pre-cancel before `Send_Async` arms the next Send; cancel
+  during `Run_Request` aborts the bound transport; cancel after
+  `Await` (the worker is past Done) is a sticky no-op that just
+  flips `Is_Cancelled`.
+- **Drop without `Await`.** The worker terminates as soon as it
+  finishes `Run_Request` and stashes the result, so the
+  enclosing master only waits for `Run_Request` itself — no
+  trailing rendezvous. A hung connect or read still blocks the
+  scope exit, so `Cancel` + `Await` if you might want to abandon
+  before the request finishes.
+
+Streaming async (`Send_Streaming_Async`) is **not** in v1. If
+you want streaming + async, spawn your own task that calls
+`Send_Streaming` directly.
