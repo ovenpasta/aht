@@ -2,6 +2,7 @@ with Ada.Strings.Unbounded;
 
 with AHT.Bytes;
 with AHT.HTTP.Headers;
+with AHT.Transport.TCP;
 
 package AHT.Websocket.Client is
 
@@ -73,6 +74,11 @@ package AHT.Websocket.Client is
 private
 
    type Client_Type is tagged limited record
+      --  v1 plain only — wss:// will replace this with a TLS
+      --  transport once mbedTLS is wired. Inline (not heap) so the
+      --  Client owns its transport for its full lifetime; Connect
+      --  populates it on success, Close tears it down.
+      Transport          : AHT.Transport.TCP.TCP_Transport;
       Open               : Boolean := False;
       Selected_Protocol  : Ada.Strings.Unbounded.Unbounded_String;
       On_Message         : On_Message_Callback := null;

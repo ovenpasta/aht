@@ -1,25 +1,32 @@
 #!/bin/sh
 #
 # AHT test orchestrator: builds the library + test binaries, brings
-# up tests/server/server.py on 127.0.0.1:8764, runs every binary in
-# tests/bin/, and tears the server down on exit.
+# up the two Python fixtures (HTTP on 8764, WebSocket on 8765), runs
+# every test main listed in tests/tests.gpr, and tears the fixtures
+# down on exit.
 #
 # Self-contained tests (test_url, test_url_encoding, test_headers,
-# test_log, test_tcp, test_http_io, test_http_wire, test_http_client)
-# don't touch the Python server but cost nothing to leave it
-# running, so the script doesn't bother partitioning them.
+# test_log, test_tcp, test_http_io, test_http_wire, test_http_client,
+# test_ws_frames) don't touch either fixture but cost nothing to
+# leave them running, so the script doesn't bother partitioning.
 
 set -eu
 
 cd "$(dirname "$0")/.."
 
+VENV=tests/.venv
 LOG=$(mktemp -t aht-server.XXXXXX.log)
-SERVER_PID=
+HTTP_PID=
+WS_PID=
 
 cleanup() {
-    if [ -n "$SERVER_PID" ]; then
-        kill "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
+    if [ -n "$HTTP_PID" ]; then
+        kill "$HTTP_PID" 2>/dev/null || true
+        wait "$HTTP_PID" 2>/dev/null || true
+    fi
+    if [ -n "$WS_PID" ]; then
+        kill "$WS_PID" 2>/dev/null || true
+        wait "$WS_PID" 2>/dev/null || true
     fi
     rm -f "$LOG"
 }
@@ -31,21 +38,38 @@ alr build
 echo "==> building tests"
 alr exec -- gprbuild -P tests/tests.gpr
 
-echo "==> starting HTTP fixture (port 8764)"
-python3 tests/server/server.py >"$LOG" 2>&1 &
-SERVER_PID=$!
+echo "==> preparing venv (tests/.venv)"
+if [ ! -d "$VENV" ]; then
+    python3 -m venv "$VENV"
+fi
+# -q so a fully-cached install doesn't spam the log. Always run so
+# a fresh requirements.txt entry gets picked up without the
+# developer having to delete the venv.
+"$VENV"/bin/pip install -q -r tests/server/requirements.txt
+PY="$VENV"/bin/python3
 
-# Wait for the server's READY line (printed once it's listening).
-# 5 s should be plenty; bail out loudly if it never appears so a
-# crashed server doesn't masquerade as test failures.
+echo "==> starting HTTP fixture (port 8764) + WS fixture (port 8765)"
+"$PY" tests/server/server.py    >>"$LOG" 2>&1 &
+HTTP_PID=$!
+"$PY" tests/server/server_ws.py >>"$LOG" 2>&1 &
+WS_PID=$!
+
+# Wait for both servers' READY lines (printed once they're listening).
+# 5 s should be plenty; bail out loudly if either never appears so a
+# crashed fixture doesn't masquerade as test failures.
 for _ in $(seq 1 50); do
-    if grep -q '^READY ' "$LOG" 2>/dev/null; then
+    HAS_HTTP=$(grep -c '^READY http ' "$LOG" 2>/dev/null || true)
+    HAS_WS=$(grep -c   '^READY ws '   "$LOG" 2>/dev/null || true)
+    if [ "$HAS_HTTP" -ge 1 ] && [ "$HAS_WS" -ge 1 ]; then
         break
     fi
     sleep 0.1
 done
-if ! grep -q '^READY ' "$LOG" 2>/dev/null; then
-    echo "FATAL: HTTP fixture did not become ready in 5s; log follows:"
+HAS_HTTP=$(grep -c '^READY http ' "$LOG" 2>/dev/null || echo 0)
+HAS_WS=$(grep -c   '^READY ws '   "$LOG" 2>/dev/null || echo 0)
+if [ "$HAS_HTTP" -lt 1 ] || [ "$HAS_WS" -lt 1 ]; then
+    echo "FATAL: fixtures did not become ready in 5s (http=$HAS_HTTP "
+    echo "ws=$HAS_WS); log follows:"
     cat "$LOG"
     exit 2
 fi

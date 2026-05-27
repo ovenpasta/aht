@@ -34,3 +34,4 @@ __pycache__/
 *.swp
 *~
 .DS_Store
+tests/.venv

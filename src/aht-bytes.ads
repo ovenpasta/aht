@@ -20,4 +20,11 @@ package AHT.Bytes is
    function From_String (S : String) return Byte_Array;
    function To_String   (B : Byte_Array) return String;
 
+   function Base64_Encode (B : Byte_Array) return String;
+   --  Standard Base64 per RFC 4648 §4 — `+` / `/` alphabet, `=`
+   --  padding. Used by the WebSocket handshake to build the
+   --  `Sec-WebSocket-Key` header value and to verify the server's
+   --  `Sec-WebSocket-Accept` echo. Not URL-safe; if URL-safe
+   --  Base64 is needed later, add a separate routine.
+
 end AHT.Bytes;
