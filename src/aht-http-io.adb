@@ -119,11 +119,12 @@ package body AHT.HTTP.IO is
       end loop;
    end Read_N;
 
-   function Read_Chunked_Body
-     (T : in out AHT.Transport.Transport_Type'Class)
-      return AHT.Bytes.Byte_Vector
+   procedure Read_Chunked_Body
+     (T    : in out AHT.Transport.Transport_Type'Class;
+      Sink : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array))
    is
-      Result : AHT.Bytes.Byte_Vector;
+      Total : Natural := 0;
 
       function Chunk_Size_From_Line (Line : String) return Natural;
 
@@ -156,9 +157,8 @@ package body AHT.HTTP.IO is
                Chunk : AHT.Bytes.Byte_Array (1 .. Size);
             begin
                Read_N (T, Chunk);
-               for B of Chunk loop
-                  Result.Append (B);
-               end loop;
+               Sink (Chunk);
+               Total := Total + Size;
             end;
 
             --  RFC 7230: chunk-data is followed by CRLF.
@@ -186,9 +186,24 @@ package body AHT.HTTP.IO is
 
       if Log.Enabled (AHT.Log.Debug) then
          Log.Debug
-           ("chunked body: " & Natural'Image (Natural (Result.Length))
-            & " bytes");
+           ("chunked body: " & Natural'Image (Total) & " bytes");
       end if;
+   end Read_Chunked_Body;
+
+   function Read_Chunked_Body
+     (T : in out AHT.Transport.Transport_Type'Class)
+      return AHT.Bytes.Byte_Vector
+   is
+      Result : AHT.Bytes.Byte_Vector;
+
+      procedure Append_To_Result (Chunk : AHT.Bytes.Byte_Array) is
+      begin
+         for B of Chunk loop
+            Result.Append (B);
+         end loop;
+      end Append_To_Result;
+   begin
+      Read_Chunked_Body (T, Append_To_Result'Access);
       return Result;
    end Read_Chunked_Body;
 

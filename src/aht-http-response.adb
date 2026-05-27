@@ -145,26 +145,61 @@ package body AHT.HTTP.Response is
          Value => Strip_OWS (Line (Colon + 1 .. Line'Last)));
    end Parse_Header_Line;
 
-   procedure Read_Until_EOF
-     (T    : in out AHT.Transport.Transport_Type'Class;
-      Out_Body : in out AHT.Bytes.Byte_Vector)
+   --  Streaming Content-Length body: read up to Chunk_Size bytes at
+   --  a time, dispatch each fill to Sink. Single Read_N for small
+   --  N (one chunk to Sink); larger N gets sliced into Chunk_Size
+   --  pieces so users see progress on large downloads.
+   procedure Read_N_Streaming
+     (T      : in out AHT.Transport.Transport_Type'Class;
+      N      : Natural;
+      Sink   : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array))
    is
-      Chunk : AHT.Bytes.Byte_Array (1 .. 4_096);
-      Last  : Natural;
+      Chunk_Size : constant Positive := 4_096;
+      Remaining  : Natural := N;
+   begin
+      while Remaining > 0 loop
+         declare
+            This : constant Positive :=
+              (if Remaining < Chunk_Size then Remaining else Chunk_Size);
+            Buf  : AHT.Bytes.Byte_Array (1 .. This);
+         begin
+            AHT.HTTP.IO.Read_N (T, Buf);
+            Sink (Buf);
+            Remaining := Remaining - This;
+         end;
+      end loop;
+   end Read_N_Streaming;
+
+   --  Streaming read-until-EOF: pull whatever the transport gives
+   --  us per Read and dispatch each slice to Sink until a 0-byte
+   --  read signals peer close.
+   procedure Read_Until_EOF_Streaming
+     (T    : in out AHT.Transport.Transport_Type'Class;
+      Sink : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array))
+   is
+      Buf  : AHT.Bytes.Byte_Array (1 .. 4_096);
+      Last : Natural;
    begin
       loop
-         T.Read (Chunk, Last);
+         T.Read (Buf, Last);
          exit when Last = 0;
-         for I in Chunk'First .. Last loop
-            Out_Body.Append (Chunk (I));
-         end loop;
+         Sink (Buf (Buf'First .. Last));
       end loop;
-   end Read_Until_EOF;
+   end Read_Until_EOF_Streaming;
 
-   procedure Read
-     (Self   : out Response_Type;
-      T      : in out AHT.Transport.Transport_Type'Class;
-      Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET) is
+   --  Common head parser used by Read and Read_Streaming: status
+   --  line, headers, no-body suppression. Returns True if the body
+   --  must be skipped (HEAD / 1xx / 204 / 205 / 304); False if the
+   --  caller should proceed to body framing.
+   procedure Parse_Head
+     (Self        : out Response_Type;
+      T           : in out AHT.Transport.Transport_Type'Class;
+      Method      : AHT.HTTP.Methods.Method_Type;
+      Skip_Body   : out Boolean)
+   is
+      use type AHT.HTTP.Methods.Method_Type;
    begin
       --  Start from a default state so repeated Reads can't leak
       --  residue from a prior response.
@@ -198,18 +233,27 @@ package body AHT.HTTP.Response is
       --    * 204 / 205 / 304 on a Connection: close stream with no
       --      framing header — the EOF fallback would block until the
       --      peer closes, even though the message is complete.
-      declare
-         use type AHT.HTTP.Methods.Method_Type;
-      begin
-         if Method = AHT.HTTP.Methods.HEAD
-           or else Self.Status in 100 .. 199
-           or else Self.Status = 204
-           or else Self.Status = 205
-           or else Self.Status = 304
-         then
-            return;
-         end if;
-      end;
+      Skip_Body :=
+        Method = AHT.HTTP.Methods.HEAD
+        or else Self.Status in 100 .. 199
+        or else Self.Status = 204
+        or else Self.Status = 205
+        or else Self.Status = 304;
+   end Parse_Head;
+
+   procedure Read_Streaming
+     (Self   : out Response_Type;
+      T      : in out AHT.Transport.Transport_Type'Class;
+      Sink   : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array);
+      Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET)
+   is
+      Skip : Boolean;
+   begin
+      Parse_Head (Self, T, Method, Skip);
+      if Skip then
+         return;
+      end if;
 
       --  Body framing: chunked wins, then Content-Length, then EOF.
       if Self.Headers.Contains ("transfer-encoding") then
@@ -222,7 +266,7 @@ package body AHT.HTTP.Response is
             --  don't have yet, so refuse cleanly rather than silently
             --  hand back corrupted bytes.
             if TE = "chunked" then
-               Self.Body_B := AHT.HTTP.IO.Read_Chunked_Body (T);
+               AHT.HTTP.IO.Read_Chunked_Body (T, Sink);
             else
                raise Protocol_Error with
                  "HTTP.Response: unsupported Transfer-Encoding: """
@@ -235,20 +279,30 @@ package body AHT.HTTP.Response is
               Parse_Content_Length
                 (Strip_OWS (Self.Headers.Get ("content-length")));
          begin
-            if N > 0 then
-               declare
-                  Fixed : AHT.Bytes.Byte_Array (1 .. N);
-               begin
-                  AHT.HTTP.IO.Read_N (T, Fixed);
-                  for B of Fixed loop
-                     Self.Body_B.Append (B);
-                  end loop;
-               end;
-            end if;
+            Read_N_Streaming (T, N, Sink);
          end;
       else
-         Read_Until_EOF (T, Self.Body_B);
+         Read_Until_EOF_Streaming (T, Sink);
       end if;
+   end Read_Streaming;
+
+   procedure Read
+     (Self   : out Response_Type;
+      T      : in out AHT.Transport.Transport_Type'Class;
+      Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET)
+   is
+      --  Body sink that appends every delivered chunk to Self.Body_B.
+      --  Parse_Head (called inside Read_Streaming) clears Self before
+      --  this sink ever sees a chunk, so the append-only sink builds
+      --  up a fresh body.
+      procedure Append_To_Body (Chunk : AHT.Bytes.Byte_Array) is
+      begin
+         for B of Chunk loop
+            Self.Body_B.Append (B);
+         end loop;
+      end Append_To_Body;
+   begin
+      Read_Streaming (Self, T, Append_To_Body'Access, Method);
    end Read;
 
 end AHT.HTTP.Response;

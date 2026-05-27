@@ -1,5 +1,6 @@
 with Ada.Strings.Unbounded;
 
+with AHT.Bytes;
 with AHT.HTTP.Headers;
 with AHT.HTTP.Request;
 with AHT.HTTP.Response;
@@ -92,6 +93,48 @@ package AHT.HTTP.Client is
    --  Raises `AHT.Transport.Aborted_Error` if cancelled before or
    --  during the request; the transport is closed on the abort path
    --  just like any other exception exit.
+
+   procedure Send_Streaming
+     (Self : in out Client_Type;
+      Req  : AHT.HTTP.Request.Request_Type;
+      Resp : out AHT.HTTP.Response.Response_Type;
+      Sink : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array));
+   --  Streaming variant of Send: every body byte is delivered to
+   --  `Sink` as it arrives instead of being accumulated in
+   --  `Resp.Body_B`. `Resp.Status`, `Resp.Reason`, and
+   --  `Resp.Headers` are populated as usual; `Resp.Body_B` is
+   --  empty when the call returns.
+   --
+   --  Chunk granularity (none of these are stable contract; tests
+   --  should treat them as hints, not guarantees):
+   --    * `Transfer-Encoding: chunked` — one `Sink` call per
+   --      decoded chunk.
+   --    * `Content-Length: N` — `Sink` is called with up to 4 KiB
+   --      chunks (one call when `N` ≤ 4 KiB).
+   --    * neither header (`Connection: close`) — `Sink` is called
+   --      with whatever the transport returns per `Read` (typically
+   --      up to one TCP segment).
+   --
+   --  `Sink` may raise; the exception propagates out of `Send` and
+   --  the transport is closed on that path just like any other
+   --  exception. Sink must not invoke `Send` recursively against
+   --  the same `Client_Type` (the transport is in mid-call).
+   --
+   --  Interim 1xx responses are looped past the same way as the
+   --  buffered Send; `Sink` is never called for a 1xx (no body).
+   --  `101 Switching Protocols` is the terminal 1xx and returns
+   --  without calling `Sink`.
+
+   procedure Send_Streaming
+     (Self   : in out Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Sink   : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array);
+      Cancel : in out Cancel_Handle);
+   --  Streaming Send with cross-task cancel. Same Cancel_Handle
+   --  semantics as the buffered overload.
 
    function Get
      (Self : in out Client_Type;

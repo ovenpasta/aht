@@ -10,8 +10,8 @@ Packages under `AHT.HTTP`:
 | `AHT.HTTP.Headers` | implemented |
 | `AHT.HTTP.Request` | implemented (wire write) |
 | `AHT.HTTP.Response` | implemented (wire read) |
-| `AHT.HTTP.IO` | implemented |
-| `AHT.HTTP.Client` | implemented (HTTP, sync); HTTPS pending TLS |
+| `AHT.HTTP.IO` | implemented (chunked decoder has streaming + buffered overloads) |
+| `AHT.HTTP.Client` | implemented (HTTP, sync + streaming, with cancel); HTTPS pending TLS |
 
 Common exceptions (in `AHT.HTTP`): `HTTP_Error`, `Protocol_Error`,
 `Handshake_Error`.
@@ -249,6 +249,50 @@ function  Get  (Self, URL) return Response_Type;
 
 - **`Get (URL)`** — convenience: parses `URL`, builds a GET with no
   body, calls `Send`. Raises `AHT.URL.Parse_Error` on malformed URL.
+
+### Streaming — `Send_Streaming`
+
+```ada
+procedure Send_Streaming
+  (Self : in out Client_Type;
+   Req  : Request_Type;
+   Resp : out Response_Type;
+   Sink : not null access procedure (Chunk : AHT.Bytes.Byte_Array));
+procedure Send_Streaming
+  (Self, Req, Resp, Sink, Cancel : ...);  -- + Cancel_Handle
+```
+
+Same semantics as `Send` for status line / headers / 1xx looping
+/ 101 carve-out / HEAD suppression / scheme dispatch, but body
+bytes are delivered to `Sink` as they arrive instead of being
+accumulated in `Resp.Body_B`. After the call, `Resp.Status`,
+`Resp.Reason`, and `Resp.Headers` are populated; `Resp.Body_B`
+is empty.
+
+The buffered `Send`s and `Send_Streaming` share a single internal
+core (`Run_Request` takes a sink; the buffered overloads supply a
+sink that appends to `Resp.Body_B`), so every behaviour
+documented for `Send` — header merging, deadline, cancel — also
+applies here.
+
+Chunk granularity (treat as hints, not contract):
+
+- `Transfer-Encoding: chunked` → one `Sink` call per decoded
+  chunk; the zero-size terminator is consumed but not delivered.
+- `Content-Length: N` → `Sink` is called with up to 4 KiB chunks
+  (one call when `N` ≤ 4 KiB).
+- neither header (`Connection: close`) → `Sink` is called with
+  whatever the transport returns per `Read` (typically up to one
+  TCP segment).
+
+`Sink` may raise; the exception propagates out of `Send_Streaming`
+and the transport is closed on that path. `Sink` must not invoke
+`Send` recursively against the same `Client_Type` (the transport
+is in mid-call).
+
+`Sink` is **not called for 1xx responses** (no body) and **not
+called for 101 Switching Protocols** (post-header bytes are left
+on the wire for the WebSocket layer).
 
 ### Cancellation — `Cancel_Handle`
 

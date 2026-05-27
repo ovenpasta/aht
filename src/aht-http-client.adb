@@ -64,17 +64,23 @@ package body AHT.HTTP.Client is
    end Merge_Headers;
 
    --  Wire round-trip on an already-connected transport: optional
-   --  read deadline, write the request, then loop over Response.Read
-   --  until the status is not 1xx. 101 Switching Protocols is
-   --  terminal — exit with the response so post-header bytes (e.g.
-   --  WebSocket frames) stay buffered on the transport for the next
-   --  layer.
+   --  read deadline, write the request, then loop over
+   --  Response.Read_Streaming until the status is not 1xx. 101
+   --  Switching Protocols is terminal — exit with the response so
+   --  post-header bytes (e.g. WebSocket frames) stay buffered on
+   --  the transport for the next layer.
+   --
+   --  Sink receives the body bytes chunk-by-chunk. The buffered
+   --  Send overload supplies a sink that appends to Resp.Body_B;
+   --  Send_Streaming forwards the caller's sink unchanged.
    procedure Wire_Round_Trip
      (Self    : Client_Type;
       Working : AHT.HTTP.Request.Request_Type;
       Method  : AHT.HTTP.Methods.Method_Type;
       T       : in out AHT.Transport.Transport_Type'Class;
-      Resp    : out AHT.HTTP.Response.Response_Type) is
+      Resp    : out AHT.HTTP.Response.Response_Type;
+      Sink    : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array)) is
    begin
       if Self.Timeout_Seconds > 0 then
          T.Set_Read_Deadline (Duration (Self.Timeout_Seconds));
@@ -83,16 +89,20 @@ package body AHT.HTTP.Client is
       AHT.HTTP.Request.Write (Working, T);
 
       loop
-         AHT.HTTP.Response.Read (Resp, T, Method => Method);
+         AHT.HTTP.Response.Read_Streaming
+           (Resp, T, Sink => Sink, Method => Method);
          exit when Resp.Status not in 100 .. 199
            or else Resp.Status = 101;
       end loop;
    end Wire_Round_Trip;
 
-   --  Single core for both Send overloads. When `Cancel` is null,
-   --  behaves exactly like the no-cancel path. When `Cancel` is
-   --  non-null, threads the live transport into the protected state
-   --  so a concurrent Cancel can Abort_Pending on it.
+   --  Single core for every Send overload. `Sink` always points to a
+   --  callback that receives body chunks; the buffered overloads
+   --  pass a sink that appends to `Resp.Body_B`, the streaming
+   --  overloads forward the caller's. When `Cancel` is null, the
+   --  pre-cancel and bind paths short-circuit; when non-null, the
+   --  live transport is threaded into the protected state so a
+   --  concurrent Cancel can Abort_Pending on it.
    --
    --  Pre-cancel is honoured *before* connect — a handle that was
    --  Cancelled before Send started must not even dial.
@@ -100,6 +110,8 @@ package body AHT.HTTP.Client is
      (Self   : Client_Type;
       Req    : AHT.HTTP.Request.Request_Type;
       Resp   : out AHT.HTTP.Response.Response_Type;
+      Sink   : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array);
       Cancel : access Cancel_State)
    is
       Working : AHT.HTTP.Request.Request_Type := Req;
@@ -133,7 +145,8 @@ package body AHT.HTTP.Client is
                end if;
 
                begin
-                  Wire_Round_Trip (Self, Working, Req.Method, T, Resp);
+                  Wire_Round_Trip
+                    (Self, Working, Req.Method, T, Resp, Sink);
                exception
                   when others =>
                      if Cancel /= null then
@@ -164,19 +177,63 @@ package body AHT.HTTP.Client is
    procedure Send
      (Self : in out Client_Type;
       Req  : AHT.HTTP.Request.Request_Type;
-      Resp : out AHT.HTTP.Response.Response_Type) is
+      Resp : out AHT.HTTP.Response.Response_Type)
+   is
+      --  Body sink that appends every delivered chunk to Resp.Body_B.
+      --  Read_Streaming clears Self before any sink call (via its
+      --  inner Parse_Head), so this builds up a fresh body.
+      procedure Append_To_Body (Chunk : AHT.Bytes.Byte_Array) is
+      begin
+         for B of Chunk loop
+            Resp.Body_B.Append (B);
+         end loop;
+      end Append_To_Body;
    begin
-      Run_Request (Self, Req, Resp, Cancel => null);
+      Run_Request (Self, Req, Resp,
+                   Sink   => Append_To_Body'Access,
+                   Cancel => null);
    end Send;
 
    procedure Send
      (Self   : in out Client_Type;
       Req    : AHT.HTTP.Request.Request_Type;
       Resp   : out AHT.HTTP.Response.Response_Type;
+      Cancel : in out Cancel_Handle)
+   is
+      procedure Append_To_Body (Chunk : AHT.Bytes.Byte_Array) is
+      begin
+         for B of Chunk loop
+            Resp.Body_B.Append (B);
+         end loop;
+      end Append_To_Body;
+   begin
+      Run_Request (Self, Req, Resp,
+                   Sink   => Append_To_Body'Access,
+                   Cancel => Cancel.State'Access);
+   end Send;
+
+   procedure Send_Streaming
+     (Self : in out Client_Type;
+      Req  : AHT.HTTP.Request.Request_Type;
+      Resp : out AHT.HTTP.Response.Response_Type;
+      Sink : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array)) is
+   begin
+      Run_Request (Self, Req, Resp, Sink => Sink, Cancel => null);
+   end Send_Streaming;
+
+   procedure Send_Streaming
+     (Self   : in out Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Sink   : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array);
       Cancel : in out Cancel_Handle) is
    begin
-      Run_Request (Self, Req, Resp, Cancel => Cancel.State'Access);
-   end Send;
+      Run_Request (Self, Req, Resp,
+                   Sink   => Sink,
+                   Cancel => Cancel.State'Access);
+   end Send_Streaming;
 
    function Get
      (Self : in out Client_Type;

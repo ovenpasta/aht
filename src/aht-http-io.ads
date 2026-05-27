@@ -17,8 +17,22 @@ package AHT.HTTP.IO is
      (T    : in out AHT.Transport.Transport_Type'Class;
       Data : out AHT.Bytes.Byte_Array);
 
+   procedure Read_Chunked_Body
+     (T    : in out AHT.Transport.Transport_Type'Class;
+      Sink : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array));
+   --  Streaming chunked-transfer decoder. Calls `Sink` for each
+   --  decoded chunk's data bytes; the zero-size terminator chunk
+   --  closes the body but is not delivered (`Sink` is never called
+   --  with an empty `Chunk`). Trailer headers are still drained and
+   --  discarded. Same error conditions as the buffered overload:
+   --  non-hex size, overflow past `Natural'Last`, chunk-data not
+   --  followed by bare CRLF.
+
    function Read_Chunked_Body
      (T : in out AHT.Transport.Transport_Type'Class)
       return AHT.Bytes.Byte_Vector;
+   --  Buffered convenience: assembles every chunk into one vector
+   --  by wrapping the streaming procedure with an appending sink.
 
 end AHT.HTTP.IO;

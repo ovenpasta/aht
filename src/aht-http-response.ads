@@ -15,6 +15,29 @@ package AHT.HTTP.Response is
       Body_B  : AHT.Bytes.Byte_Vector;
    end record;
 
+   procedure Read_Streaming
+     (Self   : out Response_Type;
+      T      : in out AHT.Transport.Transport_Type'Class;
+      Sink   : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array);
+      Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET);
+   --  Same as `Read` for the status line, headers, and no-body
+   --  suppression, but the body is delivered to `Sink` chunk-by-
+   --  chunk as bytes are decoded:
+   --    * `Transfer-Encoding: chunked` → one `Sink` call per
+   --      decoded chunk (zero-size terminator not delivered).
+   --    * `Content-Length: N`         → `Sink` is called with
+   --      up-to-4 KiB slices read via `AHT.HTTP.IO.Read_N` (one
+   --      call when `N` ≤ 4 KiB; otherwise `ceil (N / 4 KiB)`
+   --      calls). Each slice is fully populated before delivery,
+   --      so chunk size is independent of transport `Read`
+   --      granularity.
+   --    * neither header (`Connection: close`) → one `Sink` call
+   --      per underlying transport `Read` (i.e. up to one TCP
+   --      segment per call) until peer EOF.
+   --  `Self.Body_B` remains empty after the call. Same
+   --  `Protocol_Error` conditions as `Read`.
+
    procedure Read
      (Self   : out Response_Type;
       T      : in out AHT.Transport.Transport_Type'Class;

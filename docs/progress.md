@@ -1,7 +1,7 @@
 # Progress
 
 Snapshot of implementation status against [`plan.md`](plan.md).
-Last updated: 2026-05-26 (HTTP.Client.Cancel_Handle).
+Last updated: 2026-05-27 (HTTP.Client.Send_Streaming).
 
 ## Task list (from the plan)
 
@@ -14,14 +14,14 @@ Last updated: 2026-05-26 (HTTP.Client.Cancel_Handle).
 | 5 | `AHT.Log` (level/subsystem facade + `Tag` generic child) | done |
 | 6 | `AHT.HTTP.IO` (line reader, chunked decode) | done |
 | 7 | Transport deadline/abort retrofit | done |
-| 8 | `AHT.HTTP.Request` / `Response` / `Cancel` / streaming / `Client` | partial (sync `Client.Send`/`Get` + `Cancel_Handle` overload done over HTTP; HTTPS, streaming, async to come) |
+| 8 | `AHT.HTTP.Request` / `Response` / `Cancel` / streaming / `Client` | partial (sync + streaming `Send` with optional `Cancel_Handle` done over HTTP; HTTPS, async to come) |
 | 9 | mbedTLS fetch + build script + gpr wiring | stubbed (placeholder script) |
 | 10 | `AHT.Mbedtls` bindings (generate + curate) | not started |
 | 11 | `AHT.Transport.TLS` | stubbed |
 | 12 | `AHT.Websocket.Frames` codec | stubbed |
 | 13 | `AHT.Websocket.Client` (receiver task + POs) | stubbed |
 | 14 | Python test servers + cert generation | partial (plain HTTP fixture done; TLS / WS servers + certs to come) |
-| 15 | Ada integration tests + `run_tests.sh` | done for HTTP (13 tests; orchestrator brings up the fixture and runs all binaries) |
+| 15 | Ada integration tests + `run_tests.sh` | done for HTTP (14 tests; orchestrator brings up the fixture and runs all binaries) |
 
 "Stubbed" = spec is final, body compiles and raises a
 Not-Implemented exception if called.
@@ -125,6 +125,27 @@ In-process Ada-only test of the cancel surface:
     on the now-unbound handle runs without raising (and
     `Is_Cancelled` flips to true). (4) **Fresh handle**:
     `Is_Cancelled` is false on a never-cancelled handle.
+
+End-to-end test of the streaming surface (uses both the Python
+fixture and two in-process server tasks for the cancel /
+sink-raise cases):
+
+  - `tests/bin/test_http_streaming` — five cases. (1) **Chunked
+    streaming**: GET `/chunked`, sink receives the decoded
+    chunks one at a time, assembled bytes match `"AHT rocks!\n"`,
+    and `Resp.Body_B` is empty after — proves the sink is the
+    sole owner of the body. (2) **Content-Length streaming**:
+    GET `/hello`, sink delivers `"hello, world\n"` (one or more
+    calls), `Resp.Body_B` empty. (3) **Cancel during streaming**:
+    silent in-process server; sibling task fires `Cancel`;
+    `Send_Streaming` raises `Aborted_Error` in <1.5 s and the
+    sink was never invoked. (4) **Sink exception propagates**:
+    fast in-process server sends a body; sink raises on the first
+    call; the exception comes out of `Send_Streaming`. (5)
+    **Recovery from sink raise**: a follow-up `Send_Streaming`
+    against a fresh server completes normally, proving the
+    transport-close-on-exception path doesn't poison subsequent
+    calls.
   - `tests/bin/test_http_io` — mock-transport unit test of HTTP.IO:
     `Write_All` forwards bytes (empty is a no-op); `Read_Line`
     returns status / header lines without CRLF and leaves the
@@ -159,11 +180,10 @@ are treated as byte sequences (UTF-8 is caller's responsibility).
 
 In the order the plan specifies:
 
-1. Streaming + async surfaces of task 8 on top of the existing
-   sync `Client.Send` (Cancel landed in the 4-arg `Send`
-   overload). Streaming swaps `Response.Read`'s buffered `Body_B`
-   for a per-chunk callback; async wraps the whole `Send` in a
-   task and returns a future-like.
+1. Async surface of task 8 — wrap `Send` / `Send_Streaming` in a
+   task and return a future-like with `Await` and `Cancel`.
+   Reuses the existing `Cancel_Handle` plumbing as the abort
+   mechanism.
 2. Real `scripts/fetch_mbedtls.sh` + `scripts/regen_mbedtls_bindings.sh`
    (`gcc -fdump-ada-spec` over mbedTLS 2.28.9 headers, curated into
    `src/`).
