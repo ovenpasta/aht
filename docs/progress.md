@@ -16,7 +16,7 @@ Send_Text/Binary/Ping, Receive, RFC 6455 §1.4 close handshake).
 | 6 | `AHT.HTTP.IO` (line reader, chunked decode) | done |
 | 7 | Transport deadline/abort retrofit | done |
 | 8 | `AHT.HTTP.Request` / `Response` / `Cancel` / streaming / `Client` | done over HTTP: sync `Send` / `Get`, sync `Send + Cancel_Handle`, `Send_Streaming` (with and without `Cancel_Handle`), buffered `Send_Async` / `Await` / `Cancel`. **Not in v1**: streaming async (`Send_Streaming_Async`). HTTPS dispatch still raises until TLS lands. |
-| 9 | mbedTLS fetch + build script + gpr wiring | stubbed (placeholder script) |
+| 9 | mbedTLS fetch + build script + gpr wiring | partial (`fetch_mbedtls.sh` fetches v2.28.9, SHA-256-verifies, extracts, and `make lib`s with threading enabled; idempotent skip on cached libs; gpr `Linker_Options` waits for the first Ada-side reference in task 10/11) |
 | 10 | `AHT.Mbedtls` bindings (generate + curate) | not started |
 | 11 | `AHT.Transport.TLS` | stubbed |
 | 12 | `AHT.Websocket.Frames` codec | done (direction-neutral encode + decode with masking, 7/16/64-bit lengths, control-frame validation including Close-payload structural + code-range checks, RSV-bit rejection, incomplete-buffer signalling) |

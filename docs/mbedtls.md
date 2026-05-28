@@ -1,6 +1,6 @@
 # mbedTLS Integration
 
-Status: fetch script is a placeholder; binding not yet generated.
+Status: fetch + build chain done; bindings not yet generated.
 
 The library targets **mbedTLS v2.28.9** (LTS). The version is pinned
 for reproducibility; upgrading requires rerunning the binding
@@ -8,23 +8,36 @@ regeneration and curating any diffs.
 
 ## Fetch & build
 
-`scripts/fetch_mbedtls.sh` (to be completed) does:
+`scripts/fetch_mbedtls.sh` does the following on first run:
 
-1. Download `mbedtls-2.28.9.tar.bz2` from the upstream GitHub release.
-2. Verify SHA-256 against a pinned constant in the script.
+1. Download the v2.28.9 source tarball from
+   `https://github.com/Mbed-TLS/mbedtls/archive/refs/tags/v2.28.9.tar.gz`.
+   The download is resumable (writes to `.part` then renames on
+   success).
+2. Verify SHA-256 against the pinned constant
+   `e4dbcf86a4fb31506482888560f02b161e0ecfb82fee0643abcfc86abee5817e`
+   — mismatch aborts the build loudly.
 3. Extract into `third_party/mbedtls-2.28.9/`.
 4. `make lib` with
-   `CFLAGS="-DMBEDTLS_THREADING_C -DMBEDTLS_THREADING_PTHREAD"` so
-   the library is safe under Ada tasking.
+   `CFLAGS="-O2 -DMBEDTLS_THREADING_C -DMBEDTLS_THREADING_PTHREAD"`
+   so the library's internal mutex usage is task-safe (the WS
+   receiver task and HTTP send path both touch the same SSL
+   context).
 5. Leave the static archives at
    `third_party/mbedtls-2.28.9/library/{libmbedtls,libmbedx509,libmbedcrypto}.a`.
 
-`alire.toml` runs the script as a `pre-build` action, so `alr build`
-is one step.
+The script is **idempotent**: once `libmbedtls.a` exists and is
+non-empty it exits 0 without touching the network or invoking make,
+so the second-run latency is a few milliseconds.
 
-`aht.gpr` exposes `-L third_party/mbedtls-2.28.9/library` through
-`package Linker`; the binding unit carries a `pragma Linker_Options`
-for the three `-l` flags so any executable transitively pulls them in.
+`alire.toml` runs the script as the `pre-build` action, so
+`alr build` is one step (cold ~20 s on a modern box; warm
+~instant).
+
+`aht.gpr` will gain `-L third_party/mbedtls-2.28.9/library` and the
+three `-l` flags once `AHT.Transport.TLS` lands — until then no
+Ada code references mbedTLS symbols, so the libs build but don't
+get linked.
 
 ## Bindings: generated, not hand-written
 
