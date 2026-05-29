@@ -1,9 +1,11 @@
 # Progress
 
 Snapshot of implementation status against [`plan.md`](plan.md).
-Last updated: 2026-05-29 (`Transport_Type` made `Limited_Controlled`
-with a never-raise `Finalize` that dispatches to `Close`, reclaiming
-abandoned standalone transports + `test_transport_finalize`; on top of
+Last updated: 2026-05-29 (`test_ws_ping` added, covering user-driven
+`Send_Ping` + the inbound-Pong drop path; `Transport_Type` made
+`Limited_Controlled` with a never-raise `Finalize` that dispatches to
+`Close`, reclaiming abandoned standalone transports +
+`test_transport_finalize`; on top of
 `AHT.Transport.TLS` wired into both clients: `https://` in
 `AHT.HTTP.Client` and `wss://` in `AHT.Websocket.Client`, each
 threading `Insecure` / `CA_Path` into the handshake; TLS-wrapped WS
@@ -27,7 +29,7 @@ echo fixture `server_ws_tls.py` on :8768 + `test_ws_tls`).
 | 12 | `AHT.Websocket.Frames` codec | done (direction-neutral encode + decode with masking, 7/16/64-bit lengths, control-frame validation including Close-payload structural + code-range checks, RSV-bit rejection, incomplete-buffer signalling) |
 | 13 | `AHT.Websocket.Client` (receiver task + POs) | done for `ws://` **and `wss://`** — receiver task with frame reassembly + auto-Pong + RFC 6455 §1.4 close handshake on top of Send_Guard / Inbox / State POs; Send_Text / Send_Binary / Send_Ping / Receive / Close all wired; `Connect` dials TCP for `ws://`, TLS for `wss://` (one inline transport per scheme, `Active` points at the dialed one) |
 | 14 | Python test servers + cert generation | done (plain HTTP, plain WS, HTTPS `server_tls.py`, a silent `server_stall.py` fixture on :8767 for the handshake-timeout test, and a TLS-wrapped WS echo `server_ws_tls.py` on :8768; `scripts/generate_cert.sh` produces a self-signed cert with `localhost` + `127.0.0.1` SANs, regenerated each run) |
-| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + HTTPS + plain WS + WS-over-TLS + mbedTLS smoke + TLS transport + TLS handshake timeout (24 tests; orchestrator creates a venv on first run, installs the requirements, generates the cert, brings up all five fixtures, and runs all binaries) |
+| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + HTTPS + plain WS + WS-over-TLS + mbedTLS smoke + TLS transport + TLS handshake timeout (25 tests; orchestrator creates a venv on first run, installs the requirements, generates the cert, brings up all five fixtures, and runs all binaries) |
 
 ## What's built and tested
 
@@ -159,6 +161,21 @@ echo fixture (commit 2 of the WS client work):
     alongside the pull `Receive`, so both modes see the
     message.
 
+  - `tests/bin/test_ws_ping` — exercises user-driven `Send_Ping`
+    against the same echo fixture. The `websockets` library
+    auto-Pongs at the protocol layer and never surfaces the Ping to
+    its handler, so the cases lean on two facts: a malformed control
+    frame would make the server close with 1002 (so a clean round-trip
+    after a ping proves a valid masked Ping went out), and the
+    receiver drops inbound Pongs (so they must never appear as
+    messages). Three cases: (1) empty ping then a text round-trip
+    still succeeds and `Close` flips `Is_Open` false; (2) ping with a
+    payload then a round-trip (control-frame payload through the
+    masking path); (3) `Send_Text "before"` / `Send_Ping` /
+    `Send_Text "after"` — both echoes return in order and a follow-up
+    `Receive` times out, proving the auto-Pong hit the `Pong_Op =>
+    null` drop branch instead of leaking as a phantom message and that
+    the control frame did not corrupt the surrounding data framing.
   - `tests/bin/test_ws_tls` — the wss:// sibling of
     `test_ws_echo`, against the TLS-wrapped echo fixture
     `server_ws_tls.py` on 127.0.0.1:8768 (reusing the same
@@ -406,5 +423,4 @@ Possible follow-ups that didn't make v1: HTTP
 `Send_Streaming_Async` (buffered async is here; streaming async
 wasn't worth the extra surface vs. "spawn your own task that
 calls `Send_Streaming`"), re-usable `Async_Handle` (currently
-single-use). For WebSocket: user-driven `Send_Ping` is
-implemented but isn't covered by a test yet.
+single-use).
