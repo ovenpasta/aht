@@ -360,7 +360,7 @@ package body AHT.Websocket.Client is
          Chunk : AHT.Bytes.Byte_Array (1 .. 4_096);
          Last  : Natural;
       begin
-         Conn.Transport.Read (Chunk, Last);
+         Conn.Active.Read (Chunk, Last);
          if Last = 0 then
             --  Peer closed without a Close frame. Surface as a
             --  connection-closed event; users in Receive wake and
@@ -388,7 +388,7 @@ package body AHT.Websocket.Client is
          Conn.Guard.Acquire;
          begin
             Send_Frame
-              (Conn.Transport, Conn.Guard,
+              (Conn.Active.all, Conn.Guard,
                Op      => AHT.Websocket.Close_Op,
                FIN     => True,
                Payload => Build_Close_Payload (Code, ""));
@@ -408,7 +408,7 @@ package body AHT.Websocket.Client is
          Conn.Guard.Acquire;
          begin
             Send_Frame
-              (Conn.Transport, Conn.Guard,
+              (Conn.Active.all, Conn.Guard,
                Op      => AHT.Websocket.Pong_Op,
                FIN     => True,
                Payload => Payload);
@@ -613,8 +613,6 @@ package body AHT.Websocket.Client is
       Insecure      : Boolean := False;
       CA_Path       : String := "")
    is
-      pragma Unreferenced (Insecure, CA_Path);
-
       Parsed    : constant AHT.URL.URL_Type := AHT.URL.Parse (URL);
       Key_Bytes : AHT.Bytes.Byte_Array (1 .. 16);
 
@@ -653,12 +651,8 @@ package body AHT.Websocket.Client is
       end if;
 
       case Parsed.Scheme is
-         when AHT.URL.WS =>
+         when AHT.URL.WS | AHT.URL.WSS =>
             null;
-         when AHT.URL.WSS =>
-            raise AHT.Websocket.Handshake_Error
-              with "Websocket.Client.Connect: wss:// not yet "
-                & "implemented (pending TLS transport); use ws://";
          when AHT.URL.HTTP | AHT.URL.HTTPS =>
             raise AHT.Websocket.Handshake_Error
               with "Websocket.Client.Connect: URL must be ws:// "
@@ -685,15 +679,34 @@ package body AHT.Websocket.Client is
          end if;
          Extra_Headers.Iterate (Add_Extra'Access);
 
-         AHT.Transport.TCP.Connect
-           (Self.Transport,
-            Host => To_String (Parsed.Host),
-            Port => Parsed.Port);
+         --  Dial exactly one transport per scheme and point Active at
+         --  it. Scheme is already narrowed to WS | WSS above. Active
+         --  is set only after the dial returns, so a connect failure
+         --  leaves it null and the teardown paths below never run on a
+         --  half-open transport (each transport's own Connect closes
+         --  its socket on failure).
+         case Parsed.Scheme is
+            when AHT.URL.WSS =>
+               AHT.Transport.TLS.Connect
+                 (Self.Secure,
+                  Host     => To_String (Parsed.Host),
+                  Port     => Parsed.Port,
+                  Insecure => Insecure,
+                  CA_Path  => CA_Path);
+               Self.Active := Self.Secure'Unchecked_Access;
+            when others =>
+               --  WS (HTTP/HTTPS already rejected above).
+               AHT.Transport.TCP.Connect
+                 (Self.Plain,
+                  Host => To_String (Parsed.Host),
+                  Port => Parsed.Port);
+               Self.Active := Self.Plain'Unchecked_Access;
+         end case;
 
          begin
-            AHT.HTTP.Request.Write (Req, Self.Transport);
+            AHT.HTTP.Request.Write (Req, Self.Active.all);
             AHT.HTTP.Response.Read
-              (Resp, Self.Transport,
+              (Resp, Self.Active.all,
                Method => AHT.HTTP.Methods.GET);
 
             if Resp.Status /= 101 then
@@ -780,10 +793,10 @@ package body AHT.Websocket.Client is
             Self.Receiver.Start (Owner => Self'Unchecked_Access);
          exception
             when AHT.Websocket.Handshake_Error =>
-               Self.Transport.Close;
+               Self.Active.Close;
                raise;
             when E : others =>
-               Self.Transport.Close;
+               Self.Active.Close;
                raise AHT.Websocket.Handshake_Error
                  with "Websocket.Client.Connect: "
                    & Ada.Exceptions.Exception_Name (E) & ": "
@@ -821,7 +834,7 @@ package body AHT.Websocket.Client is
       Self.Guard.Acquire;
       begin
          Send_Frame
-           (Self.Transport, Self.Guard,
+           (Self.Active.all, Self.Guard,
             Op      => AHT.Websocket.Text,
             FIN     => True,
             Payload => AHT.Bytes.From_String (Text));
@@ -840,7 +853,7 @@ package body AHT.Websocket.Client is
       Self.Guard.Acquire;
       begin
          Send_Frame
-           (Self.Transport, Self.Guard,
+           (Self.Active.all, Self.Guard,
             Op      => AHT.Websocket.Binary,
             FIN     => True,
             Payload => Data);
@@ -859,7 +872,7 @@ package body AHT.Websocket.Client is
       Self.Guard.Acquire;
       begin
          Send_Frame
-           (Self.Transport, Self.Guard,
+           (Self.Active.all, Self.Guard,
             Op      => AHT.Websocket.Ping_Op,
             FIN     => True,
             Payload => Payload);
@@ -887,8 +900,8 @@ package body AHT.Websocket.Client is
       if Self.State.Get not in Open | Closing then
          --  Already Closed (receiver wound up first). Just make
          --  sure the transport is down.
-         if Self.Transport.Is_Connected then
-            Self.Transport.Close;
+         if Self.Active.Is_Connected then
+            Self.Active.Close;
          end if;
          Self.Open := False;
          return;
@@ -903,7 +916,7 @@ package body AHT.Websocket.Client is
          Self.Guard.Acquire;
          begin
             Send_Frame
-              (Self.Transport, Self.Guard,
+              (Self.Active.all, Self.Guard,
                Op      => AHT.Websocket.Close_Op,
                FIN     => True,
                Payload => Build_Close_Payload (Code, Reason));
@@ -926,12 +939,12 @@ package body AHT.Websocket.Client is
          Self.State.Wait_Closed;
       or
          delay Timeout;
-         Self.Transport.Abort_Pending;
+         Self.Active.Abort_Pending;
          Self.State.Wait_Closed;
       end select;
 
       Self.Open := False;
-      Self.Transport.Close;
+      Self.Active.Close;
    end Close;
 
    procedure Receive

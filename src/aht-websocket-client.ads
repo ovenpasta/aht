@@ -6,6 +6,7 @@ with AHT.Bytes;
 with AHT.HTTP.Headers;
 with AHT.Transport;
 with AHT.Transport.TCP;
+with AHT.Transport.TLS;
 
 package AHT.Websocket.Client is
 
@@ -61,7 +62,8 @@ package AHT.Websocket.Client is
    --  Runs the RFC 6455 §1.4 close handshake: send our Close frame
    --  (if we haven't already), then wait up to `Timeout` seconds
    --  for the peer's echo before forcing the receiver out via
-   --  Transport.Abort_Pending and tearing the TCP transport down.
+   --  the active transport's Abort_Pending and tearing that
+   --  transport (TCP for ws://, TLS for wss://) down.
    --
    --  Timeout knobs:
    --    * Default 5.0 s — safe for a cooperating peer on a LAN
@@ -181,11 +183,18 @@ private
    end Receiver_Task;
 
    type Client_Type is tagged limited record
-      --  v1 plain only — wss:// will replace this with a TLS
-      --  transport once mbedTLS is wired. Inline (not heap) so
-      --  the Client owns its transport for its full lifetime;
-      --  Connect populates it on success, Close tears it down.
-      Transport          : aliased AHT.Transport.TCP.TCP_Transport;
+      --  ws:// runs on the plain TCP transport, wss:// on the TLS
+      --  transport (TLS over the same TCP machinery via custom BIO).
+      --  Both are inline (not heap) so the Client owns its transport
+      --  for its full lifetime with no finalization bookkeeping;
+      --  Connect dials exactly one per scheme and points `Active` at
+      --  it, and everything downstream (receiver, senders, Close)
+      --  goes through `Active` polymorphically. `Active` stays null
+      --  until a successful dial, so a never-Connect'd Client never
+      --  dereferences it.
+      Plain              : aliased AHT.Transport.TCP.TCP_Transport;
+      Secure             : aliased AHT.Transport.TLS.TLS_Transport;
+      Active             : AHT.Transport.Transport_Access := null;
       State              : aliased State_PO;
       Inbox              : aliased Inbox_PO;
       Guard              : aliased Send_Guard;

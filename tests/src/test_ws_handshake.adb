@@ -9,7 +9,8 @@
 --      Successful handshake leaves the transport ready for frames.
 --    * http://127.0.0.1:8764/hello — the plain HTTP fixture.
 --      Returns 200, not 101 → Handshake_Error.
---    * wss://… — refused with Handshake_Error pending TLS.
+--    * wss://127.0.0.1:8766/ (Insecure) — TLS dials the HTTPS-only
+--      fixture, which answers the upgrade non-101 → Handshake_Error.
 --    * http://…/… — refused with Handshake_Error (not a WS URL).
 
 with Ada.Calendar; use Ada.Calendar;
@@ -402,13 +403,18 @@ begin
       end if;
    end;
 
-   --  Case 4: wss:// is refused while TLS is pending.
+   --  Case 4: wss:// now runs a real TLS handshake (split C3). Point
+   --  it at the HTTPS-only fixture on 8766 with Insecure => True so
+   --  the TLS dial succeeds, but the server answers the upgrade with a
+   --  non-101 status → Handshake_Error. This proves the wss:// path
+   --  reaches handshake validation rather than being refused upfront;
+   --  the TLS verify / round-trip behaviour is covered by test_ws_tls.
    declare
       C : AHT.Websocket.Client.Client_Type;
    begin
       begin
          AHT.Websocket.Client.Connect
-           (C, "wss://127.0.0.1:8766/");
+           (C, "wss://127.0.0.1:8766/", Insecure => True);
          Fail ("wss: Connect returned without raising");
       exception
          when AHT.Websocket.Handshake_Error => null;
