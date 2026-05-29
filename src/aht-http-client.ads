@@ -32,8 +32,12 @@ package AHT.HTTP.Client is
    --
    --  v1 caveats:
    --    * Cancel takes effect during the response Read; it does not
-   --      interrupt the TCP connect (`Abort_Pending` is a Read-side
-   --      hook). A pre-cancelled handle short-circuits before connect.
+   --      interrupt the connect dial (`Abort_Pending` is a Read-side
+   --      hook). For `https://` that uninterruptible phase covers the
+   --      TLS handshake too — only `Self.Timeout_Seconds` can bound
+   --      connect/handshake, not `Cancel`. A pre-cancelled handle
+   --      short-circuits before connect; a Cancel arriving during
+   --      connect/handshake takes effect on the first response Read.
    --    * Single-use: once `Cancel` has been called, every subsequent
    --      Send with this handle aborts immediately. Declare a fresh
    --      handle per cancellable operation.
@@ -55,7 +59,8 @@ package AHT.HTTP.Client is
    --
    --  Scheme dispatch on `Req.Target.Scheme`:
    --    * HTTP  → `AHT.Transport.TCP`.
-   --    * HTTPS → not yet wired (raises `HTTP_Error`; pending TLS).
+   --    * HTTPS → `AHT.Transport.TLS`, honouring `Self.CA_Path` /
+   --      `Self.Insecure`.
    --    * WS / WSS → raises `HTTP_Error`; use `AHT.Websocket.Client`.
    --
    --  Headers are merged onto a working copy of `Req` (request wins
@@ -81,8 +86,10 @@ package AHT.HTTP.Client is
    --  status verbatim. `HTTP_Error` / `Protocol_Error` /
    --  `Transport_Error` / `Timeout_Error` / `Aborted_Error` are
    --  raised for malformed wire, transport failure, deadline
-   --  expiry, or external cancel. The transport is closed in every
-   --  exit path.
+   --  expiry, or external cancel. `https://` additionally raises
+   --  `AHT.Transport.TLS.TLS_Error` on a TLS failure such as an
+   --  untrusted/invalid certificate chain. The transport is closed
+   --  in every exit path.
 
    procedure Send
      (Self   : in out Client_Type;

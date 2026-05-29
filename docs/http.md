@@ -11,7 +11,7 @@ Packages under `AHT.HTTP`:
 | `AHT.HTTP.Request` | implemented (wire write) |
 | `AHT.HTTP.Response` | implemented (wire read) |
 | `AHT.HTTP.IO` | implemented (chunked decoder has streaming + buffered overloads) |
-| `AHT.HTTP.Client` | implemented (HTTP, sync + streaming + async, with cancel); HTTPS pending TLS |
+| `AHT.HTTP.Client` | implemented (HTTP + HTTPS, sync + streaming + async, with cancel) |
 
 Common exceptions (in `AHT.HTTP`): `HTTP_Error`, `Protocol_Error`,
 `Handshake_Error`.
@@ -205,12 +205,38 @@ function  Get  (Self, URL) return Response_Type;
 
 - **Scheme dispatch** on `Req.Target.Scheme`:
   - `http://` → `AHT.Transport.TCP`.
-  - `https://` → the `AHT.Transport.TLS` transport is implemented
-    (custom BIO over the TCP transport, honouring `CA_Path` /
-    `Insecure`), but `Send` does not yet dispatch to it: HTTPS still
-    raises `HTTP_Error` until the client-side wiring lands.
+  - `https://` → `AHT.Transport.TLS` (custom BIO over the TCP
+    transport). `Send` constructs a `TLS_Transport`, threading
+    `Client_Type.CA_Path` / `.Insecure` into the handshake, then runs
+    the same wire round-trip polymorphically.
   - `ws://` / `wss://` → raises `HTTP_Error`; route those through
     `AHT.Websocket.Client`.
+
+- **`Timeout_Seconds` is a per-phase budget, not one end-to-end
+  deadline.** A request walks four phases, and `Timeout_Seconds` (when
+  non-zero) bounds each of the last three independently — each phase
+  gets the full value as its own budget. `Timeout_Seconds = 0` disables
+  all of them. The phases are the same for `http://` and `https://`
+  (the TLS handshake phase is simply absent for plain HTTP):
+  1. *DNS resolution* — **not** bounded by AHT; only the OS resolver's
+     own timeout applies. Multi-candidate fallback (every A/AAAA record)
+     happens here, in the TCP transport.
+  2. *TCP connect* — **bounded** as a single total budget shared across
+     every resolved candidate (not per-candidate), forwarded as
+     `Connect`'s `Connect_Timeout`. If the budget runs out before any
+     candidate connects, `Timeout_Error` is raised; non-timeout failures
+     (all candidates refused) still raise `Transport_Error`.
+  3. *TLS handshake* (`https://` only) — **bounded** via `Connect`'s
+     `Handshake_Deadline`, so a peer that completes the TCP connect but
+     stalls mid-handshake raises `Timeout_Error` instead of hanging. The
+     deadline is cleared once the handshake completes.
+  4. *response read* — **bounded** by `Set_Read_Deadline`, armed fresh
+     in `Wire_Round_Trip` as a compound deadline over the whole
+     response.
+
+  `Cancel_Handle` binds after `Connect` returns, so cancel takes effect
+  during the response read — not during DNS, connect, or handshake
+  (same for both schemes).
 
 - **Header merging.** `Send` builds a working copy of `Req` and fills
   in three classes of headers, *only where not already present*, so
@@ -245,8 +271,10 @@ function  Get  (Self, URL) return Response_Type;
 - **Errors.** Non-2xx status is **not** an exception — `Resp.Status`
   carries it. Exceptions are reserved for malformed wire or
   transport failure: `HTTP_Error`, `Protocol_Error`,
-  `Transport_Error`, `Timeout_Error`, `Aborted_Error`. The transport
-  is closed in every exit path (success or exception).
+  `Transport_Error`, `Timeout_Error`, `Aborted_Error`, plus
+  `AHT.Transport.TLS.TLS_Error` for `https://` (e.g. an
+  untrusted/invalid certificate chain). The transport is closed in
+  every exit path (success or exception).
 
 - **`Get (URL)`** — convenience: parses `URL`, builds a GET with no
   body, calls `Send`. Raises `AHT.URL.Parse_Error` on malformed URL.
@@ -342,10 +370,11 @@ Caveats:
   handle per cancellable operation.
 - **No connect cancellation in v1.** `Abort_Pending` is a Read-
   side hook; `Cancel` can't interrupt a `Connect` in flight. A
-  hung connect waits for the OS connect timeout (the client has
-  no connect-side timeout of its own — `Timeout_Seconds` only
-  feeds `Set_Read_Deadline`, which runs after `Connect` returns).
-  The cancel then takes effect on the first Read.
+  hung connect is bounded by `Timeout_Seconds` (the TCP-connect
+  and TLS-handshake budgets, see the per-phase breakdown above),
+  not by `Cancel` — so it ends in `Timeout_Error` rather than on
+  the `Cancel`. A pending `Cancel` then takes effect on the first
+  Read once `Connect` returns.
 - **Don't share a handle across concurrent `Send`s.** The
   protected `Bound` slot is overwritten by whichever Send binds
   last; `Cancel` will only abort that one. Use one handle per

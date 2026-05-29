@@ -18,11 +18,13 @@ package AHT.Transport.TLS is
    TLS_Error : exception;
 
    procedure Connect
-     (Self     : in out TLS_Transport;
-      Host     : String;
-      Port     : AHT.URL.Port_Number;
-      Insecure : Boolean := False;
-      CA_Path  : String  := "");
+     (Self               : in out TLS_Transport;
+      Host               : String;
+      Port               : AHT.URL.Port_Number;
+      Insecure           : Boolean := False;
+      CA_Path            : String  := "";
+      Connect_Timeout    : Duration := Duration'Last;
+      Handshake_Deadline : Duration := Duration'Last);
    --  TCP-connect to Host:Port, then run the TLS handshake with SNI =
    --  Host. Insecure => peer certificate is not verified (authmode
    --  NONE); otherwise the chain is verified against CA_Path (a PEM
@@ -30,6 +32,21 @@ package AHT.Transport.TLS is
    --  raises TLS_Error. With CA_Path = "" and not Insecure, only the
    --  platform-default trust applies (none is configured here), so the
    --  handshake will reject — pass a CA bundle or set Insecure.
+   --
+   --  Connect_Timeout is forwarded to the underlying TCP connect as its
+   --  total budget across resolved candidates (see
+   --  AHT.Transport.TCP.Connect); exhaustion raises Timeout_Error.
+   --  Duration'Last leaves the TCP connect unbounded.
+   --
+   --  Handshake_Deadline bounds the **TLS handshake only**: it is armed
+   --  as a read deadline on the underlying TCP transport just for the
+   --  handshake exchange, so a peer that stalls mid-handshake raises
+   --  Timeout_Error instead of blocking forever. It does **not** bound
+   --  DNS resolution or the TCP connect (those run before the deadline
+   --  is armed). The deadline is cleared once the handshake completes,
+   --  so post-handshake Read deadlines remain entirely the caller's to
+   --  set via Set_Read_Deadline. Duration'Last (the default) leaves the
+   --  handshake unbounded.
 
    overriding procedure Write
      (Self : in out TLS_Transport;

@@ -51,11 +51,32 @@ package body AHT.Transport.TCP is
    end From_SEA;
 
    procedure Connect_Candidates
-     (Self      : in out TCP_Transport;
-      Endpoints : Endpoint_List)
+     (Self            : in out TCP_Transport;
+      Endpoints       : Endpoint_List;
+      Connect_Timeout : Duration := Duration'Last)
    is
       Last_Error : Unbounded_String;
       Success    : Boolean := False;
+      Timed_Out  : Boolean := False;
+
+      Budgeted : constant Boolean := Connect_Timeout /= Duration'Last;
+      --  A single absolute instant the whole connect phase must finish
+      --  by, computed once so every candidate draws from the same
+      --  budget rather than each getting a fresh Connect_Timeout.
+      Deadline : constant Time :=
+        (if Budgeted then Clock + To_Time_Span (Connect_Timeout) else Clock);
+
+      procedure Close_Quietly (S : in out Socket_Type) is
+      begin
+         if S /= No_Socket then
+            begin
+               Close_Socket (S);
+            exception
+               when Socket_Error => null;
+            end;
+            S := No_Socket;
+         end if;
+      end Close_Quietly;
 
       procedure Try (E : Endpoint) is
          Sock : Socket_Type := No_Socket;
@@ -72,7 +93,43 @@ package body AHT.Transport.TCP is
             Log.Debug
               ("try " & To_String (E.Host)
                & ":" & AHT.URL.Port_Number'Image (E.Port));
-            Connect_Socket (Sock, Peer);
+
+            if Budgeted then
+               declare
+                  Remaining : constant Time_Span := Deadline - Clock;
+                  Status    : Selector_Status;
+               begin
+                  if Remaining <= Time_Span_Zero then
+                     Timed_Out := True;
+                     Last_Error := To_Unbounded_String
+                       ("connect budget exhausted before ["
+                        & To_String (E.Host) & ":"
+                        & AHT.URL.Port_Number'Image (E.Port) & "]");
+                     Close_Quietly (Sock);
+                     return;
+                  end if;
+                  Connect_Socket
+                    (Socket  => Sock,
+                     Server  => Peer,
+                     Timeout => Selector_Duration (To_Duration (Remaining)),
+                     Status  => Status);
+                  if Status /= Completed then
+                     --  Expired: this attempt ate the rest of the
+                     --  budget. Treat as a timeout, not a refusal.
+                     Timed_Out := True;
+                     Last_Error := To_Unbounded_String
+                       ("connect timed out ["
+                        & To_String (E.Host) & ":"
+                        & AHT.URL.Port_Number'Image (E.Port) & "]");
+                     Log.Debug ("connect timed out " & To_String (E.Host));
+                     Close_Quietly (Sock);
+                     return;
+                  end if;
+               end;
+            else
+               Connect_Socket (Sock, Peer);
+            end if;
+
             Self.Socket := Sock;
             Self.Connected := True;
             Success := True;
@@ -90,13 +147,7 @@ package body AHT.Transport.TCP is
               ("connect refused " & To_String (E.Host)
                & ":" & AHT.URL.Port_Number'Image (E.Port)
                & " — " & Ada.Exceptions.Exception_Message (Ex));
-            if Sock /= No_Socket then
-               begin
-                  Close_Socket (Sock);
-               exception
-                  when Socket_Error => null;
-               end;
-            end if;
+            Close_Quietly (Sock);
       end Try;
 
    begin
@@ -107,13 +158,23 @@ package body AHT.Transport.TCP is
       for E of Endpoints loop
          Try (E);
          exit when Success;
+         --  Once the shared budget is gone, stop: every remaining
+         --  candidate would just trip the pre-connect exhaustion check.
+         exit when Timed_Out;
       end loop;
 
       if not Success then
-         Log.Warning
-           ("all candidates refused — " & To_String (Last_Error));
-         raise Transport_Error with
-           "TCP connect: all candidates failed: " & To_String (Last_Error);
+         if Timed_Out then
+            Log.Warning ("connect timed out — " & To_String (Last_Error));
+            raise Timeout_Error with
+              "TCP connect timed out: " & To_String (Last_Error);
+         else
+            Log.Warning
+              ("all candidates refused — " & To_String (Last_Error));
+            raise Transport_Error with
+              "TCP connect: all candidates failed: "
+              & To_String (Last_Error);
+         end if;
       end if;
 
       --  Socket is connected. Now create the selector Read/Abort_Pending
@@ -152,15 +213,17 @@ package body AHT.Transport.TCP is
    end Is_IP_Literal;
 
    procedure Connect
-     (Self : in out TCP_Transport;
-      Host : String;
-      Port : AHT.URL.Port_Number)
+     (Self            : in out TCP_Transport;
+      Host            : String;
+      Port            : AHT.URL.Port_Number;
+      Connect_Timeout : Duration := Duration'Last)
    is
    begin
       if Is_IP_Literal (Host) then
          Connect_Candidates
            (Self,
-            [1 => (Host => To_Unbounded_String (Host), Port => Port)]);
+            [1 => (Host => To_Unbounded_String (Host), Port => Port)],
+            Connect_Timeout => Connect_Timeout);
       else
          declare
             Entry_Info : constant Host_Entry_Type := Get_Host_By_Name (Host);
@@ -177,7 +240,8 @@ package body AHT.Transport.TCP is
                             (Image (Addresses (Entry_Info, I))),
                   Port => Port);
             end loop;
-            Connect_Candidates (Self, List (1 .. N));
+            Connect_Candidates
+              (Self, List (1 .. N), Connect_Timeout => Connect_Timeout);
          exception
             when E : Host_Error =>
                raise Transport_Error with

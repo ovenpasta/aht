@@ -711,6 +711,170 @@ begin
       Check_Server_Runtime ("compound-timeout (server)", Runtime_Err);
    end;
 
+   --  Case 8: a refused connect under a Connect_Timeout budget must
+   --  still raise Transport_Error, not Timeout_Error — a fast failure
+   --  is not a timeout. Exercises the budgeted Connect_Socket path
+   --  (positive remaining budget) and its Socket_Error handler: the
+   --  refusal lands well within the generous 5 s budget, so a regression
+   --  that classified any budgeted failure as a timeout would be caught.
+   declare
+      Refuser  : Socket_Type := No_Socket;
+      Bad_Port : AHT.URL.Port_Number;
+      Skip     : Boolean := False;
+   begin
+      begin
+         Bad_Port := Reserve_Unreachable_Port (Refuser);
+      exception
+         when E : others =>
+            Fail ("budget-refused: could not reserve bad port — "
+                  & Ada.Exceptions.Exception_Message (E));
+            Skip := True;
+      end;
+
+      if not Skip then
+         declare
+            T : AHT.Transport.TCP.TCP_Transport;
+            Candidates : constant AHT.Transport.TCP.Endpoint_List :=
+              [(Host => To_Unbounded_String ("127.0.0.1"),
+                Port => Bad_Port)];
+         begin
+            begin
+               T.Connect_Candidates (Candidates, Connect_Timeout => 5.0);
+               Fail ("budget-refused: expected Transport_Error, "
+                     & "Connect_Candidates returned normally");
+            exception
+               when AHT.Transport.Transport_Error =>
+                  null;  --  expected
+               when AHT.Transport.Timeout_Error =>
+                  Fail ("budget-refused: refusal misclassified as "
+                        & "Timeout_Error under a non-exhausted budget");
+               when E : others =>
+                  Fail ("budget-refused: unexpected "
+                        & Ada.Exceptions.Exception_Name (E) & " — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+            Close_Quietly (T);
+         end;
+      end if;
+
+      if Refuser /= No_Socket then
+         begin Close_Socket (Refuser); exception when others => null; end;
+      end if;
+   end;
+
+   --  Case 9: multi-candidate fallback survives a budget. First
+   --  candidate refused (instant, leaving nearly the whole budget),
+   --  second is the echo server — connect + echo must still succeed, so
+   --  budgeting does not short-circuit the fallback loop after one
+   --  budgeted-but-failed attempt.
+   declare
+      Srv         : Echo_Server;
+      Good_Port   : AHT.URL.Port_Number;
+      Bad_Port    : AHT.URL.Port_Number;
+      Refuser     : Socket_Type := No_Socket;
+      Err         : Unbounded_String;
+      Runtime_Err : Unbounded_String;
+      Skip        : Boolean := False;
+   begin
+      Srv.Get_Port (Good_Port, Err);
+      if Length (Err) > 0 then
+         Fail ("budget-fallback: server setup — " & To_String (Err));
+         Skip := True;
+      else
+         begin
+            Bad_Port := Reserve_Unreachable_Port (Refuser);
+         exception
+            when E : others =>
+               Fail ("budget-fallback: could not reserve bad port — "
+                     & Ada.Exceptions.Exception_Message (E));
+               Skip := True;
+         end;
+      end if;
+
+      if not Skip then
+         declare
+            T : AHT.Transport.TCP.TCP_Transport;
+            Candidates : constant AHT.Transport.TCP.Endpoint_List :=
+              [(Host => To_Unbounded_String ("127.0.0.1"),
+                Port => Bad_Port),
+               (Host => To_Unbounded_String ("127.0.0.1"),
+                Port => Good_Port)];
+         begin
+            begin
+               T.Connect_Candidates (Candidates, Connect_Timeout => 5.0);
+               Drive_Echo ("budget-fallback [bad,good]", T);
+            exception
+               when E : others =>
+                  Fail ("budget-fallback [bad,good]: unexpected "
+                        & Ada.Exceptions.Exception_Name (E) & " — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+            Close_Quietly (T);
+         end;
+      end if;
+
+      if Refuser /= No_Socket then
+         begin Close_Socket (Refuser); exception when others => null; end;
+      end if;
+
+      Srv.Wait_Done (Runtime_Err);
+      if not Skip then
+         Check_Server_Runtime ("budget-fallback [bad,good] (server)",
+                               Runtime_Err);
+      end if;
+   end;
+
+   --  Case 10: an exhausted budget raises Timeout_Error before a
+   --  connect is even attempted. Connect_Timeout => 0.0 puts the
+   --  deadline in the past by the time the first candidate is tried, so
+   --  the pre-attempt budget check trips. A reserved (refusing) port
+   --  proves the dial never happens: had it attempted, the refusal
+   --  would surface as Transport_Error, which this case rejects. This
+   --  is the only deterministic way to drive the budget-exhausted
+   --  branch — a genuine mid-connect stall would need an
+   --  unroutable/firewalled peer, too environment-dependent for CI.
+   declare
+      Refuser  : Socket_Type := No_Socket;
+      Bad_Port : AHT.URL.Port_Number;
+      Skip     : Boolean := False;
+   begin
+      begin
+         Bad_Port := Reserve_Unreachable_Port (Refuser);
+      exception
+         when E : others =>
+            Fail ("budget-exhausted: could not reserve port — "
+                  & Ada.Exceptions.Exception_Message (E));
+            Skip := True;
+      end;
+
+      if not Skip then
+         declare
+            T : AHT.Transport.TCP.TCP_Transport;
+            Candidates : constant AHT.Transport.TCP.Endpoint_List :=
+              [(Host => To_Unbounded_String ("127.0.0.1"),
+                Port => Bad_Port)];
+         begin
+            begin
+               T.Connect_Candidates (Candidates, Connect_Timeout => 0.0);
+               Fail ("budget-exhausted: expected Timeout_Error, "
+                     & "Connect_Candidates returned normally");
+            exception
+               when AHT.Transport.Timeout_Error =>
+                  null;  --  expected
+               when E : others =>
+                  Fail ("budget-exhausted: expected Timeout_Error, got "
+                        & Ada.Exceptions.Exception_Name (E) & " — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+            Close_Quietly (T);
+         end;
+      end if;
+
+      if Refuser /= No_Socket then
+         begin Close_Socket (Refuser); exception when others => null; end;
+      end if;
+   end;
+
    if Failures = 0 then
       Put_Line ("test_tcp: OK");
       Ada.Command_Line.Set_Exit_Status (0);

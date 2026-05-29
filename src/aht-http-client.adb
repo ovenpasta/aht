@@ -4,6 +4,7 @@ with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 
 with AHT.HTTP.Methods;
 with AHT.Transport.TCP;
+with AHT.Transport.TLS;
 with AHT.URL;
 
 package body AHT.HTTP.Client is
@@ -115,6 +116,15 @@ package body AHT.HTTP.Client is
       Cancel : access Cancel_State)
    is
       Working : AHT.HTTP.Request.Request_Type := Req;
+
+      --  Timeout_Seconds bounds each connect phase independently rather
+      --  than as one end-to-end deadline: it is the TCP-connect budget,
+      --  the TLS-handshake deadline, and (via Set_Read_Deadline in
+      --  Wire_Round_Trip) the response-read deadline. 0 means no limit.
+      Budget : constant Duration :=
+        (if Self.Timeout_Seconds > 0
+         then Duration (Self.Timeout_Seconds)
+         else Duration'Last);
    begin
       Merge_Headers (Self, Req, Working);
 
@@ -131,8 +141,9 @@ package body AHT.HTTP.Client is
             begin
                AHT.Transport.TCP.Connect
                  (T,
-                  Host => To_String (Req.Target.Host),
-                  Port => Req.Target.Port);
+                  Host            => To_String (Req.Target.Host),
+                  Port            => Req.Target.Port,
+                  Connect_Timeout => Budget);
 
                --  Race window: Cancel could fire between Connect
                 --  returning and Bind running. Bind itself
@@ -163,9 +174,43 @@ package body AHT.HTTP.Client is
             end;
 
          when AHT.URL.HTTPS =>
-            raise HTTP_Error
-              with "HTTPS is not yet wired in HTTP.Client.Send "
-                & "(AHT.Transport.TLS pending mbedTLS integration)";
+            declare
+               T : aliased AHT.Transport.TLS.TLS_Transport;
+            begin
+               AHT.Transport.TLS.Connect
+                 (T,
+                  Host               => To_String (Req.Target.Host),
+                  Port               => Req.Target.Port,
+                  Insecure           => Self.Insecure,
+                  CA_Path            => To_String (Self.CA_Path),
+                  Connect_Timeout    => Budget,
+                  Handshake_Deadline => Budget);
+
+               --  Same Cancel bind/unbind discipline as the HTTP
+               --  branch: Bind re-checks Cancelled under the lock and
+               --  fires Abort_Pending on the freshly-bound TLS
+               --  transport, which forwards to the underlying TCP.
+               if Cancel /= null then
+                  Cancel.Bind (T'Unchecked_Access);
+               end if;
+
+               begin
+                  Wire_Round_Trip
+                    (Self, Working, Req.Method, T, Resp, Sink);
+               exception
+                  when others =>
+                     if Cancel /= null then
+                        Cancel.Unbind;
+                     end if;
+                     T.Close;
+                     raise;
+               end;
+
+               if Cancel /= null then
+                  Cancel.Unbind;
+               end if;
+               T.Close;
+            end;
 
          when AHT.URL.WS | AHT.URL.WSS =>
             raise HTTP_Error

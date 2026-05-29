@@ -165,11 +165,13 @@ package body AHT.Transport.TLS is
    ---------------------------------------------------------------
 
    procedure Connect
-     (Self     : in out TLS_Transport;
-      Host     : String;
-      Port     : AHT.URL.Port_Number;
-      Insecure : Boolean := False;
-      CA_Path  : String  := "")
+     (Self               : in out TLS_Transport;
+      Host               : String;
+      Port               : AHT.URL.Port_Number;
+      Insecure           : Boolean := False;
+      CA_Path            : String  := "";
+      Connect_Timeout    : Duration := Duration'Last;
+      Handshake_Deadline : Duration := Duration'Last)
    is
       Ret : C.int;
 
@@ -192,7 +194,8 @@ package body AHT.Transport.TLS is
       --  1. Plain TCP first: DNS multi-candidate fallback, the
       --     selector, the compound deadline and Abort_Pending all come
       --     from AHT.Transport.TCP and are reused unchanged.
-      AHT.Transport.TCP.Connect (Self.TCP, Host, Port);
+      AHT.Transport.TCP.Connect
+        (Self.TCP, Host, Port, Connect_Timeout => Connect_Timeout);
       Self.BIO.TCP := Self.TCP'Unchecked_Access;
       Self.BIO.Last_Error := BIO_None;
 
@@ -286,8 +289,15 @@ package body AHT.Transport.TLS is
         (Self.SSL, Self.BIO'Address,
          Send_CB'Access, Recv_CB'Access, System.Null_Address);
 
-      --  9. Handshake. BIO is blocking, but mbedTLS may still hand back
+      --  9. Handshake, optionally bounded by Handshake_Deadline. The
+      --     budget is armed on the TCP transport so the BIO recv reads
+      --     can't block forever on a stalled peer; a trip surfaces as
+      --     Timeout_Error via the Recv_CB → BIO_Timeout → Fail path.
+      --     BIO is blocking, but mbedTLS may still hand back
       --     WANT_READ/WANT_WRITE mid-flight; just call again.
+      if Handshake_Deadline /= Duration'Last then
+         Self.TCP.Set_Read_Deadline (Handshake_Deadline);
+      end if;
       loop
          Ret := M.Handshake (Self.SSL);
          exit when Ret = 0;
@@ -295,6 +305,13 @@ package body AHT.Transport.TLS is
             Fail (Ret, "TLS handshake");
          end if;
       end loop;
+
+      --  Clear the handshake budget so post-handshake reads start with
+      --  no deadline — the caller owns Read deadlines from here on
+      --  (HTTP.Client re-arms one per response in Wire_Round_Trip).
+      if Handshake_Deadline /= Duration'Last then
+         Self.TCP.Set_Read_Deadline (Duration'Last);
+      end if;
 
       Self.Connected := True;
    end Connect;

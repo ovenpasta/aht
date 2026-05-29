@@ -12,9 +12,16 @@ package AHT.Transport.TCP is
    type TCP_Transport_Access is access all TCP_Transport;
 
    procedure Connect
-     (Self : in out TCP_Transport;
-      Host : String;
-      Port : AHT.URL.Port_Number);
+     (Self            : in out TCP_Transport;
+      Host            : String;
+      Port            : AHT.URL.Port_Number;
+      Connect_Timeout : Duration := Duration'Last);
+   --  `Connect_Timeout` is a single total budget for the TCP connect
+   --  phase, shared across every address DNS resolves to — not a
+   --  per-candidate timeout. If the budget runs out before any
+   --  candidate connects, raises `Timeout_Error`. `Duration'Last`
+   --  (the default) leaves connect unbounded. DNS resolution itself
+   --  is bounded only by the OS, not by this budget.
 
    type Endpoint is record
       Host : Ada.Strings.Unbounded.Unbounded_String;
@@ -24,14 +31,20 @@ package AHT.Transport.TCP is
    type Endpoint_List is array (Positive range <>) of Endpoint;
 
    procedure Connect_Candidates
-     (Self      : in out TCP_Transport;
-      Endpoints : Endpoint_List)
+     (Self            : in out TCP_Transport;
+      Endpoints       : Endpoint_List;
+      Connect_Timeout : Duration := Duration'Last)
      with Pre => Endpoints'Length > 0;
    --  Each `Host` must already be a numeric IP literal (IPv4 or IPv6);
    --  this entry point skips DNS resolution. Tries each endpoint in
    --  order — on `Socket_Error` from an attempt, closes that socket
-   --  and moves on. First success wins. If every attempt fails, raises
-   --  `Transport_Error` with the last error message.
+   --  and moves on. First success wins. If every attempt fails for a
+   --  non-timeout reason, raises `Transport_Error` with the last
+   --  error message.
+   --
+   --  `Connect_Timeout` is one total budget across all candidates (see
+   --  `Connect` above); when it runs out, raises `Timeout_Error`
+   --  instead. `Duration'Last` leaves the attempts unbounded.
    --
    --  Public so tests can drive the multi-address fallback with an
    --  explicit `[bad, good]` list; `Connect (Host, Port)` above

@@ -13,18 +13,18 @@ transport-level `test_tls`).
 | 1 | Project skeleton (`alire.toml`, `aht.gpr`, empty specs) | done |
 | 2 | `AHT.Bytes`, `AHT.URL`, `AHT.URL.Encoding` | done |
 | 3 | `AHT.HTTP` shared types (Methods, Status, Headers) | done |
-| 4 | `AHT.Transport` + `AHT.Transport.TCP` | done |
+| 4 | `AHT.Transport` + `AHT.Transport.TCP` | done; `Connect` takes a `Connect_Timeout` (one total budget shared across all DNS candidates, raising `Timeout_Error` on exhaustion; `Duration'Last` = unbounded) |
 | 5 | `AHT.Log` (level/subsystem facade + `Tag` generic child) | done |
 | 6 | `AHT.HTTP.IO` (line reader, chunked decode) | done |
 | 7 | Transport deadline/abort retrofit | done |
-| 8 | `AHT.HTTP.Request` / `Response` / `Cancel` / streaming / `Client` | done over HTTP: sync `Send` / `Get`, sync `Send + Cancel_Handle`, `Send_Streaming` (with and without `Cancel_Handle`), buffered `Send_Async` / `Await` / `Cancel`. **Not in v1**: streaming async (`Send_Streaming_Async`). HTTPS dispatch still raises until TLS lands. |
+| 8 | `AHT.HTTP.Request` / `Response` / `Cancel` / streaming / `Client` | done over HTTP **and HTTPS**: sync `Send` / `Get`, sync `Send + Cancel_Handle`, `Send_Streaming` (with and without `Cancel_Handle`), buffered `Send_Async` / `Await` / `Cancel`. `https://` dispatches to `AHT.Transport.TLS` (threading `CA_Path` / `Insecure`). **Not in v1**: streaming async (`Send_Streaming_Async`). |
 | 9 | mbedTLS fetch + build script + gpr wiring | done (`fetch_mbedtls.sh` fetches v2.28.9, SHA-256-verifies, extracts, and `make lib`s with threading; `regen_mbedtls_bindings.sh` runs `gcc -fdump-ada-spec` into `scratch/`; link wiring is `pragma Linker_Options` in `aht-mbedtls.ads` so only binaries that `with` it pull in the three archives + pthread) |
 | 10 | `AHT.Mbedtls` bindings (generate + curate) | done (root `aht-mbedtls.ads`, `version`, plus the curated SSL / CTR_DRBG / Entropy / X509 / `error` surface `AHT.Transport.TLS` uses; contexts are opaque, allocated/freed by the C glue `csrc/aht_mbedtls_glue.c`. No NetSockets binding — byte I/O stays on the TCP transport via custom BIO) |
-| 11 | `AHT.Transport.TLS` | done at the transport level (custom BIO over `AHT.Transport.TCP`: handshake, CA verify / `Insecure`, SNI, read/write with `WANT_*` retry, exception-isolating BIO callbacks; `Set_Read_Deadline`/`Abort_Pending` forward to TCP). `https://`/`wss://` client-side wiring is the only TLS work left (tasks below) |
+| 11 | `AHT.Transport.TLS` | done at the transport level (custom BIO over `AHT.Transport.TCP`: handshake, CA verify / `Insecure`, SNI, read/write with `WANT_*` retry, exception-isolating BIO callbacks; `Set_Read_Deadline`/`Abort_Pending` forward to TCP) **and wired into `AHT.HTTP.Client` for `https://`**. `wss://` client-side wiring is the only TLS work left (task below) |
 | 12 | `AHT.Websocket.Frames` codec | done (direction-neutral encode + decode with masking, 7/16/64-bit lengths, control-frame validation including Close-payload structural + code-range checks, RSV-bit rejection, incomplete-buffer signalling) |
 | 13 | `AHT.Websocket.Client` (receiver task + POs) | done for plain WS — receiver task with frame reassembly + auto-Pong + RFC 6455 §1.4 close handshake on top of Send_Guard / Inbox / State POs; Send_Text / Send_Binary / Send_Ping / Receive / Close all wired |
-| 14 | Python test servers + cert generation | done (plain HTTP, plain WS, and HTTPS `server_tls.py` fixtures; `scripts/generate_cert.sh` produces a self-signed cert with `localhost` + `127.0.0.1` SANs, regenerated each run) |
-| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + plain WS + mbedTLS smoke + TLS transport (20 tests; orchestrator creates a venv on first run, installs the requirements, generates the cert, brings up all three fixtures, and runs all binaries) |
+| 14 | Python test servers + cert generation | done (plain HTTP, plain WS, HTTPS `server_tls.py`, and a silent `server_stall.py` fixture on :8767 for the handshake-timeout test; `scripts/generate_cert.sh` produces a self-signed cert with `localhost` + `127.0.0.1` SANs, regenerated each run) |
+| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + HTTPS + plain WS + mbedTLS smoke + TLS transport + TLS handshake timeout (22 tests; orchestrator creates a venv on first run, installs the requirements, generates the cert, brings up all four fixtures, and runs all binaries) |
 
 "Stubbed" = spec is final, body compiles and raises a
 Not-Implemented exception if called.
@@ -42,14 +42,18 @@ Not-Implemented exception if called.
     `Set` replaces, `Append` preserves repeats, `Values` returns each
     value individually (no lossy comma-join).
   - `tests/bin/test_tcp` — in-process Ada echo server on 127.0.0.1:
-    `Connect` → `Write` → `Read` → clean EOF → `Close`. Seven cases:
+    `Connect` → `Write` → `Read` → clean EOF → `Close`. Ten cases:
     literal, DNS, `[bad,good]` multi-addr fallback, `[bad,bad]`
     all-fail / last-error-wins, `Abort_Pending` unblocks a parked
     `Read` (sibling task, < 1 s to `Aborted_Error`),
-    `Set_Read_Deadline (0.1)` fires `Timeout_Error` (0.05–1 s), and
+    `Set_Read_Deadline (0.1)` fires `Timeout_Error` (0.05–1 s),
     compound-deadline semantics — after `Set_Read_Deadline (0.1)` +
     `delay 0.25`, `Read` raises within 0.05 s rather than granting
-    a fresh budget.
+    a fresh budget — and three `Connect_Timeout` cases: a refusal
+    under a generous budget still raises `Transport_Error` (not
+    misclassified as a timeout), `[bad,good]` fallback survives a
+    budget, and a `0.0` (exhausted) budget raises `Timeout_Error`
+    before any dial.
   - `tests/bin/test_log` — silent default, captured-record sink,
     global + per-subsystem level filtering, concurrent emit through
     `Synchronized_Sink` (800 bumps, zero lost).
@@ -217,6 +221,32 @@ Transport-level TLS test against the HTTPS fixture
     callbacks, opaque-context allocation, and the read-to-clean-EOF
     path end to end.
 
+  - `tests/bin/test_http_tls` — the same three cases (verify /
+    insecure / untrusted) driven through `AHT.HTTP.Client.Get` over
+    `https://localhost:8766/hello` instead of the raw transport,
+    proving the `https://` scheme dispatch threads `Client_Type.CA_Path`
+    / `.Insecure` into the handshake and round-trips a parsed
+    `Response_Type`.
+
+  - `tests/bin/test_tls_timeout` — drives the handshake-timeout path
+    against `server_stall.py` (127.0.0.1:8767), which accepts the TCP
+    connection but never sends a ServerHello. Two cases: (1)
+    transport-level `TLS.Connect` with `Handshake_Deadline => 1.0`
+    raises `Timeout_Error` instead of hanging; (2) `AHT.HTTP.Client.Get`
+    with `Timeout_Seconds => 1` does the same, proving the client
+    threads its timeout into `Connect`'s `Handshake_Deadline`. Both
+    assert the wait stayed within a generous bound, so a regression
+    that ignored the deadline would surface as a hang/over-budget.
+    The sibling *TCP-connect* budget (`Connect_Timeout`) is covered
+    deterministically by `test_tcp` cases 8–10 (refusal-under-budget,
+    fallback-under-budget, exhausted-budget → `Timeout_Error`) without
+    a network fixture. Only a genuine mid-connect stall — a peer that
+    accepts the SYN but never finishes `connect()`, i.e. the
+    `Connect_Socket` `Status = Expired` line — is left untested, since
+    it needs an unroutable/firewalled address too environment-dependent
+    for CI; case 10 reaches the same `Timeout_Error` via the
+    pre-attempt budget check instead.
+
 Pure unit test of the WS framing codec (no sockets — works
 entirely over `Byte_Array` / `Byte_Vector`):
 
@@ -327,14 +357,11 @@ are treated as byte sequences (UTF-8 is caller's responsibility).
 
 ## What's next
 
-The TLS transport (task 11) has landed, so the remaining TLS work is
-client-side wiring, in the order the plan specifies:
+The TLS transport (task 11) has landed, and `https://` is now wired
+into `AHT.HTTP.Client` (with `test_http_tls`). The remaining TLS work
+is the WebSocket side:
 
-1. **HTTPS**: dispatch `https://` in `AHT.HTTP.Client.Send` to
-   `AHT.Transport.TLS` (threading `CA_Path` / `Insecure` from
-   `Client_Type`), plus an HTTPS integration test against the existing
-   `tests/server/server_tls.py` fixture.
-2. **wss://**: route `wss://` in `Websocket.Client.Connect` through the
+1. **wss://**: route `wss://` in `Websocket.Client.Connect` through the
    TLS transport, plus a WS-over-TLS integration test.
 
 Cross-cutting lifecycle change (agreed, but **not** part of TLS
