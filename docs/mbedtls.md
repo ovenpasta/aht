@@ -1,6 +1,9 @@
 # mbedTLS Integration
 
-Status: fetch + build chain done; bindings not yet generated.
+Status: fetch + build chain done; bindings curated; `AHT.Transport.TLS`
+implemented over the existing TCP transport via custom BIO callbacks,
+with a transport-level test (`tests/src/test_tls.adb`) covering verify,
+insecure, and untrusted-chain rejection.
 
 The library targets **mbedTLS v2.28.9** (LTS). The version is pinned
 for reproducibility; upgrading requires rerunning the binding
@@ -76,9 +79,10 @@ This is a firm convention, not a preference:
      `char_array` via `'Address`;
    * adds an Ada-side wrapper that returns a `String` instead
      of leaving the caller to manage NUL termination.
-3. A hand-written body (`aht-mbedtls.adb`, when TLS lands) will
-   map non-zero mbedTLS `int` returns to `AHT.Transport.TLS_Error`
-   with the human message from `mbedtls_strerror`.
+3. `AHT.Mbedtls.Error.Strerror` wraps `mbedtls_strerror` to turn a
+   non-zero `int` return into an Ada `String`; `AHT.Transport.TLS`
+   maps those into `TLS_Error` (or, for a BIO-callback failure, the
+   matching `Timeout_Error` / `Aborted_Error` / `Transport_Error`).
 
 **Do not** hand-write `pragma Import` lines for mbedTLS without
 running the generator first. Doing so invites struct-layout /
@@ -87,19 +91,64 @@ small surface — `AHT.Mbedtls.Version` only, for the bind/link
 smoke test — was curated from the regenerated output, not
 hand-typed.
 
+## Contexts are opaque: the C glue owns sizeof
+
+Ada binds mbedTLS **functions** (ABI-stable signatures) but never
+models a context struct. The structs' layout and size depend on the
+target ABI *and* the build configuration — `MBEDTLS_THREADING_C` adds a
+mutex member, for instance — so any size baked into Ada (a hardcoded
+`sizeof`, or a hand-modelled record) is wrong the moment the target or
+config differs from the box the binding was written on.
+
+Instead, every context is an opaque `System.Address`, allocated and
+freed by a tiny C translation unit, `csrc/aht_mbedtls_glue.c`:
+
+- `aht_mbedtls_{ssl,config,ctr_drbg,entropy,x509_crt}_new` —
+  `malloc(sizeof *c)` + the matching `_init`, returning `void *`. The
+  *target's* C compiler computes `sizeof`, so it is always correct.
+- the matching `_free` — `_free` + `free`.
+- `aht_mbedtls_ctr_drbg_seed` / `aht_mbedtls_conf_rng` — the two calls
+  that pass mbedTLS's own function pointers (`mbedtls_entropy_func`,
+  `mbedtls_ctr_drbg_random`), which is naturally C's job.
+
+`src/aht-mbedtls-glue.ads` is the thin Ada side: each entry is a
+`System.Address`-in / `System.Address`-out import.
+
+> **Config macros must match the library.** The glue is a separate
+> translation unit from the `.a`, so it must be compiled with the
+> *same* `mbedtls_config` view — specifically `MBEDTLS_THREADING_C`
+> and `MBEDTLS_THREADING_PTHREAD`. If the library has the mutex member
+> but the glue's headers don't, `*_new` under-allocates and the
+> library's `*_init` writes past the block (heap corruption). The C
+> switches in `aht.gpr` carry these defines and must stay in lockstep
+> with the CFLAGS in `scripts/fetch_mbedtls.sh`.
+
+## Byte I/O stays on the TCP transport (custom BIO)
+
+mbedTLS does crypto only. `mbedtls_ssl_set_bio` installs send/recv
+callbacks that bridge to the existing `AHT.Transport.TCP`, so HTTPS/WSS
+inherit its DNS multi-candidate fallback, compound read deadline, and
+`Abort_Pending` unchanged — there is no second socket stack and
+`mbedtls_net_*` is not used. Because an Ada exception must never cross
+the C callback frame, each callback catches it, records the kind in the
+BIO context, and returns a negative `MBEDTLS_ERR_NET_*` code; the Ada
+side re-raises the right exception after the mbedTLS call returns.
+
 ## Surface actually used
 
 Scoped to the minimum that `AHT.Transport.TLS` needs:
 
-- `mbedtls_{ssl,ssl_config,entropy,ctr_drbg,x509_crt,net}_init`/`_free`
+- context lifecycle via the C glue (see above), not direct
+  `_init`/`_free` from Ada
 - `mbedtls_ssl_config_defaults`
 - `mbedtls_ssl_conf_authmode`, `_ca_chain`, `_rng`
 - `mbedtls_ssl_setup`, `mbedtls_ssl_set_hostname`, `mbedtls_ssl_set_bio`
 - `mbedtls_ssl_handshake`, `mbedtls_ssl_read`, `mbedtls_ssl_write`
 - `mbedtls_ssl_close_notify`
-- `mbedtls_net_connect`
 - `mbedtls_x509_crt_parse_file` / `_parse_path`
 - `mbedtls_ctr_drbg_seed`, `mbedtls_entropy_func`
 - `mbedtls_strerror`
 
-Everything else from the generated specs is dropped on curation.
+Byte I/O is the TCP transport's job (custom BIO), so `mbedtls_net_*`
+is deliberately absent. Everything else from the generated specs is
+dropped on curation.

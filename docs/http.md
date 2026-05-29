@@ -205,9 +205,10 @@ function  Get  (Self, URL) return Response_Type;
 
 - **Scheme dispatch** on `Req.Target.Scheme`:
   - `http://` → `AHT.Transport.TCP`.
-  - `https://` → not yet wired; raises `HTTP_Error` until mbedTLS
-    integration lands (planned `AHT.Transport.TLS` with `CA_Path` /
-    `Insecure`).
+  - `https://` → the `AHT.Transport.TLS` transport is implemented
+    (custom BIO over the TCP transport, honouring `CA_Path` /
+    `Insecure`), but `Send` does not yet dispatch to it: HTTPS still
+    raises `HTTP_Error` until the client-side wiring lands.
   - `ws://` / `wss://` → raises `HTTP_Error`; route those through
     `AHT.Websocket.Client`.
 

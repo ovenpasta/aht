@@ -25,7 +25,8 @@ project Tests is
       "test_ws_frames.adb",
       "test_ws_handshake.adb",
       "test_ws_echo.adb",
-      "test_mbedtls_version.adb");
+      "test_mbedtls_version.adb",
+      "test_tls.adb");
 
    package Compiler renames Aht.Compiler;
    package Binder   renames Aht.Binder;

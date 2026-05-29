@@ -6,7 +6,7 @@ Packages:
 |---|---|
 | `AHT.Transport` (abstract) | spec implemented |
 | `AHT.Transport.TCP` | implemented |
-| `AHT.Transport.TLS` | stubbed |
+| `AHT.Transport.TLS` | implemented (transport level; `https://`/`wss://` client wiring pending) |
 
 ## Abstraction
 
@@ -180,31 +180,74 @@ client socket.
    proves the deadline is a wall-clock budget from the `Set_`
    call, not a fresh allowance per `Read`.
 
-## `AHT.Transport.TLS` — to be implemented
+## `AHT.Transport.TLS` — implemented
 
-Wraps a TCP transport with an mbedTLS SSL context. Lifecycle per
-connection:
+mbedTLS does the crypto; the bytes still travel over a real
+`AHT.Transport.TCP` instance held *inside* the `TLS_Transport`. There
+is no second socket stack and `mbedtls_net_*` is **not** used — see
+[`mbedtls.md`](mbedtls.md) for the opaque-context / custom-BIO
+rationale. The upshot: `https://` and `wss://` inherit the TCP
+transport's DNS multi-candidate fallback, compound read deadline, and
+`Abort_Pending` unchanged, because `Set_Read_Deadline` and
+`Abort_Pending` on the TLS transport just forward to the inner TCP one.
 
-1. Initialise `mbedtls_{ssl, ssl_config, x509_crt, ctr_drbg, entropy,
-   net}` contexts.
-2. Seed the DRBG (`mbedtls_ctr_drbg_seed`).
-3. Load CA chain — `CA_Path` if supplied, else `/etc/ssl/certs` — via
-   `mbedtls_x509_crt_parse_file` / `_path`.
-4. `mbedtls_ssl_config_defaults` with client preset, TLS 1.2+
-   profile.
+`Connect (Host, Port, Insecure, CA_Path)` lifecycle:
+
+1. **TCP connect first** — `AHT.Transport.TCP.Connect (Host, Port)`, so
+   all of the deadline/abort/fallback machinery above is reused. The
+   inner TCP transport's address is then stored in the BIO context for
+   the callbacks.
+2. Allocate the `ssl`, `ssl_config`, `ctr_drbg`, `entropy` (and, if a
+   CA is supplied, `x509_crt`) contexts via the C glue, which owns
+   `sizeof` (never modelled in Ada).
+3. Seed the DRBG (`mbedtls_ctr_drbg_seed`).
+4. `mbedtls_ssl_config_defaults` — client / stream / default preset.
 5. `mbedtls_ssl_conf_authmode`:
    - `MBEDTLS_SSL_VERIFY_REQUIRED` by default;
-   - `MBEDTLS_SSL_VERIFY_NONE` when `Insecure => True` (for self-
-     signed test certs).
-6. `mbedtls_net_connect` + `mbedtls_ssl_set_bio` binding.
-7. `mbedtls_ssl_set_hostname` for SNI.
-8. Loop `mbedtls_ssl_handshake` until it returns 0 or an error.
-9. `Read` / `Write` delegate to `mbedtls_ssl_read` / `_write`,
-   re-entering on `MBEDTLS_ERR_SSL_WANT_READ` / `_WANT_WRITE`.
-10. `Close` calls `mbedtls_ssl_close_notify` then frees every context.
+   - `MBEDTLS_SSL_VERIFY_NONE` when `Insecure => True` (self-signed
+     test certs).
+6. **CA loading is explicit, no platform default.** If `CA_Path` is
+   non-empty it is loaded with `mbedtls_x509_crt_parse_path` when it
+   names a directory and `mbedtls_x509_crt_parse_file` otherwise
+   (chosen via `Ada.Directories.Kind`), and a non-clean parse is a hard
+   `TLS_Error`. With `CA_Path = ""` **no** trust anchors are configured
+   here (there is no `/etc/ssl/certs` fallback), so unless `Insecure`
+   is set the handshake will reject the peer — callers must pass a CA
+   bundle or opt into `Insecure`.
+7. `mbedtls_ssl_setup`, then `mbedtls_ssl_set_hostname (Host)` for SNI
+   *and* cert-name verification.
+8. `mbedtls_ssl_set_bio` wires the send/recv callbacks (blocking; no
+   recv-timeout callback — the deadline lives in the TCP transport).
+9. Loop `mbedtls_ssl_handshake`, re-entering on
+   `WANT_READ` / `WANT_WRITE`, failing on any other negative code.
+10. `Read` / `Write` delegate to `mbedtls_ssl_read` / `_write`,
+    re-entering on `WANT_READ` / `WANT_WRITE`; a clean close
+    (`PEER_CLOSE_NOTIFY`, or the BIO recv reporting EOF) maps to
+    `Last := 0`, matching the abstract contract.
+11. `Close` is best-effort `mbedtls_ssl_close_notify`, then
+    `TCP.Close`, then frees every context. Idempotent; a failed
+    `Connect` has already freed and closed, so a follow-up `Close` is a
+    no-op.
+
+**Exceptions never cross the C frame.** The BIO send/recv callbacks
+call into the inner TCP transport, which may raise `Timeout_Error`
+(deadline), `Aborted_Error` (`Abort_Pending`), or `Transport_Error`.
+Each callback catches it, records the kind in the BIO context, and
+returns a negative `MBEDTLS_ERR_NET_{SEND,RECV}_FAILED`; the Ada side
+inspects that record after the mbedTLS call returns and re-raises the
+matching exception, so a deadline or cancel during a TLS read surfaces
+as the *same* `Timeout_Error` / `Aborted_Error` a plain TCP read would
+raise. mbedTLS-internal failures (bad cert chain, handshake failure,
+bad record) surface as `TLS_Error` with the `mbedtls_strerror` message.
 
 Concurrency: each transport instance owns its own mbedTLS state, so
 two tasks using separate `TLS_Transport` objects do not interfere.
 mbedTLS itself is compiled with `MBEDTLS_THREADING_C +
 MBEDTLS_THREADING_PTHREAD` so its internal shared structures are safe
 under parallel use.
+
+Covered by `tests/bin/test_tls` (transport level): against the HTTPS
+fixture `tests/server/server_tls.py` it verifies a good chain
+(`CA_Path` → handshake succeeds, `/hello` echoes back), `Insecure`
+bypass, and that a `VERIFY_REQUIRED` connect with no CA rejects the
+self-signed chain with `TLS_Error`.

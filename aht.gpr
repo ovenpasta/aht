@@ -3,14 +3,19 @@ library project Aht is
    for Library_Name use "aht";
    for Library_Kind use "static";
 
-   for Source_Dirs use ("src");
+   for Languages   use ("Ada", "C");
+   for Source_Dirs use ("src", "csrc");
    for Object_Dir  use "obj";
    for Library_Dir use "lib";
 
    type Build_Mode_Kind is ("debug", "release");
    Build_Mode : Build_Mode_Kind := external ("BUILD_MODE", "debug");
 
-   Mbedtls_Lib_Dir := "third_party/mbedtls-2.28.9/library";
+   --  Absolute paths: gprbuild runs the compilers from the object dir, so
+   --  a project-relative path would not resolve. Aht'Project_Dir is the
+   --  absolute project directory and ends with a directory separator.
+   Mbedtls_Lib_Dir := Aht'Project_Dir & "third_party/mbedtls-2.28.9/library";
+   Mbedtls_Inc_Dir := Aht'Project_Dir & "third_party/mbedtls-2.28.9/include";
 
    package Compiler is
       case Build_Mode is
@@ -27,6 +32,18 @@ library project Aht is
               ("-O2", "-gnatn",
                "-gnat2022");
       end case;
+
+      --  The C glue (csrc/aht_mbedtls_glue.c) needs the mbedTLS headers,
+      --  AND it must see the exact same config macros the library was
+      --  compiled with — MBEDTLS_THREADING_C adds a mutex member to
+      --  several context structs, so a glue translation unit that omits
+      --  it computes a smaller sizeof, under-allocates in *_new, and
+      --  mbedtls_*_init then writes past the block (heap corruption).
+      --  Keep these defines in lockstep with the CFLAGS in
+      --  scripts/fetch_mbedtls.sh.
+      for Default_Switches ("C") use
+        ("-O2", "-I" & Mbedtls_Inc_Dir,
+         "-DMBEDTLS_THREADING_C", "-DMBEDTLS_THREADING_PTHREAD");
    end Compiler;
 
    package Binder is

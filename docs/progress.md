@@ -1,8 +1,10 @@
 # Progress
 
 Snapshot of implementation status against [`plan.md`](plan.md).
-Last updated: 2026-05-27 (Websocket.Client receiver task,
-Send_Text/Binary/Ping, Receive, RFC 6455 §1.4 close handshake).
+Last updated: 2026-05-29 (`AHT.Transport.TLS` implemented over the TCP
+transport via custom BIO callbacks; mbedTLS SSL/X509/DRBG/entropy
+surface curated + C glue; TLS test fixture, cert script, and
+transport-level `test_tls`).
 
 ## Task list (from the plan)
 
@@ -17,12 +19,12 @@ Send_Text/Binary/Ping, Receive, RFC 6455 §1.4 close handshake).
 | 7 | Transport deadline/abort retrofit | done |
 | 8 | `AHT.HTTP.Request` / `Response` / `Cancel` / streaming / `Client` | done over HTTP: sync `Send` / `Get`, sync `Send + Cancel_Handle`, `Send_Streaming` (with and without `Cancel_Handle`), buffered `Send_Async` / `Await` / `Cancel`. **Not in v1**: streaming async (`Send_Streaming_Async`). HTTPS dispatch still raises until TLS lands. |
 | 9 | mbedTLS fetch + build script + gpr wiring | done (`fetch_mbedtls.sh` fetches v2.28.9, SHA-256-verifies, extracts, and `make lib`s with threading; `regen_mbedtls_bindings.sh` runs `gcc -fdump-ada-spec` into `scratch/`; link wiring is `pragma Linker_Options` in `aht-mbedtls.ads` so only binaries that `with` it pull in the three archives + pthread) |
-| 10 | `AHT.Mbedtls` bindings (generate + curate) | partial (root `aht-mbedtls.ads` + `aht-mbedtls-version.{ads,adb}` curated; rest of the SSL/CTR_DRBG/Entropy/X509/NetSockets surface curates in alongside `AHT.Transport.TLS`) |
-| 11 | `AHT.Transport.TLS` | stubbed |
+| 10 | `AHT.Mbedtls` bindings (generate + curate) | done (root `aht-mbedtls.ads`, `version`, plus the curated SSL / CTR_DRBG / Entropy / X509 / `error` surface `AHT.Transport.TLS` uses; contexts are opaque, allocated/freed by the C glue `csrc/aht_mbedtls_glue.c`. No NetSockets binding — byte I/O stays on the TCP transport via custom BIO) |
+| 11 | `AHT.Transport.TLS` | done at the transport level (custom BIO over `AHT.Transport.TCP`: handshake, CA verify / `Insecure`, SNI, read/write with `WANT_*` retry, exception-isolating BIO callbacks; `Set_Read_Deadline`/`Abort_Pending` forward to TCP). `https://`/`wss://` client-side wiring is the only TLS work left (tasks below) |
 | 12 | `AHT.Websocket.Frames` codec | done (direction-neutral encode + decode with masking, 7/16/64-bit lengths, control-frame validation including Close-payload structural + code-range checks, RSV-bit rejection, incomplete-buffer signalling) |
 | 13 | `AHT.Websocket.Client` (receiver task + POs) | done for plain WS — receiver task with frame reassembly + auto-Pong + RFC 6455 §1.4 close handshake on top of Send_Guard / Inbox / State POs; Send_Text / Send_Binary / Send_Ping / Receive / Close all wired |
-| 14 | Python test servers + cert generation | partial (plain HTTP + plain WS fixtures done; TLS fixtures + certs to come) |
-| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + plain WS + mbedTLS smoke (19 tests; orchestrator creates a venv on first run, installs the requirements, brings up both fixtures, and runs all binaries) |
+| 14 | Python test servers + cert generation | done (plain HTTP, plain WS, and HTTPS `server_tls.py` fixtures; `scripts/generate_cert.sh` produces a self-signed cert with `localhost` + `127.0.0.1` SANs, regenerated each run) |
+| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + plain WS + mbedTLS smoke + TLS transport (20 tests; orchestrator creates a venv on first run, installs the requirements, generates the cert, brings up all three fixtures, and runs all binaries) |
 
 "Stubbed" = spec is final, body compiles and raises a
 Not-Implemented exception if called.
@@ -201,6 +203,20 @@ mbedTLS bind/link chain smoke test:
     curated Imports of `mbedtls_version_get_string` /
     `_full`, and the `char_array` ↔ Ada `String` round-trip.
 
+Transport-level TLS test against the HTTPS fixture
+(`tests/server/server_tls.py` on 127.0.0.1:8766):
+
+  - `tests/bin/test_tls` — drives `AHT.Transport.TLS` by speaking a
+    minimal HTTP/1.1 `GET /hello` over the established session (no HTTP
+    client involved). Three cases: (1) **verify** — `CA_Path` points at
+    the fixture's self-signed cert, the handshake succeeds (chain +
+    `localhost` SAN match) and `/hello` echoes back; (2) **insecure** —
+    `Insecure => True` with no CA still completes and serves `/hello`;
+    (3) **untrusted** — `VERIFY_REQUIRED` with no CA configured rejects
+    the self-signed chain with `TLS_Error`. Exercises the custom BIO
+    callbacks, opaque-context allocation, and the read-to-clean-EOF
+    path end to end.
+
 Pure unit test of the WS framing codec (no sockets — works
 entirely over `Byte_Array` / `Byte_Vector`):
 
@@ -311,17 +327,25 @@ are treated as byte sequences (UTF-8 is caller's responsibility).
 
 ## What's next
 
-In the order the plan specifies:
+The TLS transport (task 11) has landed, so the remaining TLS work is
+client-side wiring, in the order the plan specifies:
 
-1. Real `scripts/fetch_mbedtls.sh` + `scripts/regen_mbedtls_bindings.sh`
-   (`gcc -fdump-ada-spec` over mbedTLS 2.28.9 headers, curated into
-   `src/`).
-2. `AHT.Transport.TLS` + HTTPS wiring in `Client.Send` + HTTPS
-   integration test. `Transport.TLS.Abort_Pending` aborts the
-   underlying TCP selector. Will need `tests/server/server_tls.py`
-   and `tests/server/generate_cert.sh`.
-3. `wss://` wiring in `Websocket.Client.Connect` + WS-over-TLS
-   integration test once TLS is in.
+1. **HTTPS**: dispatch `https://` in `AHT.HTTP.Client.Send` to
+   `AHT.Transport.TLS` (threading `CA_Path` / `Insecure` from
+   `Client_Type`), plus an HTTPS integration test against the existing
+   `tests/server/server_tls.py` fixture.
+2. **wss://**: route `wss://` in `Websocket.Client.Connect` through the
+   TLS transport, plus a WS-over-TLS integration test.
+
+Cross-cutting lifecycle change (agreed, but **not** part of TLS
+bring-up — its own review/commit): make `Transport_Type` derive from
+`Ada.Finalization.Limited_Controlled` with a best-effort, never-raise
+`Finalize` that dispatches to `Close`, so an abandoned standalone
+`TCP_Transport` / `TLS_Transport` is reclaimed deterministically. This
+closes the leak for plain transport objects only — it does **not**
+solve abandonment of higher-level owners that also have a task to join
+(notably `Websocket.Client`'s receiver task), which still requires an
+explicit `Close`.
 
 Possible follow-ups that didn't make v1: HTTP
 `Send_Streaming_Async` (buffered async is here; streaming async

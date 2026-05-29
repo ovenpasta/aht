@@ -1,14 +1,14 @@
 #!/bin/sh
 #
 # AHT test orchestrator: builds the library + test binaries, brings
-# up the two Python fixtures (HTTP on 8764, WebSocket on 8765), runs
-# every test main listed in tests/tests.gpr, and tears the fixtures
-# down on exit.
+# up the three Python fixtures (HTTP on 8764, WebSocket on 8765, HTTPS
+# on 8766), runs every test main listed in tests/tests.gpr, and tears
+# the fixtures down on exit.
 #
 # Self-contained tests (test_url, test_url_encoding, test_headers,
 # test_log, test_tcp, test_http_io, test_http_wire, test_http_client,
-# test_ws_frames) don't touch either fixture but cost nothing to
-# leave them running, so the script doesn't bother partitioning.
+# test_ws_frames) don't touch any fixture but cost nothing to leave
+# them running, so the script doesn't bother partitioning.
 
 set -eu
 
@@ -18,6 +18,7 @@ VENV=tests/.venv
 LOG=$(mktemp -t aht-server.XXXXXX.log)
 HTTP_PID=
 WS_PID=
+TLS_PID=
 
 cleanup() {
     if [ -n "$HTTP_PID" ]; then
@@ -27,6 +28,10 @@ cleanup() {
     if [ -n "$WS_PID" ]; then
         kill "$WS_PID" 2>/dev/null || true
         wait "$WS_PID" 2>/dev/null || true
+    fi
+    if [ -n "$TLS_PID" ]; then
+        kill "$TLS_PID" 2>/dev/null || true
+        wait "$TLS_PID" 2>/dev/null || true
     fi
     rm -f "$LOG"
 }
@@ -48,28 +53,37 @@ fi
 "$VENV"/bin/pip install -q -r tests/server/requirements.txt
 PY="$VENV"/bin/python3
 
-echo "==> starting HTTP fixture (port 8764) + WS fixture (port 8765)"
-"$PY" tests/server/server.py    >>"$LOG" 2>&1 &
-HTTP_PID=$!
-"$PY" tests/server/server_ws.py >>"$LOG" 2>&1 &
-WS_PID=$!
+echo "==> generating self-signed test cert"
+sh scripts/generate_cert.sh
 
-# Wait for both servers' READY lines (printed once they're listening).
-# 5 s should be plenty; bail out loudly if either never appears so a
+echo "==> starting HTTP (8764) + WS (8765) + TLS (8766) fixtures"
+"$PY" tests/server/server.py     >>"$LOG" 2>&1 &
+HTTP_PID=$!
+"$PY" tests/server/server_ws.py  >>"$LOG" 2>&1 &
+WS_PID=$!
+"$PY" tests/server/server_tls.py >>"$LOG" 2>&1 &
+TLS_PID=$!
+
+# Wait for every fixture's READY line (printed once it is listening).
+# 5 s should be plenty; bail out loudly if any never appears so a
 # crashed fixture doesn't masquerade as test failures.
 for _ in $(seq 1 50); do
     HAS_HTTP=$(grep -c '^READY http ' "$LOG" 2>/dev/null || true)
     HAS_WS=$(grep -c   '^READY ws '   "$LOG" 2>/dev/null || true)
-    if [ "$HAS_HTTP" -ge 1 ] && [ "$HAS_WS" -ge 1 ]; then
+    HAS_TLS=$(grep -c  '^READY tls '  "$LOG" 2>/dev/null || true)
+    if [ "$HAS_HTTP" -ge 1 ] && [ "$HAS_WS" -ge 1 ] \
+       && [ "$HAS_TLS" -ge 1 ]; then
         break
     fi
     sleep 0.1
 done
 HAS_HTTP=$(grep -c '^READY http ' "$LOG" 2>/dev/null || echo 0)
 HAS_WS=$(grep -c   '^READY ws '   "$LOG" 2>/dev/null || echo 0)
-if [ "$HAS_HTTP" -lt 1 ] || [ "$HAS_WS" -lt 1 ]; then
+HAS_TLS=$(grep -c  '^READY tls '  "$LOG" 2>/dev/null || echo 0)
+if [ "$HAS_HTTP" -lt 1 ] || [ "$HAS_WS" -lt 1 ] || [ "$HAS_TLS" -lt 1 ]
+then
     echo "FATAL: fixtures did not become ready in 5s (http=$HAS_HTTP "
-    echo "ws=$HAS_WS); log follows:"
+    echo "ws=$HAS_WS tls=$HAS_TLS); log follows:"
     cat "$LOG"
     exit 2
 fi
