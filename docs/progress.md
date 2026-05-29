@@ -26,9 +26,6 @@ echo fixture `server_ws_tls.py` on :8768 + `test_ws_tls`).
 | 14 | Python test servers + cert generation | done (plain HTTP, plain WS, HTTPS `server_tls.py`, a silent `server_stall.py` fixture on :8767 for the handshake-timeout test, and a TLS-wrapped WS echo `server_ws_tls.py` on :8768; `scripts/generate_cert.sh` produces a self-signed cert with `localhost` + `127.0.0.1` SANs, regenerated each run) |
 | 15 | Ada integration tests + `run_tests.sh` | done for HTTP + HTTPS + plain WS + WS-over-TLS + mbedTLS smoke + TLS transport + TLS handshake timeout (23 tests; orchestrator creates a venv on first run, installs the requirements, generates the cert, brings up all five fixtures, and runs all binaries) |
 
-"Stubbed" = spec is final, body compiles and raises a
-Not-Implemented exception if called.
-
 ## What's built and tested
 
 - `alr build` produces `lib/libaht.a` cleanly.
@@ -397,7 +394,5 @@ Possible follow-ups that didn't make v1: HTTP
 `Send_Streaming_Async` (buffered async is here; streaming async
 wasn't worth the extra surface vs. "spawn your own task that
 calls `Send_Streaming`"), re-usable `Async_Handle` (currently
-single-use). For WebSocket: push-mode callbacks (the API is
-plumbed but the receiver doesn't fire them — pull `Receive` is
-the only delivery path in v1); user-driven `Send_Ping` is
-implemented but isn't covered by `test_ws_echo` yet.
+single-use). For WebSocket: user-driven `Send_Ping` is
+implemented but isn't covered by a test yet.

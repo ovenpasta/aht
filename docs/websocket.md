@@ -5,8 +5,8 @@ Packages under `AHT.Websocket`:
 | Unit | Status |
 |---|---|
 | `AHT.Websocket` (shared types) | implemented |
-| `AHT.Websocket.Frames` | stubbed |
-| `AHT.Websocket.Client` | stubbed |
+| `AHT.Websocket.Frames` | implemented |
+| `AHT.Websocket.Client` | implemented (`ws://` and `wss://`) |
 
 Common exception: `AHT.Websocket.Handshake_Error` — raised by
 `Client.Connect` when the HTTP upgrade does not yield `101 Switching
@@ -166,69 +166,101 @@ A `Random_Mask : Byte_Array (1 .. 4)` helper backed by
 mask); the mask isn't cryptographic and the RFC doesn't require
 it to be.
 
-## `AHT.Websocket.Client` — to be implemented
+## `AHT.Websocket.Client`
 
 ### Shape
 
 ```ada
 type Client_Type is tagged limited private;
 
+--  Full form — Extra_Headers plus optional subprotocols / origin.
 procedure Connect
   (Self          : in out Client_Type;
    URL           : String;
-   Extra_Headers : AHT.HTTP.Headers.Map := AHT.HTTP.Headers.Empty;
-   CA_Path       : String := "";
-   Insecure      : Boolean := False);
+   Extra_Headers : AHT.HTTP.Headers.Map;
+   Subprotocols  : String := "";
+   Origin        : String := "";
+   Insecure      : Boolean := False;
+   CA_Path       : String := "");
 
-procedure Send_Text   (Self; Payload : String);
-procedure Send_Binary (Self; Payload : Byte_Array);
-procedure Send_Ping   (Self; Payload : Byte_Array := []);
+--  Convenience form — no extra headers.
+procedure Connect
+  (Self     : in out Client_Type;
+   URL      : String;
+   Insecure : Boolean := False;
+   CA_Path  : String := "");
+
+procedure Send_Text   (Self : in out Client_Type; Text : String)
+  with Pre => Is_Open (Self);
+procedure Send_Binary (Self : in out Client_Type; Data : Byte_Array)
+  with Pre => Is_Open (Self);
+procedure Send_Ping   (Self : in out Client_Type; Payload : Byte_Array := [])
+  with Pre => Is_Open (Self);
 
 procedure Receive
-  (Self     : in out Client_Type;
-   Msg      : out Message_Type;
-   Timeout  : Duration := Duration'Last);
+  (Self    : in out Client_Type;
+   Msg     : out Message_Type;
+   Timeout : Duration := Duration'Last);
 
 procedure Close
-  (Self   : in out Client_Type;
-   Code   : Valid_Close_Code := 1000;
-   Reason : String := "");
+  (Self    : in out Client_Type;
+   Code    : Valid_Close_Code := 1000;
+   Reason  : String := "";
+   Timeout : Duration := 5.0);
 
 function Is_Open (Self : Client_Type) return Boolean;
+function Selected_Subprotocol (Self : Client_Type) return String;
 ```
+
+`ws://` runs on the plain TCP transport, `wss://` on the TLS transport;
+`Insecure` / `CA_Path` apply to `wss://` only (ignored for `ws://`). A
+`Client_Type` is single-use — after `Close`, a second `Connect` raises
+`Handshake_Error`. `Receive` blocks up to `Timeout` and raises
+`AHT.Websocket.Closed_Error` once the connection has closed; `Close`
+runs the §1.4 handshake bounded by `Timeout` (see the `.ads` for the
+0.0 / `Duration'Last` knobs).
 
 Callback registration (push-mode receive):
 
 ```ada
-procedure On_Message (Self; Callback : On_Message_Callback);
-procedure On_Close   (Self; Callback : On_Close_Callback);
-procedure On_Error   (Self; Callback : On_Error_Callback);
+procedure Set_On_Message (Self : in out Client_Type; CB : On_Message_Callback);
+procedure Set_On_Close   (Self : in out Client_Type; CB : On_Close_Callback);
+procedure Set_On_Error   (Self : in out Client_Type; CB : On_Error_Callback);
 ```
 
 Callbacks fire from the receiver task. Use `Receive` instead if the
 caller prefers a pull model; both are supported simultaneously — every
 inbound message is delivered to the callback (if set) and enqueued into
-`Inbox` (if `Receive` is active).
+`Inbox` (so a later `Receive` still sees it). Callbacks must be
+task-safe and non-blocking, and an exception raised inside one is
+swallowed by the receiver so it can keep draining the wire.
 
 ### HTTP upgrade flow
 
 `Connect` reuses `AHT.HTTP.*` for the wire:
 
-1. `AHT.URL.Parse (URL)` — rewrite `ws` → `http`, `wss` → `https` for
-   transport selection; preserve the WS scheme on `Client_Type` for
-   status reporting.
-2. Open a transport via the same scheme dispatch as `AHT.HTTP.Client`
-   (TCP for `ws`, TLS for `wss`).
+1. `AHT.URL.Parse (URL)` yields a `ws` / `wss` scheme directly (no
+   rewrite to `http` / `https`); the scheme drives transport selection.
+   Non-`ws`/`wss` URLs are rejected upfront with `Handshake_Error`.
+2. Dial one transport for the scheme — TCP for `ws://`, TLS for
+   `wss://` (threading `Insecure` / `CA_Path` into the TLS handshake) —
+   and point `Active` at it.
 3. Build a `GET` request with the upgrade headers:
    - `Host: <authority>`
    - `Upgrade: websocket`
    - `Connection: Upgrade`
    - `Sec-WebSocket-Version: 13`
    - `Sec-WebSocket-Key: <base64 of 16 random bytes>`
-   - plus `Extra_Headers` (e.g. `Authorization`, `Origin`,
-     `Sec-WebSocket-Protocol`).
-4. `AHT.HTTP.IO.Write_All` the request.
-5. Read status line + headers via `AHT.HTTP.IO.Read_Line`.
+   - `Sec-WebSocket-Protocol` / `Origin` when `Subprotocols` / `Origin`
+     are supplied, plus any `Extra_Headers`. `Extra_Headers` entries
+     named `Host`, `Upgrade`, `Connection`, `Sec-WebSocket-Version`, or
+     `Sec-WebSocket-Key` are dropped so they can't override the
+     generated values; other names (including `Origin` and
+     `Sec-WebSocket-Protocol`) are appended as-is, so don't also pass
+     those via `Extra_Headers` if you're using the dedicated parameters
+     or you'll emit duplicate header lines.
+4. `AHT.HTTP.Request.Write` the request over `Active`.
+5. `AHT.HTTP.Response.Read` the status line + headers over `Active`.
 6. Validate:
    - Status = `101 Switching Protocols`. Any other status raises
      `Handshake_Error` carrying the status and reason — callers
@@ -239,8 +271,13 @@ inbound message is delivered to the callback (if set) and enqueued into
      may list additional tokens).
    - `Sec-WebSocket-Accept` equals
      `base64(SHA1(Key & "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))`.
-7. Hand the open transport to the receiver task and `Send_Guard`; set
-   `State := Open`.
+   - At most one `Sec-WebSocket-Protocol`, and any value returned must
+     be one the client offered; the accepted value is stored and
+     reported by `Selected_Subprotocol`.
+7. Hand the open transport to the receiver task; set `State := Open`.
+
+A TLS dial failure (step 2) propagates `AHT.Transport.TLS.TLS_Error`
+unwrapped; failures from step 4 onward are wrapped in `Handshake_Error`.
 
 ### Concurrency model
 
@@ -255,7 +292,7 @@ Owns the read side of the transport. Loop:
    - `Ping` → enqueue a `Pong` through `Send_Guard`.
    - `Pong` → drop (no-op; app doesn't see unsolicited pongs).
    - `Close` → send echoing close through `Send_Guard` (if we haven't
-     yet), set `State := Closing` → `Closed`, fire `On_Close`, exit.
+     yet), fire `On_Close`, set `State := Closed` directly, exit.
 3. If data frame: buffer into a reassembly `Byte_Vector` until
    `FIN = 1`. On completion, fire `On_Message` (if set) **and** enqueue
    into `Inbox` (if someone is blocked in `Receive` or will be later).
@@ -271,33 +308,48 @@ after return.
 Serializes writes. WebSocket clients MUST generate a fresh 32-bit mask
 per frame (RFC 6455 §5.3), and a single frame's bytes must be written
 contiguously. Interleaved writes from two tasks would corrupt the
-stream. `Send_Guard.Write_Frame (Frame)` is the only path to the
-transport's write side.
+stream. Senders bracket each write with `Acquire` / `Release` and draw
+the per-frame mask from `Random_Mask` (under the lock so concurrent
+senders can't share generator state). The socket write runs *between*
+`Acquire` and `Release`, i.e. outside the protected object's own lock —
+so a slow write doesn't block `Release` or `Random_Mask` or state
+queries — but the `Acquire` mutex is still held across it, so other
+senders serialize behind a slow write. Both the user's `Send_*` calls
+and the receiver's Pong / Close echoes go through this guard.
 
 #### `Inbox` (protected object)
 
-Bounded FIFO of `Message_Type`. Entry:
+FIFO of `Message_Type`. The receiver `Push`es completed messages; the
+user's `Receive` pulls. Entry barrier:
 
 ```ada
-entry Receive (Msg : out Message_Type) when Count > 0;
+entry Receive (Msg : out Message_Type) when Closed_F or else not Q.Is_Empty;
 ```
 
-`Receive (..., Timeout)` at the client level is a `select...then delay`
-around that entry. Bound is configurable at `Connect` time; default is
-modest (e.g. 64) so a slow consumer back-pressures by making the
-receiver task block in `Inbox.Put` rather than accumulating unbounded
-memory.
+`Receive (..., Timeout)` at the client level is a `select ... or delay`
+around that entry. The barrier opens both when a message is available
+*and* when `Mark_Closed` has been called, so a `Receive` parked on an
+empty queue wakes when the connection goes away and raises
+`Closed_Error` instead of blocking forever.
 
 #### `State` (protected object)
 
 ```ada
-type Connection_State is (Connecting, Open, Closing, Closed);
+type State_Kind is (Connecting, Open, Closing, Closed);
 ```
 
-Close is **idempotent**: `Client.Close` on a `Closed` client is a
-no-op. Transitions always go forward (`Connecting` → `Open` → `Closing`
-→ `Closed`); going backwards is impossible. This is enforced by the
-PO entries, which rendezvous on valid transitions only.
+Transitions only ever move forward toward `Closed`. The intermediate
+`Closing` is visited only on the user-initiated `Close` path (which
+sets `Closing` while it waits for the peer's echo); a peer-initiated
+close handled in the receiver sets `Closed` directly, so `Open →
+Closed` is observable without ever passing through `Closing`. `Close`
+is effectively **idempotent**: on a still-`Connecting` client it's a
+no-op, and on an already-`Closed` one it just makes sure the transport
+is down. The PO also exposes `Wait_Closed` (an entry that
+blocks until `Closed`, used by `Close` to wait for the receiver to
+observe the peer's echo) and `Try_Mark_Local_Close`, which atomically
+arbitrates whether the user-`Close` path or the receiver's echo path is
+the one that emits our Close frame.
 
 ### Why this shape
 
@@ -310,19 +362,14 @@ PO entries, which rendezvous on valid transitions only.
 - Splitting `Send_Guard` from `State` keeps the write mutex out of the
   critical path of state queries like `Is_Open`.
 
-## Tests — to be implemented
+## Tests
 
-All against `tests/server/server.py` (plain WS on `:8765`) and
-`server_tls.py` (WSS on `:8766`):
+The WebSocket layer is covered by four test mains; see
+[`progress.md`](progress.md) for the authoritative per-case catalog.
 
-| Test | Scenario |
-|---|---|
-| `test_ws_echo` | 1 KiB text + 1 KiB binary echoed |
-| `test_ws_fragmentation` | 1 MiB binary split into 64 KiB frames, reassembled, SHA-256 matches |
-| `test_ws_close` | client-initiated and server-initiated close paths, both clean |
-| `test_ws_tls` | echo over `wss://127.0.0.1:8766` |
-| `test_ws_upgrade_headers` | custom `Authorization` passes `/require-auth`; missing header raises `Handshake_Error` with status 401 |
-
-Frame codec also gets a pure unit test (`test_ws_frames`, not listed in
-the plan yet) exercising encode/decode round trips for short, medium
-(126), and extended (127) lengths plus control-frame validation.
+| Test | Scope | Fixture |
+|---|---|---|
+| `test_ws_frames` | pure codec — encode/decode round trips for 7/16/64-bit lengths, masking, and control-frame validation | none (in-process) |
+| `test_ws_handshake` | the HTTP upgrade: base64 vectors, 101 / Upgrade / Connection / Accept validation, subprotocol checks, single-use lifecycle, `Close` timeout | `server_ws.py` (`ws://127.0.0.1:8765`) + an in-process fake-handshake server |
+| `test_ws_echo` | plain-WS frame I/O: text / binary round-trips, `Receive` timeout, post-close `Closed_Error`, ordering, push callbacks | `server_ws.py` (`ws://127.0.0.1:8765`) |
+| `test_ws_tls` | the `wss://` sibling: verify / insecure / untrusted, text + binary round-trips over TLS | `server_ws_tls.py` (`wss://127.0.0.1:8768`) |
