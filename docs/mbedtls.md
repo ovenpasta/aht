@@ -34,39 +34,58 @@ so the second-run latency is a few milliseconds.
 `alr build` is one step (cold ~20 s on a modern box; warm
 ~instant).
 
-`aht.gpr` will gain `-L third_party/mbedtls-2.28.9/library` and the
-three `-l` flags once `AHT.Transport.TLS` lands — until then no
-Ada code references mbedTLS symbols, so the libs build but don't
-get linked.
+The link wiring is `pragma Linker_Options` in
+`src/aht-mbedtls.ads` rather than a project-level switch:
+
+```ada
+pragma Linker_Options ("-Lthird_party/mbedtls-2.28.9/library");
+pragma Linker_Options ("-lmbedtls");
+pragma Linker_Options ("-lmbedx509");
+pragma Linker_Options ("-lmbedcrypto");
+pragma Linker_Options ("-lpthread");
+```
+
+The pragmas only fire when a binary transitively `with`s
+`AHT.Mbedtls.*`, so test binaries that don't touch mbedTLS skip
+the extra link step entirely. Relative paths resolve against the
+linker's CWD, which `gprbuild` sets to the project root.
 
 ## Bindings: generated, not hand-written
 
 This is a firm convention, not a preference:
 
-1. `scripts/regen_mbedtls_bindings.sh` (to be completed) creates a
-   throwaway `scratch/gen_bindings/`.
-2. Invokes:
-   ```sh
-   gcc -c -fdump-ada-spec -C \
-       -fada-spec-parent=AHT.Mbedtls \
-       -I third_party/mbedtls-2.28.9/include \
-       third_party/mbedtls-2.28.9/include/mbedtls/ssl.h \
-       third_party/mbedtls-2.28.9/include/mbedtls/net_sockets.h \
-       third_party/mbedtls-2.28.9/include/mbedtls/x509_crt.h \
-       third_party/mbedtls-2.28.9/include/mbedtls/ctr_drbg.h \
-       third_party/mbedtls-2.28.9/include/mbedtls/entropy.h \
-       third_party/mbedtls-2.28.9/include/mbedtls/error.h
-   ```
-3. The operator reads the generated `.ads` files and copies only the
-   identifiers actually used by `AHT.Transport.TLS` into
-   `src/aht-mbedtls-*.ads`. Unused symbols are dropped.
-4. A hand-written `aht-mbedtls.adb` helper maps non-zero mbedTLS
-   `int` returns to `AHT.Transport.TLS.TLS_Error` with the human
-   message from `mbedtls_strerror`.
+1. `scripts/regen_mbedtls_bindings.sh` creates a throwaway
+   `scratch/gen_bindings/` and invokes
+   `gcc -c -fdump-ada-spec -C -fada-spec-parent=AHT.Mbedtls`
+   against the per-module headers
+   (`version.h`, `error.h`, `ssl.h`, `net_sockets.h`,
+   `x509_crt.h`, `ctr_drbg.h`, `entropy.h`).
+2. The operator reads the generated `.ads` files and copies a
+   *curated* subset — only the identifiers actually used by
+   `AHT.Transport.TLS` — into `src/aht-mbedtls-*.ads`. The
+   curation step typically:
+   * drops the `_h` suffix on the package name
+     (`aht-mbedtls-mbedtls_version_h.ads` →
+     `aht-mbedtls-version.ads`);
+   * drops unused symbols (the generator emits ~50 .ads files of
+     transitive glibc/stdc baggage; we keep one per mbedTLS
+     module);
+   * simplifies buffer parameters from
+     `Interfaces.C.Strings.chars_ptr` (heap-allocated) to
+     `System.Address` where callers want to pass a stack
+     `char_array` via `'Address`;
+   * adds an Ada-side wrapper that returns a `String` instead
+     of leaving the caller to manage NUL termination.
+3. A hand-written body (`aht-mbedtls.adb`, when TLS lands) will
+   map non-zero mbedTLS `int` returns to `AHT.Transport.TLS_Error`
+   with the human message from `mbedtls_strerror`.
 
-**Do not** hand-write `pragma Import` lines for mbedTLS. Doing so
-invites struct-layout / signature drift between C headers and Ada
-specs. The generator keeps the binding honest.
+**Do not** hand-write `pragma Import` lines for mbedTLS without
+running the generator first. Doing so invites struct-layout /
+signature drift between C headers and Ada specs. The current
+small surface — `AHT.Mbedtls.Version` only, for the bind/link
+smoke test — was curated from the regenerated output, not
+hand-typed.
 
 ## Surface actually used
 

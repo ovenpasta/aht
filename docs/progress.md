@@ -16,13 +16,13 @@ Send_Text/Binary/Ping, Receive, RFC 6455 §1.4 close handshake).
 | 6 | `AHT.HTTP.IO` (line reader, chunked decode) | done |
 | 7 | Transport deadline/abort retrofit | done |
 | 8 | `AHT.HTTP.Request` / `Response` / `Cancel` / streaming / `Client` | done over HTTP: sync `Send` / `Get`, sync `Send + Cancel_Handle`, `Send_Streaming` (with and without `Cancel_Handle`), buffered `Send_Async` / `Await` / `Cancel`. **Not in v1**: streaming async (`Send_Streaming_Async`). HTTPS dispatch still raises until TLS lands. |
-| 9 | mbedTLS fetch + build script + gpr wiring | partial (`fetch_mbedtls.sh` fetches v2.28.9, SHA-256-verifies, extracts, and `make lib`s with threading enabled; idempotent skip on cached libs; gpr `Linker_Options` waits for the first Ada-side reference in task 10/11) |
-| 10 | `AHT.Mbedtls` bindings (generate + curate) | not started |
+| 9 | mbedTLS fetch + build script + gpr wiring | done (`fetch_mbedtls.sh` fetches v2.28.9, SHA-256-verifies, extracts, and `make lib`s with threading; `regen_mbedtls_bindings.sh` runs `gcc -fdump-ada-spec` into `scratch/`; link wiring is `pragma Linker_Options` in `aht-mbedtls.ads` so only binaries that `with` it pull in the three archives + pthread) |
+| 10 | `AHT.Mbedtls` bindings (generate + curate) | partial (root `aht-mbedtls.ads` + `aht-mbedtls-version.{ads,adb}` curated; rest of the SSL/CTR_DRBG/Entropy/X509/NetSockets surface curates in alongside `AHT.Transport.TLS`) |
 | 11 | `AHT.Transport.TLS` | stubbed |
 | 12 | `AHT.Websocket.Frames` codec | done (direction-neutral encode + decode with masking, 7/16/64-bit lengths, control-frame validation including Close-payload structural + code-range checks, RSV-bit rejection, incomplete-buffer signalling) |
 | 13 | `AHT.Websocket.Client` (receiver task + POs) | done for plain WS — receiver task with frame reassembly + auto-Pong + RFC 6455 §1.4 close handshake on top of Send_Guard / Inbox / State POs; Send_Text / Send_Binary / Send_Ping / Receive / Close all wired |
 | 14 | Python test servers + cert generation | partial (plain HTTP + plain WS fixtures done; TLS fixtures + certs to come) |
-| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + plain WS (18 tests; orchestrator creates a venv on first run, installs the requirements, brings up both fixtures, and runs all binaries) |
+| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + plain WS + mbedTLS smoke (19 tests; orchestrator creates a venv on first run, installs the requirements, brings up both fixtures, and runs all binaries) |
 
 "Stubbed" = spec is final, body compiles and raises a
 Not-Implemented exception if called.
@@ -189,6 +189,17 @@ work — frame I/O landed in commit 2):
     2 s after the handshake; `Close` falls through to
     `Abort_Pending` and returns in well under 0.5 s instead
     of waiting the default 5.0 s.
+
+mbedTLS bind/link chain smoke test:
+
+  - `tests/bin/test_mbedtls_version` — calls
+    `AHT.Mbedtls.Version.Version_String` /
+    `Full_Version_String`, asserts the runtime values match
+    `"2.28.9"` / `"Mbed TLS 2.28.9"`, and cross-checks the
+    compile-time `Major`/`Minor`/`Patch` constants. Exercises
+    the `pragma Linker_Options` in `aht-mbedtls.ads`, the
+    curated Imports of `mbedtls_version_get_string` /
+    `_full`, and the `char_array` ↔ Ada `String` round-trip.
 
 Pure unit test of the WS framing codec (no sockets — works
 entirely over `Byte_Array` / `Byte_Vector`):
