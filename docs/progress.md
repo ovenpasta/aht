@@ -1,9 +1,12 @@
 # Progress
 
 Snapshot of implementation status against [`plan.md`](plan.md).
-Last updated: 2026-05-29 (`AHT.Transport.TLS` wired into both clients:
-`https://` in `AHT.HTTP.Client` and `wss://` in `AHT.Websocket.Client`,
-each threading `Insecure` / `CA_Path` into the handshake; TLS-wrapped WS
+Last updated: 2026-05-29 (`Transport_Type` made `Limited_Controlled`
+with a never-raise `Finalize` that dispatches to `Close`, reclaiming
+abandoned standalone transports + `test_transport_finalize`; on top of
+`AHT.Transport.TLS` wired into both clients: `https://` in
+`AHT.HTTP.Client` and `wss://` in `AHT.Websocket.Client`, each
+threading `Insecure` / `CA_Path` into the handshake; TLS-wrapped WS
 echo fixture `server_ws_tls.py` on :8768 + `test_ws_tls`).
 
 ## Task list (from the plan)
@@ -24,7 +27,7 @@ echo fixture `server_ws_tls.py` on :8768 + `test_ws_tls`).
 | 12 | `AHT.Websocket.Frames` codec | done (direction-neutral encode + decode with masking, 7/16/64-bit lengths, control-frame validation including Close-payload structural + code-range checks, RSV-bit rejection, incomplete-buffer signalling) |
 | 13 | `AHT.Websocket.Client` (receiver task + POs) | done for `ws://` **and `wss://`** — receiver task with frame reassembly + auto-Pong + RFC 6455 §1.4 close handshake on top of Send_Guard / Inbox / State POs; Send_Text / Send_Binary / Send_Ping / Receive / Close all wired; `Connect` dials TCP for `ws://`, TLS for `wss://` (one inline transport per scheme, `Active` points at the dialed one) |
 | 14 | Python test servers + cert generation | done (plain HTTP, plain WS, HTTPS `server_tls.py`, a silent `server_stall.py` fixture on :8767 for the handshake-timeout test, and a TLS-wrapped WS echo `server_ws_tls.py` on :8768; `scripts/generate_cert.sh` produces a self-signed cert with `localhost` + `127.0.0.1` SANs, regenerated each run) |
-| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + HTTPS + plain WS + WS-over-TLS + mbedTLS smoke + TLS transport + TLS handshake timeout (23 tests; orchestrator creates a venv on first run, installs the requirements, generates the cert, brings up all five fixtures, and runs all binaries) |
+| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + HTTPS + plain WS + WS-over-TLS + mbedTLS smoke + TLS transport + TLS handshake timeout (24 tests; orchestrator creates a venv on first run, installs the requirements, generates the cert, brings up all five fixtures, and runs all binaries) |
 
 ## What's built and tested
 
@@ -51,6 +54,14 @@ echo fixture `server_ws_tls.py` on :8768 + `test_ws_tls`).
     misclassified as a timeout), `[bad,good]` fallback survives a
     budget, and a `0.0` (exhausted) budget raises `Timeout_Error`
     before any dial.
+  - `tests/bin/test_transport_finalize` — fixture-free unit test of
+    `Transport_Type`'s inherited `Finalize`, using an in-process test
+    double whose `Close` bumps a counter (and optionally raises).
+    Three cases: a transport that leaves scope without an explicit
+    `Close` has `Close` dispatched once by `Finalize`; a `Close` that
+    raises is swallowed so no exception escapes the scope exit; and an
+    explicit `Close` followed by scope-exit `Finalize` drives `Close`
+    twice (the idempotent-`Close` contract `Finalize` relies on).
   - `tests/bin/test_log` — silent default, captured-record sink,
     global + per-subsystem level filtering, concurrent emit through
     `Synchronized_Sink` (800 bumps, zero lost).
@@ -380,15 +391,16 @@ The TLS transport (task 11) has landed and is wired into both clients:
 `ws://` and TLS for `wss://`, threading `Insecure` / `CA_Path` into the
 handshake. All planned TLS client wiring is now done.
 
-Cross-cutting lifecycle change (agreed, but **not** part of TLS
-bring-up — its own review/commit): make `Transport_Type` derive from
+Cross-cutting lifecycle change (landed in its own commit, separate
+from TLS bring-up): `Transport_Type` now derives from
 `Ada.Finalization.Limited_Controlled` with a best-effort, never-raise
 `Finalize` that dispatches to `Close`, so an abandoned standalone
-`TCP_Transport` / `TLS_Transport` is reclaimed deterministically. This
-closes the leak for plain transport objects only — it does **not**
-solve abandonment of higher-level owners that also have a task to join
-(notably `Websocket.Client`'s receiver task), which still requires an
-explicit `Close`.
+`TCP_Transport` / `TLS_Transport` is reclaimed deterministically
+(`test_transport_finalize` covers the dispatch + swallow branches).
+This closes the leak for plain transport objects only — it does
+**not** solve abandonment of higher-level owners that also have a task
+to join (notably `Websocket.Client`'s receiver task), which still
+requires an explicit `Close`.
 
 Possible follow-ups that didn't make v1: HTTP
 `Send_Streaming_Async` (buffered async is here; streaming async

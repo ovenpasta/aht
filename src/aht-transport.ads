@@ -1,10 +1,13 @@
+with Ada.Finalization;
+
 with AHT.Bytes;
 
 package AHT.Transport is
 
    pragma Preelaborate;
 
-   type Transport_Type is abstract tagged limited null record;
+   type Transport_Type is
+     abstract new Ada.Finalization.Limited_Controlled with null record;
    type Transport_Access is access all Transport_Type'Class;
 
    Transport_Error : exception;
@@ -51,5 +54,19 @@ package AHT.Transport is
    --  Unblock a Read in progress (typically from another task) by
    --  causing it to raise `Aborted_Error`. Idempotent; safe to call
    --  when no read is pending.
+
+   overriding procedure Finalize (Self : in out Transport_Type);
+   --  Best-effort reclaim of an abandoned transport: dispatches to the
+   --  concrete `Close` so a TCP/TLS transport that goes out of scope
+   --  without an explicit Close still drops its socket / mbedTLS
+   --  contexts. Never raises — any exception from `Close` is swallowed,
+   --  because Finalize runs during stack unwinding where a propagating
+   --  exception would become Program_Error. Relies on every `Close`
+   --  being idempotent, since component/parent finalization can drive a
+   --  second Close after an explicit one.
+   --
+   --  This only reclaims standalone transports. A higher-level owner
+   --  that also has a task to join (notably Websocket.Client's receiver)
+   --  still needs an explicit Close — Finalize here does not join tasks.
 
 end AHT.Transport;
