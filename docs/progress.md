@@ -437,11 +437,18 @@ policy Decode defers, so a received reserved code (1004/1005/1006/1015,
 RFC §7.4.1) fails the connection with 1002 and a non-UTF-8 close reason
 (RFC §8.1) fails with 1007 — cases 7.5.1 / 7.9.3 / 7.9.4 / 7.9.5 flipped
 to OK. §12/§13 (permessage-deflate) report UNIMPLEMENTED, which is
-expected: AHT does not negotiate that extension. Remaining FAILED is §9
-large-payload throughput only — 11 cases (9.1.4/5/6, 9.2.3/4/5/6,
-9.3.8/9, 9.4.8/9) at 1–16 MB time out, tracked as a separate follow-up
-slice. Latest full run: 282 OK, 5 NON-STRICT, 3 INFORMATIONAL, 216
-UNIMPLEMENTED, 11 FAILED.
+expected: AHT does not negotiate that extension. §9 (large payloads):
+the receiver's frame accumulator was rebuilt around an index cursor
+(see below), which made the receive path linear and flipped 7 of the
+11 previously-failing cases — all the fragmented ones (9.3.8/9, 9.4.8/9)
+plus the unfragmented up to 4 MB (9.1.4, 9.2.3/4). The remaining 4
+(9.1.5/6, 9.2.5/6 at 8/16 MB) are NOT a library receive bug: the
+Autobahn *testee* (tests/autobahn/src/aht_autobahn.adb) materialises the
+echo payload as a multi-megabyte stack local (`To_String` / `To_Array`)
+and overflows its ~12 MB primary stack with `Storage_Error` on the
+send-back. The client receives those payloads fine; only the test
+driver's echo crashes. Latest full run: 290 OK, 4 NON-STRICT, 3
+INFORMATIONAL, 216 UNIMPLEMENTED, 4 FAILED.
 
 ### Deferred follow-ups (revisit later)
 
@@ -461,23 +468,35 @@ for their own slices:
    connection, so this is correctness/politeness, not a current
    Autobahn failure.
 
-2. **§9 large-payload throughput is O(N²), corrected diagnosis.** The
-   receive path keeps the inbound bytes in an `AHT.Bytes.Byte_Vector`
-   (`Ada.Containers.Vectors` of `Octet`). The dominant cost is the
-   per-frame `Stream.Delete_First` loop that shifts the whole buffer
-   down one element at a time after each successful `Decode`; the
-   secondary cost is re-running `Vector_To_Array (Stream, Have)` over
-   the entire unconsumed buffer on every loop turn. (Decode itself
-   `Reserve_Capacity`s the payload, so payload *assembly* is linear,
-   and Decode bails on incomplete input before touching payload bytes,
-   so there is no payload reparse — my earlier "reparses from byte 0"
-   framing was wrong.) Fix: replace the `Byte_Vector` with an
-   index-managed `Byte_Array`/`Stream_Element_Array` plus a consumed
-   cursor, parse the header/length in place, compact lazily, and do
-   bulk slice copies (inbound is unmasked — servers MUST NOT mask — so
-   the payload copy is a clean block move). Must preserve interleaved
-   control-frame handling and reserve `Reassembly_Buf` before
-   continuation appends.
+2. **§9 large-payload receive throughput — DONE.** The receiver's
+   accumulator was an `AHT.Bytes.Byte_Vector`; its `Delete_First` drain
+   shifted the whole buffer one element per consumed byte (O(N²) for a
+   single big frame) and `Vector_To_Array` recopied the unconsumed
+   buffer on every loop turn. Replaced by `Recv_Buffer` — a growable
+   heap `Byte_Array` with a consumed-prefix cursor: consuming a frame
+   is an O(1) `Head` bump, `Decode` is fed the by-reference slice
+   `Data (Head .. Tail)`, appends are block moves, and the consumed
+   prefix is reclaimed by lazy move-to-front compaction. This is what
+   flipped the 7 §9 cases above.
+
+New follow-ups uncovered while validating §9:
+
+3. **Autobahn testee overflows the stack on ≥8 MB echoes.** The 4
+   still-failing §9 cases die with `Storage_Error` inside the testee,
+   not the client: `aht_autobahn.adb`'s `To_String` / `To_Array` build
+   the whole echo payload as a stack-local array. Fix is harness-only —
+   heap-allocate the echo buffer (or raise the stack) so the driver can
+   bounce a 16 MB message. The library send path (`Encode` → wire) is a
+   separate question; a `Send_Binary` overload taking a `Byte_Vector`
+   would also let large senders skip materialising a `Byte_Array`.
+
+4. **`Send_*` `Pre => Is_Open` can fail on a benign close race.** A
+   message can be delivered to the Inbox and then the peer closes
+   before the app echoes it; the `Pre => Is_Open (Self)` on `Send_Text`
+   / `Send_Binary` (client.ads:45/50) then raises `Assertion_Error`
+   under `-gnata` (and would write on a dead transport with assertions
+   off). Consider making the sends no-op / raise `Closed_Error` cleanly
+   when the connection has closed, rather than asserting.
 
 ## Review findings — resolved
 

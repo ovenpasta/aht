@@ -323,6 +323,60 @@ begin
       end if;
    end;
 
+   --  Case 8: large binary round-trip — the §9 throughput guard.
+   --  A single ~1 MB frame is the worst case for the receiver: the
+   --  old accumulator drained each consumed frame with a per-byte
+   --  Delete_First (O(N²)) and recopied the whole unconsumed buffer
+   --  on every read, so a megabyte echo would not come back within
+   --  the timeout. With the index-cursor Recv_Buffer the path is
+   --  linear. The payload is a deterministic byte ramp so the
+   --  full-length comparison catches any framing / block-move slip.
+   --  Size stays under the `websockets` fixture's 1 MiB max_size.
+   declare
+      C    : AHT.Websocket.Client.Client_Type;
+      Msg  : AHT.Websocket.Client.Message_Type;
+      Size : constant := 1_000_000;
+      Data : AHT.Bytes.Byte_Array (1 .. Size);
+      Got  : Boolean := False;
+   begin
+      for I in Data'Range loop
+         Data (I) := AHT.Bytes.Octet ((I - 1) mod 256);
+      end loop;
+
+      AHT.Websocket.Client.Connect (C, "ws://127.0.0.1:8765/");
+      AHT.Websocket.Client.Send_Binary (C, Data);
+
+      begin
+         AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
+         Got := True;
+      exception
+         when E : others =>
+            Fail ("large: Receive raised "
+                  & Ada.Exceptions.Exception_Name (E)
+                  & " (did the O(N^2) receive drain regress?)");
+      end;
+
+      if Got then
+         if Msg.Kind /= AHT.Websocket.Binary_Message then
+            Fail ("large: Kind = " & Msg.Kind'Image
+                  & " (expected Binary_Message)");
+         elsif Natural (Msg.Payload.Length) /= Size then
+            Fail ("large: payload length ="
+                  & Natural'Image (Natural (Msg.Payload.Length))
+                  & " (expected" & Integer'Image (Size) & ")");
+         else
+            for I in Data'Range loop
+               if Msg.Payload.Element (I) /= Data (I) then
+                  Fail ("large: byte" & I'Image & " differs");
+                  exit;
+               end if;
+            end loop;
+         end if;
+      end if;
+
+      AHT.Websocket.Client.Close (C);
+   end;
+
    if Failures = 0 then
       Put_Line ("test_ws_echo: OK");
       Ada.Command_Line.Set_Exit_Status (0);

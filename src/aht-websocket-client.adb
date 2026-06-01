@@ -3,6 +3,7 @@ with Ada.Exceptions;
 with Ada.Strings;
 with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
+with Ada.Unchecked_Deallocation;
 
 with GNAT.SHA1;
 
@@ -300,6 +301,115 @@ package body AHT.Websocket.Client is
    end Inbox_PO;
 
    ---------------------------------------------------------------
+   --  Receive accumulator
+   ---------------------------------------------------------------
+
+   --  Bytes read off the wire but not yet consumed by a successful
+   --  Frames.Decode live here. A growable heap Byte_Array plus a
+   --  consumed-prefix cursor (Head) keeps the receive path linear
+   --  for large payloads (RFC 6455 §9):
+   --
+   --    * consuming a decoded frame is an O(1) bump of Head, not an
+   --      element-by-element Delete_First (which shifted the whole
+   --      tail down per byte → O(N²) for one big frame);
+   --    * feeding Decode is the slice Data (Head .. Tail), passed by
+   --      reference, not a fresh full-buffer copy on every loop turn;
+   --    * appending a read is one block move, and the consumed prefix
+   --      is reclaimed by lazy compaction (move-to-front) only when
+   --      a read won't otherwise fit.
+   --
+   --  Live bytes are Data (Head .. Tail); the buffer is empty when
+   --  Tail < Head (kept normalised to Head = 1, Tail = 0 when drained).
+   --  Data is allocated lazily on the first read (Ensure_Room) and the
+   --  owning Receiver_Task frees it as it shuts down, so its lifetime is
+   --  bounded by the task's.
+   type Byte_Array_Access is access AHT.Bytes.Byte_Array;
+
+   procedure Free is new Ada.Unchecked_Deallocation
+     (AHT.Bytes.Byte_Array, Byte_Array_Access);
+
+   type Recv_Buffer is record
+      Data : Byte_Array_Access;
+      Head : Positive := 1;
+      Tail : Natural  := 0;
+   end record;
+
+   function Live (B : Recv_Buffer) return Natural is (B.Tail - B.Head + 1);
+
+   --  Guarantee at least Extra free bytes past Tail, compacting the
+   --  consumed prefix first and only growing (doubling) when that is
+   --  still not enough.
+   procedure Ensure_Room (B : in out Recv_Buffer; Extra : Natural) is
+      Used : constant Natural := Live (B);
+   begin
+      if B.Data = null then
+         --  First read: allocate lazily here, inside the receiver
+         --  loop's exception coverage, rather than eagerly at task
+         --  start. A failed allocation then propagates to the loop's
+         --  handler and drives orderly shutdown, instead of killing
+         --  the task before it can mark the connection Closed.
+         B.Data :=
+           new AHT.Bytes.Byte_Array (1 .. Positive'Max (8_192, Extra));
+         return;
+      end if;
+
+      if B.Data'Last - B.Tail >= Extra then
+         return;  -- already fits at the tail
+      end if;
+
+      if Used + Extra <= B.Data'Last then
+         --  Compaction alone reclaims enough room.
+         if Used > 0 and then B.Head > 1 then
+            B.Data (1 .. Used) := B.Data (B.Head .. B.Tail);
+         end if;
+         B.Head := 1;
+         B.Tail := Used;
+         return;
+      end if;
+
+      declare
+         New_Cap  : constant Positive :=
+           Positive'Max (B.Data'Last * 2, Used + Extra);
+         New_Data : constant Byte_Array_Access :=
+           new AHT.Bytes.Byte_Array (1 .. New_Cap);
+      begin
+         if Used > 0 then
+            New_Data (1 .. Used) := B.Data (B.Head .. B.Tail);
+         end if;
+         Free (B.Data);
+         B.Data := New_Data;
+         B.Head := 1;
+         B.Tail := Used;
+      end;
+   end Ensure_Room;
+
+   --  Append the first N bytes of Chunk to the buffer (one block move).
+   procedure Push
+     (B : in out Recv_Buffer; Chunk : AHT.Bytes.Byte_Array; N : Natural)
+   is
+   begin
+      if N = 0 then
+         return;
+      end if;
+      Ensure_Room (B, N);
+      B.Data (B.Tail + 1 .. B.Tail + N) :=
+        Chunk (Chunk'First .. Chunk'First + N - 1);
+      B.Tail := B.Tail + N;
+   end Push;
+
+   --  Drop the consumed prefix up to and including index Last (the
+   --  last byte a successful Decode reported). Reset to the front
+   --  when the buffer drains so it doesn't creep toward capacity.
+   procedure Consume (B : in out Recv_Buffer; Last : Natural) is
+   begin
+      B.Head := Last + 1;
+      if B.Head > B.Tail then
+         B.Head := 1;
+         B.Tail := 0;
+      end if;
+   end Consume;
+
+   ---------------------------------------------------------------
    --  Receiver task
    ---------------------------------------------------------------
 
@@ -310,7 +420,7 @@ package body AHT.Websocket.Client is
 
       --  Frame-decoding accumulator: bytes read from the transport
       --  but not yet consumed by a successful Frames.Decode.
-      Stream : AHT.Bytes.Byte_Vector;
+      Buf : Recv_Buffer;
 
       --  Reassembly state for fragmented messages (RFC 6455 §5.4).
       --  A Text/Binary frame with FIN=0 starts a reassembly; later
@@ -370,9 +480,7 @@ package body AHT.Websocket.Client is
             Stop_Loop := True;
             return;
          end if;
-         for I in Chunk'First .. Last loop
-            Stream.Append (Chunk (I));
-         end loop;
+         Push (Buf, Chunk, Last);
       end Read_More;
 
       --  Send a Close echo (or initial Close) if we haven't yet.
@@ -597,29 +705,21 @@ package body AHT.Websocket.Client is
          exit Main_Loop when Stop_Loop;
 
          declare
-            Have : constant Natural := Natural (Stream.Length);
             Hdr  : AHT.Websocket.Frames.Frame_Header;
             Payload : AHT.Bytes.Byte_Vector;
             Last : Natural;
          begin
-            if Have = 0 then
+            if Live (Buf) = 0 then
                Read_More;
             else
-               declare
-                  Slice : constant AHT.Bytes.Byte_Array :=
-                    Vector_To_Array (Stream, Have);
-               begin
-                  AHT.Websocket.Frames.Decode
-                    (Slice, Hdr, Payload, Last);
-                  if Last = 0 then
-                     Read_More;
-                  else
-                     for I in 1 .. Last loop
-                        Stream.Delete_First;
-                     end loop;
-                     Handle_Frame (Hdr, Payload);
-                  end if;
-               end;
+               AHT.Websocket.Frames.Decode
+                 (Buf.Data (Buf.Head .. Buf.Tail), Hdr, Payload, Last);
+               if Last = 0 then
+                  Read_More;
+               else
+                  Consume (Buf, Last);
+                  Handle_Frame (Hdr, Payload);
+               end if;
             end if;
          exception
             when E : AHT.Websocket.Protocol_Error
@@ -643,6 +743,7 @@ package body AHT.Websocket.Client is
          end;
       end loop Main_Loop;
 
+      Free (Buf.Data);
       Conn.State.Set (Closed);
       Conn.Inbox.Mark_Closed;
    end Receiver_Task;
