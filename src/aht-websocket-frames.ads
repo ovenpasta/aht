@@ -67,4 +67,31 @@ package AHT.Websocket.Frames is
    --    * 64-bit length with the top bit set (RFC §5.2) or a
    --      length overflowing `Natural`.
 
+   --  Inbound policy verdict for a *received* Close-frame payload,
+   --  applied by the Client layer above Decode.
+   --
+   --  Decode is direction-neutral: it deliberately accepts every code
+   --  in `Any_Close_Code` (so a peer/round-trip can carry even the
+   --  synthetic 1005/1006/1015 — see the Decode contract) and does not
+   --  inspect the reason text. The two rules below are inbound *policy*,
+   --  not wire structure, so they live here rather than inside Decode:
+   --
+   --    * Reserved_Code — the 2-byte code is one a peer MUST NOT send
+   --      (RFC 6455 §7.4.1): 1004 (reserved) and the synthetic,
+   --      local-only 1005 / 1006 / 1015. The Client fails the
+   --      connection with 1002 (protocol error).
+   --    * Bad_Reason — the code is acceptable but the reason text after
+   --      it is not valid UTF-8 (RFC 6455 §8.1). The Client fails with
+   --      1007.
+   --    * Accept_Close — empty payload, or a non-reserved code followed
+   --      by a well-formed (or absent) reason. Normal close handling.
+   --
+   --  The payload is assumed already past Decode, so the illegal 1-byte
+   --  case and any code outside `Any_Close_Code` have already raised and
+   --  never reach here.
+   type Inbound_Close_Status is (Accept_Close, Reserved_Code, Bad_Reason);
+
+   function Classify_Inbound_Close
+     (Payload : AHT.Bytes.Byte_Vector) return Inbound_Close_Status;
+
 end AHT.Websocket.Frames;

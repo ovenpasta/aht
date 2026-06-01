@@ -1,6 +1,8 @@
 with Ada.Containers;
 with Interfaces; use Interfaces;
 
+with AHT.Websocket.UTF8;
+
 package body AHT.Websocket.Frames is
 
    --  Wire opcode <-> Opcode enum. The Opcode type uses a
@@ -91,6 +93,46 @@ package body AHT.Websocket.Frames is
              & " is outside 1000..1015 ∪ 3000..4999";
       end if;
    end Validate_Close_Decode;
+
+   function Classify_Inbound_Close
+     (Payload : AHT.Bytes.Byte_Vector) return Inbound_Close_Status
+   is
+      Len  : constant Natural := Natural (Payload.Length);
+      Code : Natural;
+   begin
+      if Len = 0 then
+         return Accept_Close;
+      end if;
+
+      --  Len >= 2 here: Decode rejects a 1-byte Close payload before
+      --  this is reached, so the 2-byte code is always present.
+      Code :=
+        Natural
+          (Shift_Left (Unsigned_16 (Payload.Element
+             (Payload.First_Index)), 8)
+           or Unsigned_16 (Payload.Element
+             (Payload.First_Index + 1)));
+      if Code in 1004 | 1005 | 1006 | 1015 then
+         return Reserved_Code;
+      end if;
+
+      --  Bytes after the 2-byte code are the reason text, which MUST
+      --  be valid UTF-8 (RFC 6455 §8.1).
+      if Len > 2 then
+         declare
+            Reason : AHT.Bytes.Byte_Vector;
+         begin
+            for I in Payload.First_Index + 2 .. Payload.Last_Index loop
+               Reason.Append (Payload.Element (I));
+            end loop;
+            if not AHT.Websocket.UTF8.Is_Valid (Reason) then
+               return Bad_Reason;
+            end if;
+         end;
+      end if;
+
+      return Accept_Close;
+   end Classify_Inbound_Close;
 
    ---------------------------------------------------------------------
    --  Encode

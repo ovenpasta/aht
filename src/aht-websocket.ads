@@ -30,15 +30,20 @@ package AHT.Websocket is
        Any_Close_Code in 1000 .. 1015
        or else Any_Close_Code in 3000 .. 4999;
 
-   --  Valid_Close_Code excludes the three synthetic codes that MUST NOT
-   --  appear on the wire (RFC 6455 §7.4.1):
-   --    * 1005 "No Status Rcvd" — local indication of absent status
+   --  Valid_Close_Code excludes the codes an endpoint MUST NOT send on
+   --  the wire (RFC 6455 §7.4.1):
+   --    * 1004                    — reserved; no defined meaning, so it
+   --                                must never be sent
+   --    * 1005 "No Status Rcvd"   — local indication of absent status
    --    * 1006 "Abnormal Closure" — local indication of connection loss
-   --    * 1015 "TLS handshake"   — local indication of TLS failure
-   --  Used for the Code parameter of Close (i.e. outbound frames).
+   --    * 1015 "TLS handshake"    — local indication of TLS failure
+   --  Used for the Code parameter of Close (i.e. outbound frames). A
+   --  peer that sends any of these inbound is a protocol error handled
+   --  by Frames.Classify_Inbound_Close (the Client replies 1002).
    subtype Valid_Close_Code is Any_Close_Code
      with Dynamic_Predicate =>
-       Valid_Close_Code /= 1005
+       Valid_Close_Code /= 1004
+       and then Valid_Close_Code /= 1005
        and then Valid_Close_Code /= 1006
        and then Valid_Close_Code /= 1015;
 

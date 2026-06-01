@@ -1,7 +1,12 @@
 # Progress
 
 Snapshot of implementation status against [`plan.md`](plan.md).
-Last updated: 2026-05-30 (RFC 3629 UTF-8 validation added —
+Last updated: 2026-06-01 (Autobahn §7 close-handshake validation —
+`Frames.Classify_Inbound_Close` + `test_ws_frames` cases; a received
+reserved close code 1004/1005/1006/1015 now fails with 1002 and a
+non-UTF-8 close reason with 1007, clearing §7 (cases 7.5.1 / 7.9.3 /
+7.9.4 / 7.9.5); `Valid_Close_Code` also now excludes 1004 so it can
+never be sent outbound either. On top of RFC 3629 UTF-8 validation —
 `AHT.Websocket.UTF8.Is_Valid` + `test_ws_utf8`; inbound text payloads
 that are ill-formed UTF-8 now fail the connection with close code 1007
 per RFC 6455 §8.1, clearing all Autobahn §6 cases. On top of
@@ -30,7 +35,7 @@ echo fixture `server_ws_tls.py` on :8768 + `test_ws_tls`).
 | 9 | mbedTLS fetch + build script + gpr wiring | done (`fetch_mbedtls.sh` fetches v2.28.9, SHA-256-verifies, extracts, and `make lib`s with threading; `regen_mbedtls_bindings.sh` runs `gcc -fdump-ada-spec` into `scratch/`; link wiring is `pragma Linker_Options` in `aht-mbedtls.ads` so only binaries that `with` it pull in the three archives + pthread) |
 | 10 | `AHT.Mbedtls` bindings (generate + curate) | done (root `aht-mbedtls.ads`, `version`, plus the curated SSL / CTR_DRBG / Entropy / X509 / `error` surface `AHT.Transport.TLS` uses; contexts are opaque, allocated/freed by the C glue `csrc/aht_mbedtls_glue.c`. No NetSockets binding — byte I/O stays on the TCP transport via custom BIO) |
 | 11 | `AHT.Transport.TLS` | done at the transport level (custom BIO over `AHT.Transport.TCP`: handshake, CA verify / `Insecure`, SNI, read/write with `WANT_*` retry, exception-isolating BIO callbacks; `Set_Read_Deadline`/`Abort_Pending` forward to TCP) **and wired into `AHT.HTTP.Client` for `https://`** and **`AHT.Websocket.Client` for `wss://`** (scheme dispatch threads `Insecure` / `CA_Path` into the handshake). All planned TLS client wiring is done |
-| 12 | `AHT.Websocket.Frames` codec | done (direction-neutral encode + decode with masking, 7/16/64-bit lengths, control-frame validation including Close-payload structural + code-range checks, RSV-bit rejection, incomplete-buffer signalling) |
+| 12 | `AHT.Websocket.Frames` codec | done (direction-neutral encode + decode with masking, 7/16/64-bit lengths, control-frame validation including Close-payload structural + code-range checks, RSV-bit rejection, incomplete-buffer signalling; `Classify_Inbound_Close` applies the §7.4.1/§8.1 inbound close policy Decode defers) |
 | 13 | `AHT.Websocket.Client` (receiver task + POs) | done for `ws://` **and `wss://`** — receiver task with frame reassembly + auto-Pong + RFC 6455 §1.4 close handshake on top of Send_Guard / Inbox / State POs; Send_Text / Send_Binary / Send_Ping / Receive / Close all wired; `Connect` dials TCP for `ws://`, TLS for `wss://` (one inline transport per scheme, `Active` points at the dialed one). Inbound text payloads are validated as UTF-8 (RFC 3629); ill-formed text fails the connection with close code 1007 (RFC 6455 §8.1) |
 | 14 | Python test servers + cert generation | done (plain HTTP, plain WS, HTTPS `server_tls.py`, a silent `server_stall.py` fixture on :8767 for the handshake-timeout test, and a TLS-wrapped WS echo `server_ws_tls.py` on :8768; `scripts/generate_cert.sh` produces a self-signed cert with `localhost` + `127.0.0.1` SANs, regenerated each run) |
 | 15 | Ada integration tests + `run_tests.sh` | done for HTTP + HTTPS + plain WS + WS-over-TLS + mbedTLS smoke + TLS transport + TLS handshake timeout + WS UTF-8 validator (26 tests; orchestrator creates a venv on first run, installs the requirements, generates the cert, brings up all five fixtures, and runs all binaries) |
@@ -299,7 +304,7 @@ Transport-level TLS test against the HTTPS fixture
 Pure unit test of the WS framing codec (no sockets — works
 entirely over `Byte_Array` / `Byte_Vector`):
 
-  - `tests/bin/test_ws_frames` — 23 cases covering (1–2) byte-
+  - `tests/bin/test_ws_frames` — 29 cases covering (1–2) byte-
     exact RFC 6455 §5.7 encode vectors (unmasked + masked
     "Hello"), (3–4) §5.7 decode vectors, (5–6) round-trip 200-
     and 70 000-byte masked frames (exercising the 2- and 8-byte
@@ -316,14 +321,20 @@ entirely over `Byte_Array` / `Byte_Vector`):
     both encode successfully, (17) Close `Encode` with 1-byte
     payload → `Protocol_Error` (RFC §5.5.1), (18) Close `Encode`
     with synthetic code 1005 → `Protocol_Error` (`Valid_Close_Code`
-    excludes 1005/1006/1015), (19) Close `Encode` with
+    excludes 1004/1005/1006/1015), (19) Close `Encode` with
     out-of-range code 999 → `Protocol_Error`, (20) Decode a
     normal Close with code 1000 succeeds, (21) Decode a Close
     with 1-byte payload → `Protocol_Error`, (22) Decode a Close
     with out-of-range code 999 → `Protocol_Error`, (23) Decode
     accepts a Close with code 1006 (`Any_Close_Code` covers the
     synthetic codes as inbound observations — the Client layer
-    decides what to do with them).
+    decides what to do with them), (24) Close `Encode` with
+    reserved code 1004 → `Protocol_Error` (must never be sent),
+    (25–29) `Classify_Inbound_Close`: empty payload and
+    `1000`+reason → `Accept_Close`, each reserved code
+    1004/1005/1006/1015 → `Reserved_Code`, `1000`+lone-`0x80`
+    reason → `Bad_Reason`, `1000`+valid multi-byte reason
+    (`C3 A9`) → `Accept_Close`.
 
 Pure unit test of the RFC 3629 UTF-8 validator (no sockets — a
 predicate over `Byte_Array` / `Byte_Vector`, the check a WebSocket
@@ -420,13 +431,53 @@ is not on `PATH`.
 Current standing: sections 1–5 (framing, ping/pong, reserved bits,
 opcodes, fragmentation) pass at 100%. §6 (UTF-8) passes once the
 validator landed — all 145 cases clear (141 OK + 4 NON-STRICT, 0
-FAILED), where 75 of them failed before the fix. §12/§13
-(permessage-deflate) report UNIMPLEMENTED, which is expected: AHT does
-not negotiate that extension. Remaining FAILED: §7 close-frame
-validation (cases 7.5.1 / 7.9.3 / 7.9.4 / 7.9.5 — should reply 1002 on
-invalid close codes and non-UTF-8 close reasons rather than echoing the
-peer's code) and §9 large-payload throughput (≈11 cases at 1–16 MB time
-out). Both are tracked as separate follow-up slices.
+FAILED), where 75 of them failed before the fix. §7 (close handshake)
+now passes too: `Frames.Classify_Inbound_Close` applies the inbound
+policy Decode defers, so a received reserved code (1004/1005/1006/1015,
+RFC §7.4.1) fails the connection with 1002 and a non-UTF-8 close reason
+(RFC §8.1) fails with 1007 — cases 7.5.1 / 7.9.3 / 7.9.4 / 7.9.5 flipped
+to OK. §12/§13 (permessage-deflate) report UNIMPLEMENTED, which is
+expected: AHT does not negotiate that extension. Remaining FAILED is §9
+large-payload throughput only — 11 cases (9.1.4/5/6, 9.2.3/4/5/6,
+9.3.8/9, 9.4.8/9) at 1–16 MB time out, tracked as a separate follow-up
+slice. Latest full run: 282 OK, 5 NON-STRICT, 3 INFORMATIONAL, 216
+UNIMPLEMENTED, 11 FAILED.
+
+### Deferred follow-ups (revisit later)
+
+Two items came out of the §7 review/work that are intentionally left
+for their own slices:
+
+1. **Decode-rejected closes should also reply 1002.** The §7 slice
+   handles a *successfully decoded* Close frame whose code/reason
+   violate policy (`Classify_Inbound_Close`). But when a Close frame
+   fails to decode at all (a `Protocol_Error` out of
+   `Frames.Decode` — e.g. a malformed/over-long control frame), the
+   receiver's exception handler in `Handle_Receive` (client.adb, the
+   Protocol_Error/Transport branch) only fires `On_Error` + stops the
+   loop; it does **not** send a 1002 Close before tearing down. The
+   broader fix is "on any decode `Protocol_Error`, send 1002 then
+   close". Cases 7.9.1/2/6 already pass today by dropping the
+   connection, so this is correctness/politeness, not a current
+   Autobahn failure.
+
+2. **§9 large-payload throughput is O(N²), corrected diagnosis.** The
+   receive path keeps the inbound bytes in an `AHT.Bytes.Byte_Vector`
+   (`Ada.Containers.Vectors` of `Octet`). The dominant cost is the
+   per-frame `Stream.Delete_First` loop that shifts the whole buffer
+   down one element at a time after each successful `Decode`; the
+   secondary cost is re-running `Vector_To_Array (Stream, Have)` over
+   the entire unconsumed buffer on every loop turn. (Decode itself
+   `Reserve_Capacity`s the payload, so payload *assembly* is linear,
+   and Decode bails on incomplete input before touching payload bytes,
+   so there is no payload reparse — my earlier "reparses from byte 0"
+   framing was wrong.) Fix: replace the `Byte_Vector` with an
+   index-managed `Byte_Array`/`Stream_Element_Array` plus a consumed
+   cursor, parse the header/length in place, compact lazily, and do
+   bulk slice copies (inbound is unmasked — servers MUST NOT mask — so
+   the payload copy is a clean block move). Must preserve interleaved
+   control-frame handling and reserve `Reassembly_Buf` before
+   continuation appends.
 
 ## Review findings — resolved
 

@@ -459,6 +459,33 @@ package body AHT.Websocket.Client is
          Info   : Close_Info;
          Reason : Unbounded_String;
       begin
+         --  Inbound close policy that Decode defers (it accepts the
+         --  full Any_Close_Code range and ignores the reason text).
+         --  RFC 6455 §7.4.1: 1004/1005/1006/1015 must never be sent
+         --  by a peer → fail with 1002. §8.1: a Close reason must be
+         --  valid UTF-8 → fail with 1007. Either way we don't deliver
+         --  an On_Close for a malformed close, we report On_Error.
+         case AHT.Websocket.Frames.Classify_Inbound_Close (Payload) is
+            when AHT.Websocket.Frames.Reserved_Code =>
+               Maybe_Send_Close_Echo (Code => 1002);
+               Fire_On_Error
+                 ("Receiver: peer sent a reserved Close code "
+                  & "(RFC 6455 §7.4.1) — failing connection with 1002");
+               Conn.State.Set (Closed);
+               Stop_Loop := True;
+               return;
+            when AHT.Websocket.Frames.Bad_Reason =>
+               Maybe_Send_Close_Echo (Code => 1007);
+               Fire_On_Error
+                 ("Receiver: invalid UTF-8 in Close reason "
+                  & "(RFC 6455 §8.1) — failing connection with 1007");
+               Conn.State.Set (Closed);
+               Stop_Loop := True;
+               return;
+            when AHT.Websocket.Frames.Accept_Close =>
+               null;
+         end case;
+
          --  Frames.Decode has already validated len /= 1 and
          --  the code range, so this is structural extraction.
          if Len = 0 then

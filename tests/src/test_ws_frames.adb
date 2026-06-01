@@ -18,8 +18,18 @@ procedure Test_WS_Frames is
 
    use type AHT.Bytes.Octet;
    use type AHT.Websocket.Opcode;
+   use all type AHT.Websocket.Frames.Inbound_Close_Status;
 
    Failures : Natural := 0;
+
+   function To_Vec (A : AHT.Bytes.Byte_Array) return AHT.Bytes.Byte_Vector is
+   begin
+      return V : AHT.Bytes.Byte_Vector do
+         for B of A loop
+            V.Append (B);
+         end loop;
+      end return;
+   end To_Vec;
 
    procedure Fail (Msg : String) is
    begin
@@ -629,6 +639,109 @@ begin
       if Natural (Pay.Length) /= 2 then
          Fail ("decode-close-1006: payload length ="
                & Natural'Image (Natural (Pay.Length)));
+      end if;
+   end;
+
+   --  Case 24: Encode Close with reserved code 1004 → Protocol_Error.
+   --  1004 has no defined meaning and MUST NOT be sent (RFC §7.4.1), so
+   --  Valid_Close_Code excludes it just like the synthetic 1005/1006/1015.
+   declare
+      Hdr : AHT.Websocket.Frames.Frame_Header :=
+        (FIN    => True, Op => AHT.Websocket.Close_Op,
+         Masked => True,
+         Mask_Key => [16#00#, 16#00#, 16#00#, 16#00#],
+         others => <>);
+      Payload : constant AHT.Bytes.Byte_Array :=
+        [16#03#, 16#EC#];  -- 1004
+   begin
+      declare
+         Unused : constant AHT.Bytes.Byte_Array :=
+           AHT.Websocket.Frames.Encode (Hdr, Payload);
+      begin
+         Fail ("close-1004: Encode returned without raising");
+      end;
+   exception
+      when AHT.Websocket.Protocol_Error => null;
+      when E : others =>
+         Fail ("close-1004: wrong exception "
+               & Ada.Exceptions.Exception_Name (E));
+   end;
+
+   --  Case 25: Classify_Inbound_Close on an empty payload → Accept_Close.
+   --  A bodiless Close is the normal "no status" signal (RFC §5.5.1).
+   declare
+      Empty : constant AHT.Bytes.Byte_Vector := To_Vec ([]);
+   begin
+      if AHT.Websocket.Frames.Classify_Inbound_Close (Empty)
+        /= Accept_Close
+      then
+         Fail ("classify-empty: not Accept_Close");
+      end if;
+   end;
+
+   --  Case 26: code 1000 + ASCII reason "bye" → Accept_Close.
+   declare
+      Pay : constant AHT.Bytes.Byte_Vector :=
+        To_Vec ([16#03#, 16#E8#,  -- 1000
+                 Character'Pos ('b'), Character'Pos ('y'),
+                 Character'Pos ('e')]);
+   begin
+      if AHT.Websocket.Frames.Classify_Inbound_Close (Pay)
+        /= Accept_Close
+      then
+         Fail ("classify-good-reason: not Accept_Close");
+      end if;
+   end;
+
+   --  Case 27: each reserved-on-wire code 1004/1005/1006/1015 a peer
+   --  MUST NOT send (RFC §7.4.1) → Reserved_Code.
+   declare
+      type Code_Pair is array (1 .. 2) of AHT.Bytes.Octet;
+      Reserved : constant array (1 .. 4) of Code_Pair :=
+        [[16#03#, 16#EC#],   -- 1004
+         [16#03#, 16#ED#],   -- 1005
+         [16#03#, 16#EE#],   -- 1006
+         [16#03#, 16#F7#]];  -- 1015
+   begin
+      for P of Reserved loop
+         declare
+            Pay : constant AHT.Bytes.Byte_Vector :=
+              To_Vec ([P (1), P (2)]);
+         begin
+            if AHT.Websocket.Frames.Classify_Inbound_Close (Pay)
+              /= Reserved_Code
+            then
+               Fail ("classify-reserved: code "
+                     & Hex ([P (1), P (2)]) & " not Reserved_Code");
+            end if;
+         end;
+      end loop;
+   end;
+
+   --  Case 28: acceptable code 1000 + ill-formed UTF-8 reason (a lone
+   --  continuation byte 0x80) → Bad_Reason (RFC §8.1).
+   declare
+      Pay : constant AHT.Bytes.Byte_Vector :=
+        To_Vec ([16#03#, 16#E8#, 16#80#]);  -- 1000 + 0x80
+   begin
+      if AHT.Websocket.Frames.Classify_Inbound_Close (Pay)
+        /= Bad_Reason
+      then
+         Fail ("classify-bad-reason: not Bad_Reason");
+      end if;
+   end;
+
+   --  Case 29: code 1000 + valid multi-byte reason "é" (C3 A9) →
+   --  Accept_Close. Positive control that the reason check is not
+   --  over-eager on legitimate non-ASCII text.
+   declare
+      Pay : constant AHT.Bytes.Byte_Vector :=
+        To_Vec ([16#03#, 16#E8#, 16#C3#, 16#A9#]);  -- 1000 + U+00E9
+   begin
+      if AHT.Websocket.Frames.Classify_Inbound_Close (Pay)
+        /= Accept_Close
+      then
+         Fail ("classify-utf8-reason: not Accept_Close");
       end if;
    end;
 
