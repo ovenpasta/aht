@@ -2,22 +2,26 @@ with Interfaces; use Interfaces;
 
 package body AHT.Bytes is
 
+   --  Extended returns so a large result is built in the caller's
+   --  heap-backed secondary-stack return slot, not as a dynamically-sized
+   --  primary-stack local that overflows the thread stack on multi-MB
+   --  payloads (RFC 6455 §9).
    function From_String (S : String) return Byte_Array is
-      Result : Byte_Array (1 .. S'Length);
    begin
-      for I in S'Range loop
-         Result (Result'First + (I - S'First)) := Character'Pos (S (I));
-      end loop;
-      return Result;
+      return Result : Byte_Array (1 .. S'Length) do
+         for I in S'Range loop
+            Result (Result'First + (I - S'First)) := Character'Pos (S (I));
+         end loop;
+      end return;
    end From_String;
 
    function To_String (B : Byte_Array) return String is
-      Result : String (1 .. B'Length);
    begin
-      for I in B'Range loop
-         Result (Result'First + (I - B'First)) := Character'Val (B (I));
-      end loop;
-      return Result;
+      return Result : String (1 .. B'Length) do
+         for I in B'Range loop
+            Result (Result'First + (I - B'First)) := Character'Val (B (I));
+         end loop;
+      end return;
    end To_String;
 
    function Base64_Encode (B : Byte_Array) return String is

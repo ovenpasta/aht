@@ -36,7 +36,10 @@ async def echo(websocket):
 
 
 async def main() -> int:
-    async with websockets.serve(echo, HOST, PORT):
+    # Raise the inbound frame cap well above the default 1 MiB so the
+    # §9 large-send regression (test_ws_echo case 9) can bounce a >12 MB
+    # message off this fixture; the default would reject it with 1009.
+    async with websockets.serve(echo, HOST, PORT, max_size=32 * 1024 * 1024):
         print(f"READY ws {HOST}:{PORT}", flush=True)
         # Sleep forever — the orchestrator signals shutdown by
         # killing us, which raises CancelledError out of this wait.

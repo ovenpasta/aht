@@ -52,23 +52,27 @@ procedure AHT_Autobahn is
    function Img (N : Integer) return String is
      (Ada.Strings.Fixed.Trim (N'Image, Ada.Strings.Left));
 
+   --  Extended returns so the (up to 16 MB) echo buffer is built in the
+   --  caller's heap-backed secondary-stack return slot, not as a
+   --  dynamically-sized primary-stack local that overflows the thread
+   --  stack on the §9 8M/16M cases.
    function To_String (V : AHT.Bytes.Byte_Vector) return String is
-      S : String (1 .. Natural (V.Length));
    begin
-      for I in S'Range loop
-         S (I) := Character'Val
-           (Natural (V.Element (V.First_Index + I - 1)));
-      end loop;
-      return S;
+      return S : String (1 .. Natural (V.Length)) do
+         for I in S'Range loop
+            S (I) := Character'Val
+              (Natural (V.Element (V.First_Index + I - 1)));
+         end loop;
+      end return;
    end To_String;
 
    function To_Array (V : AHT.Bytes.Byte_Vector) return AHT.Bytes.Byte_Array is
-      A : AHT.Bytes.Byte_Array (1 .. Natural (V.Length));
    begin
-      for I in A'Range loop
-         A (I) := V.Element (V.First_Index + I - 1);
-      end loop;
-      return A;
+      return A : AHT.Bytes.Byte_Array (1 .. Natural (V.Length)) do
+         for I in A'Range loop
+            A (I) := V.Element (V.First_Index + I - 1);
+         end loop;
+      end return;
    end To_Array;
 
    function Get_Case_Count return Natural is

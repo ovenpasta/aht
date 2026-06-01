@@ -24,6 +24,7 @@ with Ada.Command_Line;
 with Ada.Exceptions;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Text_IO; use Ada.Text_IO;
+with Ada.Unchecked_Deallocation;
 
 with AHT.Bytes;
 with AHT.Transport;
@@ -331,7 +332,6 @@ begin
    --  the timeout. With the index-cursor Recv_Buffer the path is
    --  linear. The payload is a deterministic byte ramp so the
    --  full-length comparison catches any framing / block-move slip.
-   --  Size stays under the `websockets` fixture's 1 MiB max_size.
    declare
       C    : AHT.Websocket.Client.Client_Type;
       Msg  : AHT.Websocket.Client.Message_Type;
@@ -375,6 +375,68 @@ begin
       end if;
 
       AHT.Websocket.Client.Close (C);
+   end;
+
+   --  Case 9: large text round-trip (>12 MB) — the §9 *send*-path
+   --  guard. Send_Text builds the wire frame through
+   --  AHT.Bytes.From_String -> Frames.Encode -> TCP Write; before those
+   --  three were reworked to keep their working buffers off the fixed
+   --  thread stack, a multi-MB send raised Storage_Error (the RFC 6455
+   --  §9 8M/16M Autobahn cases). The source string is heap-allocated so
+   --  the *test* doesn't overflow its own stack, and it's an ASCII ramp
+   --  (valid UTF-8, so the fixture accepts it as a text frame). The
+   --  echoed copy is compared byte-for-byte without ever materialising
+   --  a multi-MB String on the stack. Needs the fixture's raised
+   --  max_size (server_ws.py) to be accepted.
+   declare
+      type String_Access is access String;
+      procedure Free is new Ada.Unchecked_Deallocation
+        (String, String_Access);
+      C    : AHT.Websocket.Client.Client_Type;
+      Msg  : AHT.Websocket.Client.Message_Type;
+      Size : constant := 13_000_000;
+      Src  : String_Access := new String (1 .. Size);
+      Got  : Boolean := False;
+   begin
+      for I in Src'Range loop
+         Src (I) := Character'Val (32 + ((I - 1) mod 95));
+      end loop;
+
+      AHT.Websocket.Client.Connect (C, "ws://127.0.0.1:8765/");
+      AHT.Websocket.Client.Send_Text (C, Src.all);
+
+      begin
+         AHT.Websocket.Client.Receive (C, Msg, Timeout => 30.0);
+         Got := True;
+      exception
+         when E : others =>
+            Fail ("large-send: Receive raised "
+                  & Ada.Exceptions.Exception_Name (E)
+                  & " (did the multi-MB send path regress?)");
+      end;
+
+      if Got then
+         if Msg.Kind /= AHT.Websocket.Text_Message then
+            Fail ("large-send: Kind = " & Msg.Kind'Image
+                  & " (expected Text_Message)");
+         elsif Natural (Msg.Payload.Length) /= Size then
+            Fail ("large-send: payload length ="
+                  & Natural'Image (Natural (Msg.Payload.Length))
+                  & " (expected" & Integer'Image (Size) & ")");
+         else
+            for I in Src'Range loop
+               if Msg.Payload.Element (I)
+                 /= AHT.Bytes.Octet (Character'Pos (Src (I)))
+               then
+                  Fail ("large-send: byte" & I'Image & " differs");
+                  exit;
+               end if;
+            end loop;
+         end if;
+      end if;
+
+      AHT.Websocket.Client.Close (C);
+      Free (Src);
    end;
 
    if Failures = 0 then

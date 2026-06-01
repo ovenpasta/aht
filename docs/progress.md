@@ -439,16 +439,10 @@ RFC §7.4.1) fails the connection with 1002 and a non-UTF-8 close reason
 to OK. §12/§13 (permessage-deflate) report UNIMPLEMENTED, which is
 expected: AHT does not negotiate that extension. §9 (large payloads):
 the receiver's frame accumulator was rebuilt around an index cursor
-(see below), which made the receive path linear and flipped 7 of the
-11 previously-failing cases — all the fragmented ones (9.3.8/9, 9.4.8/9)
-plus the unfragmented up to 4 MB (9.1.4, 9.2.3/4). The remaining 4
-(9.1.5/6, 9.2.5/6 at 8/16 MB) are NOT a library receive bug: the
-Autobahn *testee* (tests/autobahn/src/aht_autobahn.adb) materialises the
-echo payload as a multi-megabyte stack local (`To_String` / `To_Array`)
-and overflows its ~12 MB primary stack with `Storage_Error` on the
-send-back. The client receives those payloads fine; only the test
-driver's echo crashes. Latest full run: 290 OK, 4 NON-STRICT, 3
-INFORMATIONAL, 216 UNIMPLEMENTED, 4 FAILED.
+(see below), making the receive path linear, and the *send* path was
+freed of fixed-stack-sized buffers (see below) so multi-MB echoes no
+longer overflow. All of §9 now passes. Latest full run: 293 OK, 5
+NON-STRICT, 3 INFORMATIONAL, 216 UNIMPLEMENTED, 0 FAILED.
 
 ### Deferred follow-ups (revisit later)
 
@@ -481,14 +475,20 @@ for their own slices:
 
 New follow-ups uncovered while validating §9:
 
-3. **Autobahn testee overflows the stack on ≥8 MB echoes.** The 4
-   still-failing §9 cases die with `Storage_Error` inside the testee,
-   not the client: `aht_autobahn.adb`'s `To_String` / `To_Array` build
-   the whole echo payload as a stack-local array. Fix is harness-only —
-   heap-allocate the echo buffer (or raise the stack) so the driver can
-   bounce a 16 MB message. The library send path (`Encode` → wire) is a
-   separate question; a `Send_Binary` overload taking a `Byte_Vector`
-   would also let large senders skip materialising a `Byte_Array`.
+3. **§9 ≥8 MB echoes overflowed the stack — DONE.** First read as a
+   harness-only bug (`aht_autobahn.adb`'s `To_String` / `To_Array`
+   building the echo payload as a stack-local array), but probing showed
+   it was a *chain* of dynamically-sized **primary**-stack locals on the
+   library send path, any one of which overflows the fixed thread stack
+   on a 16 MB frame: `AHT.Bytes.From_String` / `To_String`,
+   `Frames.Encode`'s `Result`, and the TCP transport's `Write` buffer
+   (plus the two testee converters). The string/array builders were
+   converted to **extended returns** (`return R : T (..) do … end
+   return;`) so GNAT builds the result in the caller's heap-backed
+   secondary-stack return slot rather than a primary-stack local; TCP
+   `Write` now streams the payload in bounded 64 KB windows so its stack
+   footprint is O(1) in the message size. All four cases (9.x.5 8 MB,
+   9.x.6 16 MB) now pass; full run is 0 FAILED.
 
 4. **`Send_*` `Pre => Is_Open` can fail on a benign close race.** A
    message can be delivered to the Inbox and then the peer closes

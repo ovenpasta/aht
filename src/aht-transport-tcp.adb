@@ -255,28 +255,40 @@ package body AHT.Transport.TCP is
      (Self : in out TCP_Transport;
       Data : AHT.Bytes.Byte_Array)
    is
-      Buffer : Stream_Element_Array (1 .. Stream_Element_Offset (Data'Length));
-      Sent   : Stream_Element_Offset;
-      Cursor : Stream_Element_Offset := Buffer'First;
+      --  Send in bounded windows. A Data'Length-sized Stream_Element_Array
+      --  would be a dynamically-sized *primary*-stack object that overflows
+      --  the fixed thread stack on multi-MB frames (RFC 6455 §9 8M/16M);
+      --  a fixed window keeps the stack footprint O(1) in the payload size.
+      Window_Max : constant := 65_536;
+      Buffer     : Stream_Element_Array (1 .. Window_Max);
+      Sent       : Stream_Element_Offset;
+      Pos        : Natural := Data'First;
    begin
       if not Self.Connected then
          raise Transport_Error with "TCP write on closed transport";
       end if;
-      if Data'Length = 0 then
-         return;
-      end if;
 
-      To_SEA (Data, Buffer);
-
-      while Cursor <= Buffer'Last loop
-         Send_Socket (Self.Socket, Buffer (Cursor .. Buffer'Last), Sent);
-         exit when Sent < Cursor;
-         Cursor := Sent + 1;
+      while Pos <= Data'Last loop
+         declare
+            Window : constant Natural :=
+              Natural'Min (Window_Max, Data'Last - Pos + 1);
+            Slice  : Stream_Element_Array renames
+              Buffer (1 .. Stream_Element_Offset (Window));
+            Cursor : Stream_Element_Offset := Slice'First;
+         begin
+            To_SEA (Data (Pos .. Pos + Window - 1), Slice);
+            while Cursor <= Slice'Last loop
+               Send_Socket (Self.Socket, Slice (Cursor .. Slice'Last), Sent);
+               exit when Sent < Cursor;
+               Cursor := Sent + 1;
+            end loop;
+            if Cursor <= Slice'Last then
+               raise Transport_Error
+                 with "TCP write: short send (peer closed?)";
+            end if;
+            Pos := Pos + Window;
+         end;
       end loop;
-
-      if Cursor <= Buffer'Last then
-         raise Transport_Error with "TCP write: short send (peer closed?)";
-      end if;
    exception
       when E : Socket_Error =>
          raise Transport_Error with

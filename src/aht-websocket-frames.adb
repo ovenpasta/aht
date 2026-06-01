@@ -151,7 +151,6 @@ package body AHT.Websocket.Frames is
       Mask_Bytes : constant Natural := (if Hdr.Masked then 4 else 0);
       Total      : constant Natural := Header_Bytes + Mask_Bytes + Len;
 
-      Result : AHT.Bytes.Byte_Array (1 .. Total);
       Idx    : Positive := 1;
 
       B0, B1 : Unsigned_8 := 0;
@@ -174,65 +173,70 @@ package body AHT.Websocket.Frames is
          end if;
       end if;
 
-      --  Byte 0: FIN | RSV1 | RSV2 | RSV3 | Opcode(4)
-      if Hdr.FIN  then B0 := B0 or 16#80#; end if;
-      if Hdr.RSV1 then B0 := B0 or 16#40#; end if;
-      if Hdr.RSV2 then B0 := B0 or 16#20#; end if;
-      if Hdr.RSV3 then B0 := B0 or 16#10#; end if;
-      B0 := B0 or (Op_To_Wire (Hdr.Op) and 16#0F#);
-      Result (Idx) := AHT.Bytes.Octet (B0);
-      Idx := Idx + 1;
+      --  Extended return so GNAT builds the frame directly in the
+      --  caller's (heap-backed secondary-stack) return object. A named
+      --  local Result : Byte_Array (1 .. Total) would instead be a
+      --  dynamically-sized *primary*-stack object, overflowing the
+      --  fixed thread stack on multi-MB frames (RFC 6455 §9 8M/16M).
+      return Result : AHT.Bytes.Byte_Array (1 .. Total) do
+         --  Byte 0: FIN | RSV1 | RSV2 | RSV3 | Opcode(4)
+         if Hdr.FIN  then B0 := B0 or 16#80#; end if;
+         if Hdr.RSV1 then B0 := B0 or 16#40#; end if;
+         if Hdr.RSV2 then B0 := B0 or 16#20#; end if;
+         if Hdr.RSV3 then B0 := B0 or 16#10#; end if;
+         B0 := B0 or (Op_To_Wire (Hdr.Op) and 16#0F#);
+         Result (Idx) := AHT.Bytes.Octet (B0);
+         Idx := Idx + 1;
 
-      --  Byte 1: MASK | Payload-length (7-bit code)
-      B1 :=
-        (if Len <= 125         then Unsigned_8 (Len)
-         elsif Len <= 65_535   then 126
-         else                       127);
-      if Hdr.Masked then B1 := B1 or 16#80#; end if;
-      Result (Idx) := AHT.Bytes.Octet (B1);
-      Idx := Idx + 1;
+         --  Byte 1: MASK | Payload-length (7-bit code)
+         B1 :=
+           (if Len <= 125         then Unsigned_8 (Len)
+            elsif Len <= 65_535   then 126
+            else                       127);
+         if Hdr.Masked then B1 := B1 or 16#80#; end if;
+         Result (Idx) := AHT.Bytes.Octet (B1);
+         Idx := Idx + 1;
 
-      --  Extended length (big-endian).
-      if Len > 125 and then Len <= 65_535 then
-         declare
-            V : constant Unsigned_16 := Unsigned_16 (Len);
-         begin
-            Result (Idx)     := AHT.Bytes.Octet (Shift_Right (V, 8));
-            Result (Idx + 1) := AHT.Bytes.Octet (V and 16#FF#);
-         end;
-         Idx := Idx + 2;
-      elsif Len > 65_535 then
-         declare
-            V : constant Unsigned_64 := Unsigned_64 (Len);
-         begin
-            for I in 0 .. 7 loop
-               Result (Idx + I) :=
-                 AHT.Bytes.Octet
-                   (Shift_Right (V, 56 - 8 * I) and 16#FF#);
+         --  Extended length (big-endian).
+         if Len > 125 and then Len <= 65_535 then
+            declare
+               V : constant Unsigned_16 := Unsigned_16 (Len);
+            begin
+               Result (Idx)     := AHT.Bytes.Octet (Shift_Right (V, 8));
+               Result (Idx + 1) := AHT.Bytes.Octet (V and 16#FF#);
+            end;
+            Idx := Idx + 2;
+         elsif Len > 65_535 then
+            declare
+               V : constant Unsigned_64 := Unsigned_64 (Len);
+            begin
+               for I in 0 .. 7 loop
+                  Result (Idx + I) :=
+                    AHT.Bytes.Octet
+                      (Shift_Right (V, 56 - 8 * I) and 16#FF#);
+               end loop;
+            end;
+            Idx := Idx + 8;
+         end if;
+
+         --  Mask key (4 bytes) + payload (XOR-masked per RFC §5.3 if
+         --  Hdr.Masked, raw otherwise).
+         if Hdr.Masked then
+            for I in 0 .. 3 loop
+               Result (Idx + I) := Hdr.Mask_Key (Hdr.Mask_Key'First + I);
             end loop;
-         end;
-         Idx := Idx + 8;
-      end if;
-
-      --  Mask key (4 bytes) + payload (XOR-masked per RFC §5.3 if
-      --  Hdr.Masked, raw otherwise).
-      if Hdr.Masked then
-         for I in 0 .. 3 loop
-            Result (Idx + I) := Hdr.Mask_Key (Hdr.Mask_Key'First + I);
-         end loop;
-         Idx := Idx + 4;
-         for I in 0 .. Len - 1 loop
-            Result (Idx + I) :=
-              Payload (Payload'First + I)
-              xor Hdr.Mask_Key (Hdr.Mask_Key'First + (I mod 4));
-         end loop;
-      else
-         for I in 0 .. Len - 1 loop
-            Result (Idx + I) := Payload (Payload'First + I);
-         end loop;
-      end if;
-
-      return Result;
+            Idx := Idx + 4;
+            for I in 0 .. Len - 1 loop
+               Result (Idx + I) :=
+                 Payload (Payload'First + I)
+                 xor Hdr.Mask_Key (Hdr.Mask_Key'First + (I mod 4));
+            end loop;
+         else
+            for I in 0 .. Len - 1 loop
+               Result (Idx + I) := Payload (Payload'First + I);
+            end loop;
+         end if;
+      end return;
    end Encode;
 
    ---------------------------------------------------------------------
