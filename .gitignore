@@ -1,6 +1,7 @@
-# Alire workspace (generated)
-alire/
-config/
+# Alire workspace (generated, repo root only — anchored so it does not
+# swallow nested config dirs like tests/autobahn/config)
+/alire/
+/config/
 
 # GNAT build outputs
 obj/

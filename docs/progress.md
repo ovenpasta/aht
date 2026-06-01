@@ -402,6 +402,32 @@ sink-raise cases):
     `chunk-ext`, accepts upper-case hex, drains trailer headers,
     and raises on non-hex size or missing post-data CRLF.
 
+## WebSocket conformance (Autobahn|Testsuite)
+
+A dockerized Autobahn `fuzzingserver` harness lives in
+`tests/autobahn/` (kept out of `run_tests.sh` — it needs Docker and is
+run on demand). `tests/autobahn/run.sh` brings up the
+`crossbario/autobahn-testsuite` image (`--network host`, custom
+`--webport` to dodge the :8080 UI collision) and drives the
+`aht_autobahn` testee (`tests/autobahn/src/aht_autobahn.adb`) against
+all ~517 RFC 6455 client cases — `/getCaseCount`, then `/runCase` for
+each (echoing every data message), then `/updateReports`. Reports land
+in `tests/autobahn/reports/`. The testee is built once as a developer
+step (`autobahn.gpr`, deliberately not in `tests.gpr`); the script only
+checks the binary exists, so it runs cleanly under `sudo` where `alr`
+is not on `PATH`.
+
+Current standing: sections 1–5 (framing, ping/pong, reserved bits,
+opcodes, fragmentation) pass at 100%. §6 (UTF-8) passes once the
+validator landed — all 145 cases clear (141 OK + 4 NON-STRICT, 0
+FAILED), where 75 of them failed before the fix. §12/§13
+(permessage-deflate) report UNIMPLEMENTED, which is expected: AHT does
+not negotiate that extension. Remaining FAILED: §7 close-frame
+validation (cases 7.5.1 / 7.9.3 / 7.9.4 / 7.9.5 — should reply 1002 on
+invalid close codes and non-UTF-8 close reasons rather than echoing the
+peer's code) and §9 large-payload throughput (≈11 cases at 1–16 MB time
+out). Both are tracked as separate follow-up slices.
+
 ## Review findings — resolved
 
 From the first code review of the foundational layer:
