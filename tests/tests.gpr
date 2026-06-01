@@ -24,6 +24,7 @@ project Tests is
       "test_http_streaming.adb",
       "test_http_async.adb",
       "test_ws_frames.adb",
+      "test_ws_utf8.adb",
       "test_ws_handshake.adb",
       "test_ws_echo.adb",
       "test_ws_ping.adb",

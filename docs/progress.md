@@ -1,7 +1,11 @@
 # Progress
 
 Snapshot of implementation status against [`plan.md`](plan.md).
-Last updated: 2026-05-29 (`test_ws_ping` added, covering user-driven
+Last updated: 2026-05-30 (RFC 3629 UTF-8 validation added —
+`AHT.Websocket.UTF8.Is_Valid` + `test_ws_utf8`; inbound text payloads
+that are ill-formed UTF-8 now fail the connection with close code 1007
+per RFC 6455 §8.1, clearing all Autobahn §6 cases. On top of
+`test_ws_ping`, covering user-driven
 `Send_Ping` + the inbound-Pong drop path; `Transport_Type` made
 `Limited_Controlled` with a never-raise `Finalize` that dispatches to
 `Close`, reclaiming abandoned standalone transports +
@@ -27,9 +31,9 @@ echo fixture `server_ws_tls.py` on :8768 + `test_ws_tls`).
 | 10 | `AHT.Mbedtls` bindings (generate + curate) | done (root `aht-mbedtls.ads`, `version`, plus the curated SSL / CTR_DRBG / Entropy / X509 / `error` surface `AHT.Transport.TLS` uses; contexts are opaque, allocated/freed by the C glue `csrc/aht_mbedtls_glue.c`. No NetSockets binding — byte I/O stays on the TCP transport via custom BIO) |
 | 11 | `AHT.Transport.TLS` | done at the transport level (custom BIO over `AHT.Transport.TCP`: handshake, CA verify / `Insecure`, SNI, read/write with `WANT_*` retry, exception-isolating BIO callbacks; `Set_Read_Deadline`/`Abort_Pending` forward to TCP) **and wired into `AHT.HTTP.Client` for `https://`** and **`AHT.Websocket.Client` for `wss://`** (scheme dispatch threads `Insecure` / `CA_Path` into the handshake). All planned TLS client wiring is done |
 | 12 | `AHT.Websocket.Frames` codec | done (direction-neutral encode + decode with masking, 7/16/64-bit lengths, control-frame validation including Close-payload structural + code-range checks, RSV-bit rejection, incomplete-buffer signalling) |
-| 13 | `AHT.Websocket.Client` (receiver task + POs) | done for `ws://` **and `wss://`** — receiver task with frame reassembly + auto-Pong + RFC 6455 §1.4 close handshake on top of Send_Guard / Inbox / State POs; Send_Text / Send_Binary / Send_Ping / Receive / Close all wired; `Connect` dials TCP for `ws://`, TLS for `wss://` (one inline transport per scheme, `Active` points at the dialed one) |
+| 13 | `AHT.Websocket.Client` (receiver task + POs) | done for `ws://` **and `wss://`** — receiver task with frame reassembly + auto-Pong + RFC 6455 §1.4 close handshake on top of Send_Guard / Inbox / State POs; Send_Text / Send_Binary / Send_Ping / Receive / Close all wired; `Connect` dials TCP for `ws://`, TLS for `wss://` (one inline transport per scheme, `Active` points at the dialed one). Inbound text payloads are validated as UTF-8 (RFC 3629); ill-formed text fails the connection with close code 1007 (RFC 6455 §8.1) |
 | 14 | Python test servers + cert generation | done (plain HTTP, plain WS, HTTPS `server_tls.py`, a silent `server_stall.py` fixture on :8767 for the handshake-timeout test, and a TLS-wrapped WS echo `server_ws_tls.py` on :8768; `scripts/generate_cert.sh` produces a self-signed cert with `localhost` + `127.0.0.1` SANs, regenerated each run) |
-| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + HTTPS + plain WS + WS-over-TLS + mbedTLS smoke + TLS transport + TLS handshake timeout (25 tests; orchestrator creates a venv on first run, installs the requirements, generates the cert, brings up all five fixtures, and runs all binaries) |
+| 15 | Ada integration tests + `run_tests.sh` | done for HTTP + HTTPS + plain WS + WS-over-TLS + mbedTLS smoke + TLS transport + TLS handshake timeout + WS UTF-8 validator (26 tests; orchestrator creates a venv on first run, installs the requirements, generates the cert, brings up all five fixtures, and runs all binaries) |
 
 ## What's built and tested
 
@@ -320,6 +324,24 @@ entirely over `Byte_Array` / `Byte_Vector`):
     accepts a Close with code 1006 (`Any_Close_Code` covers the
     synthetic codes as inbound observations — the Client layer
     decides what to do with them).
+
+Pure unit test of the RFC 3629 UTF-8 validator (no sockets — a
+predicate over `Byte_Array` / `Byte_Vector`, the check a WebSocket
+endpoint applies to inbound text payloads before accepting them):
+
+  - `tests/bin/test_ws_utf8` — 30 cases over both `Is_Valid`
+    overloads, drawn from the Autobahn|Testsuite §6 cases and
+    Markus Kuhn's UTF-8 stress suite. Valid: empty, ASCII, NUL,
+    the canonical "κόσμε", and the RFC 3629 Table 3-7 code-point
+    boundaries (U+007F / 0080 / 07FF / 0800 / FFFF / 10000 /
+    10FFFF-max). Invalid: lone / truncated continuations, an extra
+    continuation byte, overlong encodings (`c080` / `c0af` /
+    `e08080` / `f0808080`), UTF-16 surrogate halves (`eda080` /
+    `edbfbf`), values above U+10FFFF (`f4908080`), illegal start
+    bytes (`f5` / `c0` / `c1` / `ff`), the forbidden 5-byte form,
+    and the exact Autobahn 6.3.1 payload (κόσμε + a surrogate +
+    "edited"). A regression here maps straight to an Autobahn §6
+    failure.
 
 End-to-end test of the async surface (mixes the Python fixture
 with one in-process silent server for the cancel case):

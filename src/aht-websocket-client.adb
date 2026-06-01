@@ -11,6 +11,7 @@ with AHT.HTTP.Request;
 with AHT.HTTP.Response;
 with AHT.URL;
 with AHT.Websocket.Frames;
+with AHT.Websocket.UTF8;
 
 package body AHT.Websocket.Client is
 
@@ -423,13 +424,32 @@ package body AHT.Websocket.Client is
       procedure Deliver
         (Kind : Message_Kind; Payload : AHT.Bytes.Byte_Vector)
       is
-         Msg : constant Message_Type :=
-           (Kind => Kind, Payload => Payload);
       begin
-         --  Inbox first so a pull-mode Receive doesn't starve if
-         --  the push callback runs slow.
-         Conn.Inbox.Push (Msg);
-         Fire_On_Message (Msg);
+         --  RFC 6455 §8.1: a text message (the complete, reassembled
+         --  payload) MUST be valid UTF-8. On an ill-formed one we fail
+         --  the connection with close code 1007 rather than delivering
+         --  the bad bytes. Binary messages carry no such constraint.
+         if Kind = Text_Message
+           and then not AHT.Websocket.UTF8.Is_Valid (Payload)
+         then
+            Maybe_Send_Close_Echo (Code => 1007);
+            Fire_On_Error
+              ("Receiver: invalid UTF-8 in text message "
+               & "(RFC 6455 §8.1) — failing connection with 1007");
+            Conn.State.Set (Closed);
+            Stop_Loop := True;
+            return;
+         end if;
+
+         declare
+            Msg : constant Message_Type :=
+              (Kind => Kind, Payload => Payload);
+         begin
+            --  Inbox first so a pull-mode Receive doesn't starve if
+            --  the push callback runs slow.
+            Conn.Inbox.Push (Msg);
+            Fire_On_Message (Msg);
+         end;
       end Deliver;
 
       procedure Handle_Close_Frame
