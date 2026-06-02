@@ -70,6 +70,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(b"\r\n")
             self.wfile.write(b"0\r\n\r\n")
 
+        elif self.path == "/chunked-big":
+            # One deliberately huge (>12 MB) chunk in a single
+            # chunk-frame. The chunk-size line names a length far larger
+            # than the client's thread stack, so a naive Size-sized
+            # decode buffer overflows; this exercises the bounded-window
+            # chunk reader. Body is a 0..255 ramp so the client can
+            # verify reassembly byte-for-byte.
+            n = 13_000_000
+            pattern = bytes(range(256))
+            body = (pattern * (n // 256 + 1))[:n]
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(f"{n:x}\r\n".encode("ascii"))
+            self.wfile.write(body)
+            self.wfile.write(b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+
         elif self.path == "/json":
             self._send_fixed(200, b'{"ok":true}\n', "application/json")
 

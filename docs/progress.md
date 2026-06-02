@@ -119,7 +119,12 @@ End-to-end integration suite against `tests/server/server.py`
   - `tests/bin/test_http_chunked` — GET `/chunked` (three uneven
     chunks `"AHT "`, `"rocks"`, `"!\n"`), asserts the decoder
     reassembles them to `"AHT rocks!\n"` and that no
-    `Content-Length` leaks into the response headers.
+    `Content-Length` leaks into the response headers. Also GET
+    `/chunked-big` (one >12 MB chunk, a 0..255 ramp): asserts the
+    buffered body is reassembled byte-for-byte, proving the chunk
+    reader reads in bounded windows rather than into a
+    chunk-size-sized stack array that would overflow the thread
+    stack.
   - `tests/bin/test_http_post` — POST `/echo` with a
     form-urlencoded body; asserts the server echoes the body and
     the round-tripped `Content-Type`.
@@ -387,13 +392,20 @@ End-to-end test of the streaming surface (uses both the Python
 fixture and two in-process server tasks for the cancel /
 sink-raise cases):
 
-  - `tests/bin/test_http_streaming` — five cases. (1) **Chunked
-    streaming**: GET `/chunked`, sink receives the decoded
-    chunks one at a time, assembled bytes match `"AHT rocks!\n"`,
-    and `Resp.Body_B` is empty after — proves the sink is the
-    sole owner of the body. (2) **Content-Length streaming**:
-    GET `/hello`, sink delivers `"hello, world\n"` (one or more
-    calls), `Resp.Body_B` empty. (3) **Cancel during streaming**:
+  - `tests/bin/test_http_streaming` — six cases. (1) **Chunked
+    streaming**: GET `/chunked`, sink receives the body as ordered
+    slices, assembled bytes match `"AHT rocks!\n"`, and
+    `Resp.Body_B` is empty after — proves the sink is the sole
+    owner of the body. (2) **Content-Length streaming**: GET
+    `/hello`, sink delivers `"hello, world\n"` (one or more
+    calls), `Resp.Body_B` empty. (2b) **Large single chunk**: GET
+    `/chunked-big` (>12 MB, a 0..255 ramp) through the sink;
+    asserts no slice exceeds the 4 KB window, the sink is called
+    many times for the one wire chunk, and the ramp reassembles
+    byte-for-byte — locking in the documented contract that chunk
+    boundaries are not preserved (one wire chunk is windowed) so a
+    multi-MB chunk never lands in a chunk-size-sized stack array.
+    (3) **Cancel during streaming**:
     silent in-process server; sibling task fires `Cancel`;
     `Send_Streaming` raises `Aborted_Error` in <1.5 s and the
     sink was never invoked. (4) **Sink exception propagates**:

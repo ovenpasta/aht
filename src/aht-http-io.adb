@@ -153,11 +153,30 @@ package body AHT.HTTP.IO is
          begin
             exit when Size = 0;
 
+            --  Read the chunk-data in bounded windows rather than into
+            --  a single Size-sized array. Size comes straight off the
+            --  wire (the chunk-size line) and is unbounded, so a
+            --  Size-sized local would be a dynamically-sized *primary*-
+            --  stack object that overflows the fixed thread stack on a
+            --  multi-MB chunk (and would drive the same overflow into
+            --  TCP Read's buffer via Read_N). A fixed window keeps the
+            --  stack footprint O(1) in the chunk size; Sink sees the
+            --  chunk delivered as ordered slices.
             declare
-               Chunk : AHT.Bytes.Byte_Array (1 .. Size);
+               Window : constant Positive := 4_096;
+               Buf    : AHT.Bytes.Byte_Array (1 .. Window);
+               Left   : Natural := Size;
             begin
-               Read_N (T, Chunk);
-               Sink (Chunk);
+               while Left > 0 loop
+                  declare
+                     This  : constant Positive := Natural'Min (Window, Left);
+                     Slice : AHT.Bytes.Byte_Array renames Buf (1 .. This);
+                  begin
+                     Read_N (T, Slice);
+                     Sink (Slice);
+                     Left := Left - This;
+                  end;
+               end loop;
                Total := Total + Size;
             end;
 

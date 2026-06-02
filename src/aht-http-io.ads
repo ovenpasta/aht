@@ -21,10 +21,17 @@ package AHT.HTTP.IO is
      (T    : in out AHT.Transport.Transport_Type'Class;
       Sink : not null access
         procedure (Chunk : AHT.Bytes.Byte_Array));
-   --  Streaming chunked-transfer decoder. Calls `Sink` for each
-   --  decoded chunk's data bytes; the zero-size terminator chunk
-   --  closes the body but is not delivered (`Sink` is never called
-   --  with an empty `Chunk`). Trailer headers are still drained and
+   --  Streaming chunked-transfer decoder. Delivers the body to `Sink`
+   --  as ordered, non-empty byte slices and never calls `Sink` with an
+   --  empty `Chunk`; the zero-size terminator chunk closes the body.
+   --  Chunk boundaries are NOT preserved: a single large wire chunk is
+   --  delivered as several bounded windows so the decoder's stack
+   --  footprint stays O(1) in the chunk size rather than allocating a
+   --  size-of-chunk buffer that a multi-MB chunk would overflow. A
+   --  `Sink` must therefore treat each call as "more body bytes", not
+   --  as an HTTP-chunk boundary — matching `Read_N_Streaming` /
+   --  `Read_Until_EOF_Streaming` in AHT.HTTP.Response, which already
+   --  window their deliveries. Trailer headers are still drained and
    --  discarded. Same error conditions as the buffered overload:
    --  non-hex size, overflow past `Natural'Last`, chunk-data not
    --  followed by bare CRLF.

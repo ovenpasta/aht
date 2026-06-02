@@ -1,12 +1,16 @@
 --  Exercises AHT.HTTP.Client.Send_Streaming end-to-end.
 --
---  Four cases:
+--  Cases:
 --    1. Chunked body streaming — GET /chunked, sink receives the
---       decoded chunks one at a time, assembled bytes match the
+--       body as ordered slices, assembled bytes match the
 --       fixture's "AHT rocks!\n", and Resp.Body_B is empty after.
 --    2. Content-Length streaming — GET /hello, sink delivers the
 --       fixed-length body in one or more chunks, total bytes match
 --       "hello, world\n", Resp.Body_B is empty.
+--    2b. Large single chunk — GET /chunked-big (>12 MB ramp) through
+--       the sink: no slice exceeds the 4 KB window, the sink is
+--       called many times for one wire chunk, and the ramp
+--       reassembles byte-for-byte (windowed-delivery contract).
 --    3. Cancel during streaming — silent in-process server holds
 --       the connection; sibling task fires Cancel; Send_Streaming
 --       raises Aborted_Error and sink was never invoked.
@@ -370,6 +374,77 @@ begin
       end if;
       if Calls = 0 then
          Fail ("CL: sink never called");
+      end if;
+   end;
+
+   --  Case 2b: large single chunk (>12 MB) via /chunked-big. This is
+   --  the streaming-path counterpart to test_http_chunked's buffered
+   --  /chunked-big case: it drives the SAME windowed chunk reader but
+   --  through the sink, so it observes the windowing the buffered path
+   --  collapses away. Locks in the documented contract that one wire
+   --  chunk is delivered as several bounded slices (not one callback):
+   --  every slice is <= the 4096 window, the sink is called many times
+   --  for a single chunk, and the reassembled ramp is byte-correct.
+   --  Verified with O(1) state — never materialised as a String — so
+   --  the *test* stack doesn't overflow either.
+   declare
+      C        : AHT.HTTP.Client.Client_Type;
+      Req      : AHT.HTTP.Request.Request_Type;
+      Resp     : AHT.HTTP.Response.Response_Type;
+      N        : constant := 13_000_000;
+      Window   : constant := 4_096;
+      Calls    : Natural := 0;
+      Total    : Natural := 0;
+      Max_Win  : Natural := 0;
+      Bad_At   : Integer := -1;
+
+      procedure Collect (Chunk : AHT.Bytes.Byte_Array) is
+      begin
+         Calls := Calls + 1;
+         if Chunk'Length > Max_Win then
+            Max_Win := Chunk'Length;
+         end if;
+         for B of Chunk loop
+            if Bad_At < 0 and then Natural (B) /= Total mod 256 then
+               Bad_At := Total;
+            end if;
+            Total := Total + 1;
+         end loop;
+      end Collect;
+   begin
+      Req.Method := AHT.HTTP.Methods.GET;
+      Req.Target := AHT.URL.Parse ("http://127.0.0.1:8764/chunked-big");
+
+      begin
+         AHT.HTTP.Client.Send_Streaming
+           (C, Req, Resp, Sink => Collect'Access);
+      exception
+         when E : others =>
+            Fail ("chunked-big: Send_Streaming raised "
+                  & Ada.Exceptions.Exception_Name (E) & ": "
+                  & Ada.Exceptions.Exception_Message (E)
+                  & " (did the chunk reader overflow the stack?)");
+      end;
+
+      if Resp.Status /= 200 then
+         Fail ("chunked-big: status =" & Resp.Status'Image);
+      end if;
+      if Total /= N then
+         Fail ("chunked-big: total bytes =" & Natural'Image (Total)
+               & " (expected" & Integer'Image (N) & ")");
+      end if;
+      if Bad_At >= 0 then
+         Fail ("chunked-big: ramp byte" & Integer'Image (Bad_At)
+               & " differs");
+      end if;
+      if Max_Win > Window then
+         Fail ("chunked-big: a slice exceeded the window, max ="
+               & Natural'Image (Max_Win));
+      end if;
+      if Calls <= 1 then
+         Fail ("chunked-big: one wire chunk delivered in"
+               & Natural'Image (Calls)
+               & " call(s) — windowing not exercised");
       end if;
    end;
 

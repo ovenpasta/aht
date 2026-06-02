@@ -73,6 +73,48 @@ begin
             & "(expected """ & Expected & """)");
    end if;
 
+   --  Large single-chunk body (>12 MB): the chunk-size line names a
+   --  size far bigger than the thread stack, so the decoder must read
+   --  the chunk in bounded windows rather than into one Size-sized
+   --  array. The body is a 0..255 ramp, compared element-wise — never
+   --  materialised as a String, which would overflow the *test* stack.
+   declare
+      C2    : AHT.HTTP.Client.Client_Type;
+      Resp2 : AHT.HTTP.Response.Response_Type;
+      N     : constant := 13_000_000;
+      Got   : Boolean := False;
+   begin
+      begin
+         Resp2 := AHT.HTTP.Client.Get
+           (C2, "http://127.0.0.1:8764/chunked-big");
+         Got := True;
+      exception
+         when E : others =>
+            Fail ("chunked-big: Client.Get raised "
+                  & Ada.Exceptions.Exception_Name (E)
+                  & " (did the chunk reader overflow the stack?)");
+      end;
+
+      if Got then
+         if Resp2.Status /= 200 then
+            Fail ("chunked-big: status =" & Resp2.Status'Image);
+         elsif Natural (Resp2.Body_B.Length) /= N then
+            Fail ("chunked-big: body length ="
+                  & Natural'Image (Natural (Resp2.Body_B.Length))
+                  & " (expected" & Integer'Image (N) & ")");
+         else
+            for I in 0 .. N - 1 loop
+               if Natural (Resp2.Body_B.Element (Resp2.Body_B.First_Index + I))
+                 /= I mod 256
+               then
+                  Fail ("chunked-big: byte" & I'Image & " differs");
+                  exit;
+               end if;
+            end loop;
+         end if;
+      end if;
+   end;
+
    if Failures = 0 then
       Put_Line ("test_http_chunked: OK");
       Ada.Command_Line.Set_Exit_Status (0);
