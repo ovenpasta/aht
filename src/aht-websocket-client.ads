@@ -39,20 +39,26 @@ package AHT.Websocket.Client is
 
    function Is_Open (Self : Client_Type) return Boolean;
 
+   --  Send_Text / Send_Binary / Send_Ping raise Closed_Error if the
+   --  connection is not Open. `Is_Open` is deliberately NOT a
+   --  precondition: the receiver task can move the connection to
+   --  Closing/Closed concurrently (e.g. the peer closes between the
+   --  app pulling a message and echoing it), so the caller cannot
+   --  guarantee it across the call. The check is therefore a runtime
+   --  guard raising a catchable Closed_Error rather than an
+   --  Assertion_Error, and it also keeps a never-connected Client from
+   --  dereferencing its null `Active` transport.
    procedure Send_Text
      (Self : in out Client_Type;
-      Text : String)
-     with Pre => Is_Open (Self);
+      Text : String);
 
    procedure Send_Binary
      (Self : in out Client_Type;
-      Data : AHT.Bytes.Byte_Array)
-     with Pre => Is_Open (Self);
+      Data : AHT.Bytes.Byte_Array);
 
    procedure Send_Ping
      (Self    : in out Client_Type;
-      Payload : AHT.Bytes.Byte_Array := [])
-     with Pre => Is_Open (Self);
+      Payload : AHT.Bytes.Byte_Array := []);
 
    procedure Close
      (Self    : in out Client_Type;
@@ -142,10 +148,21 @@ private
       --  Fresh 4-byte mask per frame, drawn under the protected
       --  lock so concurrent senders can't share generator state.
       procedure Random_Mask (Mask : out AHT.Bytes.Byte_Array);
+      --  Latched the moment a Close frame is written (by Close or the
+      --  receiver's echo). Both Mark_Close_Sent and the senders'
+      --  Close_Frame_Sent check run between Acquire and Release, so
+      --  they are serialized with data-frame writes: whoever wins the
+      --  Acquire race acts first. A Send_* that loses to a concurrent
+      --  close therefore observes Close_Frame_Sent and raises
+      --  Closed_Error instead of writing a data frame behind the Close
+      --  (RFC 6455 §5.5.1: nothing follows a Close frame).
+      procedure Mark_Close_Sent;
+      function  Close_Frame_Sent return Boolean;
    private
-      Busy   : Boolean := False;
-      Gen    : Random_Bytes.Generator;
-      Seeded : Boolean := False;
+      Busy       : Boolean := False;
+      Close_Sent : Boolean := False;
+      Gen        : Random_Bytes.Generator;
+      Seeded     : Boolean := False;
    end Send_Guard;
 
    package Message_Lists is new Ada.Containers.Doubly_Linked_Lists

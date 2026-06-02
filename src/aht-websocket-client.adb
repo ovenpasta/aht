@@ -254,6 +254,13 @@ package body AHT.Websocket.Client is
          Busy := False;
       end Release;
 
+      procedure Mark_Close_Sent is
+      begin
+         Close_Sent := True;
+      end Mark_Close_Sent;
+
+      function Close_Frame_Sent return Boolean is (Close_Sent);
+
       procedure Random_Mask (Mask : out AHT.Bytes.Byte_Array) is
       begin
          if not Seeded then
@@ -505,10 +512,15 @@ package body AHT.Websocket.Client is
             when others =>
                --  If the echo can't go out (peer already torn the
                --  transport down, etc.), we still want to release
-               --  the guard and exit cleanly.
+               --  the guard and exit cleanly. Latch anyway: the
+               --  connection is finished, no data frame may follow.
+               Conn.Guard.Mark_Close_Sent;
                Conn.Guard.Release;
                return;
          end;
+         --  Latch under the guard so a Send_* racing this echo sees
+         --  Close_Frame_Sent and raises instead of writing behind it.
+         Conn.Guard.Mark_Close_Sent;
          Conn.Guard.Release;
       end Maybe_Send_Close_Echo;
 
@@ -981,6 +993,10 @@ package body AHT.Websocket.Client is
    begin
       Self.Guard.Acquire;
       begin
+         if not Is_Open (Self) or else Self.Guard.Close_Frame_Sent then
+            raise AHT.Websocket.Closed_Error with
+              "Send_Text: connection is not open";
+         end if;
          Send_Frame
            (Self.Active.all, Self.Guard,
             Op      => AHT.Websocket.Text,
@@ -1000,6 +1016,10 @@ package body AHT.Websocket.Client is
    begin
       Self.Guard.Acquire;
       begin
+         if not Is_Open (Self) or else Self.Guard.Close_Frame_Sent then
+            raise AHT.Websocket.Closed_Error with
+              "Send_Binary: connection is not open";
+         end if;
          Send_Frame
            (Self.Active.all, Self.Guard,
             Op      => AHT.Websocket.Binary,
@@ -1019,6 +1039,10 @@ package body AHT.Websocket.Client is
    begin
       Self.Guard.Acquire;
       begin
+         if not Is_Open (Self) or else Self.Guard.Close_Frame_Sent then
+            raise AHT.Websocket.Closed_Error with
+              "Send_Ping: connection is not open";
+         end if;
          Send_Frame
            (Self.Active.all, Self.Guard,
             Op      => AHT.Websocket.Ping_Op,
@@ -1074,6 +1098,10 @@ package body AHT.Websocket.Client is
                --  regardless.
                null;
          end;
+         --  Latch under the guard before releasing: a Send_* blocked
+         --  on Acquire will now observe Close_Frame_Sent and raise
+         --  rather than writing a data frame after our Close.
+         Self.Guard.Mark_Close_Sent;
          Self.Guard.Release;
       end if;
       Self.State.Set (Closing);

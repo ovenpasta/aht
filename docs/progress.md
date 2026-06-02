@@ -502,13 +502,35 @@ New follow-ups uncovered while validating §9:
    footprint is O(1) in the message size. All four cases (9.x.5 8 MB,
    9.x.6 16 MB) now pass; full run is 0 FAILED.
 
-4. **`Send_*` `Pre => Is_Open` can fail on a benign close race.** A
-   message can be delivered to the Inbox and then the peer closes
-   before the app echoes it; the `Pre => Is_Open (Self)` on `Send_Text`
-   / `Send_Binary` (client.ads:45/50) then raises `Assertion_Error`
-   under `-gnata` (and would write on a dead transport with assertions
-   off). Consider making the sends no-op / raise `Closed_Error` cleanly
-   when the connection has closed, rather than asserting.
+4. **`Send_*` `Pre => Is_Open` failed on a benign close race — DONE.**
+   A message can be delivered to the Inbox and then the peer closes
+   before the app echoes it; the old `Pre => Is_Open (Self)` on
+   `Send_Text` / `Send_Binary` / `Send_Ping` then raised
+   `Assertion_Error` under `-gnata` (and would write on a dead
+   transport with assertions off). `Is_Open` is not caller-guaranteeable
+   — the receiver task can move the connection to Closing/Closed
+   concurrently — so it was the wrong tool as a precondition. The
+   aspect is gone; each sender now performs its open-check *under the
+   `Send_Guard`*, not before acquiring it. A first cut that merely
+   re-checked `Is_Open` before `Acquire` still raced: `Close` (and the
+   receiver's Close echo) released the guard and only transitioned out
+   of `Open` afterwards, so a sender blocked on `Acquire` could win the
+   guard *after* a Close frame went out and write a data frame behind
+   it (RFC 6455 §5.5.1 violation), and could surface `Transport_Error`
+   from the teardown instead of `Closed_Error`. Fix: `Send_Guard` now
+   latches a `Close_Sent` flag the moment any Close frame is written —
+   set via `Mark_Close_Sent` between `Acquire`/`Release` by both `Close`
+   and `Maybe_Send_Close_Echo`. Each sender, holding the guard, raises
+   `Closed_Error` if `not Is_Open` *or* `Close_Frame_Sent`, so whoever
+   wins the `Acquire` race acts first and no data frame can follow a
+   Close frame regardless of interleaving. The `Is_Open` half still
+   stops a never-connected Client from dereferencing its null `Active`
+   and catches a transport dropped without a Close frame. Genuine
+   wire-level `Write` failures are left as `Transport_Error` (not
+   masked into `Closed_Error`). `test_ws_send_closed` covers both
+   deterministic shapes (never connected; closed after connect); the
+   pure concurrent race is enforced structurally by the guard latch
+   rather than by a flaky timing test.
 
 ## Review findings — resolved
 

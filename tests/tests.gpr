@@ -28,6 +28,7 @@ project Tests is
       "test_ws_handshake.adb",
       "test_ws_echo.adb",
       "test_ws_ping.adb",
+      "test_ws_send_closed.adb",
       "test_ws_tls.adb",
       "test_mbedtls_version.adb",
       "test_tls.adb",
