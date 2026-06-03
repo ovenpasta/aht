@@ -1,6 +1,229 @@
+with Ada.Unchecked_Deallocation;
 with Interfaces; use Interfaces;
 
 package body AHT.Bytes is
+
+   procedure Free is
+     new Ada.Unchecked_Deallocation (Byte_Array, Byte_Array_Access);
+
+   --  To_String / To_Buffer (String) reinterpret bytes through a
+   --  Byte_Array view overlaid on String storage. That block move is
+   --  only sound while Character and Octet are both 8-bit; enforce it
+   --  at compile time so an exotic target fails to build instead of
+   --  silently corrupting text.
+   pragma Compile_Time_Error
+     (Standard.Character'Size /= 8 or else Octet'Size /= 8,
+      "AHT.Bytes String<->byte overlay requires 8-bit Character and Octet");
+
+   Initial_Capacity : constant := 64;
+
+   function Cap (Self : Buffer) return Natural is
+     (if Self.Data = null then 0 else Self.Data'Length);
+
+   --  Grow Data so it can hold at least Needed bytes, preserving the
+   --  live bytes. Capacity doubling; no-op when already big enough.
+   procedure Ensure_Capacity (Self : in out Buffer; Needed : Natural) is
+   begin
+      if Needed <= Cap (Self) then
+         return;
+      end if;
+
+      declare
+         New_Cap : Natural :=
+           (if Cap (Self) = 0 then Initial_Capacity else Cap (Self));
+      begin
+         while New_Cap < Needed loop
+            New_Cap := New_Cap * 2;
+         end loop;
+
+         declare
+            Fresh : constant Byte_Array_Access :=
+              new Byte_Array (1 .. New_Cap);
+         begin
+            if Self.Len > 0 then
+               Fresh (1 .. Self.Len) := Self.Data (1 .. Self.Len);
+            end if;
+            Free (Self.Data);
+            Self.Data := Fresh;
+         end;
+      end;
+   end Ensure_Capacity;
+
+   overriding procedure Adjust (Self : in out Buffer) is
+      Source : constant Byte_Array_Access := Self.Data;
+      N      : constant Natural           := Self.Len;
+   begin
+      --  After the raw record copy, Self.Data still aliases the source's
+      --  array. Detach up front: if the allocation below raises (e.g.
+      --  Storage_Error on a huge body) Self is left empty, so its later
+      --  Finalize frees nothing rather than double-freeing the array the
+      --  source still owns.
+      Self.Data := null;
+      Self.Len  := 0;
+      if Source /= null and then N > 0 then
+         Self.Data := new Byte_Array (1 .. N);
+         Self.Data (1 .. N) := Source (1 .. N);
+         Self.Len := N;
+      end if;
+   end Adjust;
+
+   overriding procedure Finalize (Self : in out Buffer) is
+   begin
+      Free (Self.Data);  --  no-op when already null; idempotent
+      Self.Len := 0;
+   end Finalize;
+
+   function Length      (Self : Buffer) return Natural  is (Self.Len);
+   function Is_Empty    (Self : Buffer) return Boolean  is (Self.Len = 0);
+   function First_Index (Self : Buffer) return Positive is (1);
+   function Last_Index  (Self : Buffer) return Natural  is (Self.Len);
+
+   function Element (Self : Buffer; Index : Positive) return Octet is
+     (Self.Data (Index));
+
+   function To_Array (Self : Buffer) return Byte_Array is
+   begin
+      return Result : Byte_Array (1 .. Self.Len) do
+         if Self.Len > 0 then
+            Result := Self.Data (1 .. Self.Len);
+         end if;
+      end return;
+   end To_Array;
+
+   --  Byte_Array and String share an 8-bit representation, so a String
+   --  result is filled by a single block move through a Byte_Array view
+   --  overlaid on its storage — no per-character loop.
+   function To_String (Self : Buffer) return String is
+   begin
+      return Result : String (1 .. Self.Len) do
+         if Self.Len > 0 then
+            declare
+               View : Byte_Array (1 .. Self.Len)
+                 with Import, Address => Result'Address;
+            begin
+               View := Self.Data (1 .. Self.Len);
+            end;
+         end if;
+      end return;
+   end To_String;
+
+   function To_Array
+     (Self : Buffer; Low : Positive; High : Natural) return Byte_Array
+   is
+      Span : constant Natural := (if High < Low then 0 else High - Low + 1);
+   begin
+      return Result : Byte_Array (1 .. Span) do
+         if Span > 0 then
+            Result := Self.Data (Low .. High);
+         end if;
+      end return;
+   end To_Array;
+
+   function To_String
+     (Self : Buffer; Low : Positive; High : Natural) return String
+   is
+      Span : constant Natural := (if High < Low then 0 else High - Low + 1);
+   begin
+      return Result : String (1 .. Span) do
+         if Span > 0 then
+            declare
+               View : Byte_Array (1 .. Span)
+                 with Import, Address => Result'Address;
+            begin
+               View := Self.Data (Low .. High);
+            end;
+         end if;
+      end return;
+   end To_String;
+
+   function Slice
+     (Self : Buffer; Low : Positive; High : Natural) return Buffer
+   is
+      Span : constant Natural := (if High < Low then 0 else High - Low + 1);
+   begin
+      return Result : Buffer do
+         if Span > 0 then
+            Ensure_Capacity (Result, Span);
+            Result.Data (1 .. Span) := Self.Data (Low .. High);
+            Result.Len := Span;
+         end if;
+      end return;
+   end Slice;
+
+   function To_Buffer (Data : Byte_Array) return Buffer is
+   begin
+      return Result : Buffer do
+         if Data'Length > 0 then
+            Ensure_Capacity (Result, Data'Length);
+            Result.Data (1 .. Data'Length) := Data;
+            Result.Len := Data'Length;
+         end if;
+      end return;
+   end To_Buffer;
+
+   function To_Buffer (S : String) return Buffer is
+   begin
+      return Result : Buffer do
+         if S'Length > 0 then
+            Ensure_Capacity (Result, S'Length);
+            declare
+               View : Byte_Array (1 .. S'Length)
+                 with Import, Address => S'Address;
+            begin
+               Result.Data (1 .. S'Length) := View;
+            end;
+            Result.Len := S'Length;
+         end if;
+      end return;
+   end To_Buffer;
+
+   procedure Clear (Self : in out Buffer) is
+   begin
+      Self.Len := 0;  --  keep capacity for reuse
+   end Clear;
+
+   procedure Reserve (Self : in out Buffer; Capacity : Natural) is
+   begin
+      Ensure_Capacity (Self, Capacity);
+   end Reserve;
+
+   procedure Append (Self : in out Buffer; Data : Byte_Array) is
+   begin
+      if Data'Length = 0 then
+         return;
+      end if;
+      Ensure_Capacity (Self, Self.Len + Data'Length);
+      Self.Data (Self.Len + 1 .. Self.Len + Data'Length) := Data;
+      Self.Len := Self.Len + Data'Length;
+   end Append;
+
+   procedure Append (Self : in out Buffer; Datum : Octet) is
+   begin
+      Ensure_Capacity (Self, Self.Len + 1);
+      Self.Data (Self.Len + 1) := Datum;
+      Self.Len := Self.Len + 1;
+   end Append;
+
+   procedure Set (Self : in out Buffer; Data : Byte_Array) is
+   begin
+      Self.Len := 0;
+      Append (Self, Data);
+   end Set;
+
+   procedure Query
+     (Self : Buffer; Process : not null access procedure (Data : Byte_Array))
+   is
+   begin
+      if Self.Len = 0 then
+         declare
+            Empty : Byte_Array (1 .. 0);
+         begin
+            Process (Empty);
+         end;
+      else
+         Process (Self.Data (1 .. Self.Len));
+      end if;
+   end Query;
 
    --  Extended returns so a large result is built in the caller's
    --  heap-backed secondary-stack return slot, not as a dynamically-sized
