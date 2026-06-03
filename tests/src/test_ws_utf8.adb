@@ -43,16 +43,6 @@ procedure Test_WS_UTF8 is
       return B;
    end From_Hex;
 
-   function To_Vector (B : AHT.Bytes.Byte_Array) return AHT.Bytes.Byte_Vector
-   is
-      V : AHT.Bytes.Byte_Vector;
-   begin
-      for X of B loop
-         V.Append (X);
-      end loop;
-      return V;
-   end To_Vector;
-
    --  Assert Is_Valid (both overloads) on the given hex vector.
    procedure Expect (Name : String; Hex : String; Want : Boolean) is
       B : constant AHT.Bytes.Byte_Array := From_Hex (Hex);
@@ -61,8 +51,8 @@ procedure Test_WS_UTF8 is
          Fail (Name & " (Byte_Array): expected "
                & (if Want then "valid" else "invalid"));
       end if;
-      if AHT.Websocket.UTF8.Is_Valid (To_Vector (B)) /= Want then
-         Fail (Name & " (Byte_Vector): expected "
+      if AHT.Websocket.UTF8.Is_Valid (AHT.Bytes.To_Buffer (B)) /= Want then
+         Fail (Name & " (Buffer): expected "
                & (if Want then "valid" else "invalid"));
       end if;
    end Expect;

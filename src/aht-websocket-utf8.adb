@@ -61,14 +61,16 @@ package body AHT.Websocket.UTF8 is
       return not S.Failed and then S.Pending = 0;
    end Is_Valid;
 
-   function Is_Valid (Data : AHT.Bytes.Byte_Vector) return Boolean is
-      S : Scan;
+   function Is_Valid (Data : AHT.Bytes.Buffer) return Boolean is
+      Result : Boolean := True;
+
+      procedure Scan_View (View : AHT.Bytes.Byte_Array) is
+      begin
+         Result := Is_Valid (View);
+      end Scan_View;
    begin
-      for B of Data loop
-         Step (S, B);
-         exit when S.Failed;
-      end loop;
-      return not S.Failed and then S.Pending = 0;
+      Data.Query (Scan_View'Access);
+      return Result;
    end Is_Valid;
 
 end AHT.Websocket.UTF8;

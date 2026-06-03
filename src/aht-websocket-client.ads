@@ -14,7 +14,7 @@ package AHT.Websocket.Client is
    type Client_Access is access all Client_Type;
 
    type Message_Type (Kind : Message_Kind := Binary_Message) is record
-      Payload : AHT.Bytes.Byte_Vector;
+      Payload : AHT.Bytes.Buffer;
    end record;
 
    type On_Message_Callback is access procedure (Msg : Message_Type);

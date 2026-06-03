@@ -42,7 +42,7 @@ package AHT.Websocket.Frames is
    procedure Decode
      (Input   : AHT.Bytes.Byte_Array;
       Hdr     : out Frame_Header;
-      Payload : out AHT.Bytes.Byte_Vector;
+      Payload : out AHT.Bytes.Buffer;
       Last    : out Natural);
    --  Parses one frame off `Input`. On success `Last` is the
    --  index of the last consumed byte; on "need more bytes" the
@@ -92,6 +92,6 @@ package AHT.Websocket.Frames is
    type Inbound_Close_Status is (Accept_Close, Reserved_Code, Bad_Reason);
 
    function Classify_Inbound_Close
-     (Payload : AHT.Bytes.Byte_Vector) return Inbound_Close_Status;
+     (Payload : AHT.Bytes.Buffer) return Inbound_Close_Status;
 
 end AHT.Websocket.Frames;

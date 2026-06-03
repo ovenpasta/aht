@@ -1,7 +1,6 @@
 with Ada.Command_Line;
 with Ada.Exceptions;
 with Ada.Text_IO; use Ada.Text_IO;
-with Interfaces;
 
 with AHT.Bytes;
 with AHT.HTTP;
@@ -9,8 +8,6 @@ with AHT.HTTP.IO;
 with AHT.Transport;
 
 procedure Test_HTTP_IO is
-
-   use type Interfaces.Unsigned_8;
 
    Failures : Natural := 0;
 
@@ -20,16 +17,15 @@ procedure Test_HTTP_IO is
       Failures := Failures + 1;
    end Fail;
 
-   --  Mock transport: feeds Read from a pre-loaded script (Natural
-   --  array so we can distinguish "nothing" from a zero byte), and
-   --  captures Write calls in a growing Byte_Vector. Read honours an
+   --  Mock transport: feeds Read from a pre-loaded script, and
+   --  captures Write calls in a growing Buffer. Read honours an
    --  optional Chunk_Size cap so tests can force Read_N to loop.
 
    type Transport is new AHT.Transport.Transport_Type with record
-      Script     : AHT.Bytes.Byte_Vector;
+      Script     : AHT.Bytes.Buffer;
       Cursor     : Positive := 1;
       Chunk_Size : Positive := Positive'Last;
-      Written    : AHT.Bytes.Byte_Vector;
+      Written    : AHT.Bytes.Buffer;
       Open       : Boolean  := True;
    end record;
 
@@ -50,9 +46,7 @@ procedure Test_HTTP_IO is
      (Self : in out Transport;
       Data : AHT.Bytes.Byte_Array) is
    begin
-      for B of Data loop
-         Self.Written.Append (B);
-      end loop;
+      Self.Written.Append (Data);
    end Write;
 
    overriding procedure Read
@@ -61,7 +55,7 @@ procedure Test_HTTP_IO is
       Last : out Natural)
    is
       Remaining : constant Natural :=
-        Natural (Self.Script.Length) - (Self.Cursor - 1);
+        Self.Script.Length - (Self.Cursor - 1);
       N         : Natural := Remaining;
    begin
       if Remaining = 0 then
@@ -88,39 +82,16 @@ procedure Test_HTTP_IO is
    --  Load a String into Script as raw bytes.
    procedure Load (T : in out Transport; S : String) is
    begin
-      T.Script.Clear;
+      T.Script.Set (S);
       T.Cursor := 1;
-      for C of S loop
-         T.Script.Append (Character'Pos (C));
-      end loop;
    end Load;
 
    --  Compare captured Written bytes to an expected String.
    function Written_Equals (T : Transport; S : String) return Boolean is
-   begin
-      if Natural (T.Written.Length) /= S'Length then return False; end if;
-      for I in S'Range loop
-         if T.Written (T.Written.First_Index + (I - S'First))
-            /= Character'Pos (S (I))
-         then
-            return False;
-         end if;
-      end loop;
-      return True;
-   end Written_Equals;
+     (AHT.Bytes.To_String (T.Written) = S);
 
-   function Vector_To_String (V : AHT.Bytes.Byte_Vector) return String is
-      S : String (1 .. Natural (V.Length));
-   begin
-      for I in S'Range loop
-         declare
-            B : constant AHT.Bytes.Octet := V.Element (V.First_Index + (I - 1));
-         begin
-            S (I) := Character'Val (Natural (B));
-         end;
-      end loop;
-      return S;
-   end Vector_To_String;
+   function Buf_To_String (V : AHT.Bytes.Buffer) return String is
+     (AHT.Bytes.To_String (V));
 
 begin
    --  Case 1: Write_All forwards bytes verbatim; empty is a no-op.
@@ -132,7 +103,7 @@ begin
          Fail ("write_all: captured bytes differ from input");
       end if;
       AHT.HTTP.IO.Write_All (T, AHT.Bytes.Byte_Array'(1 .. 0 => 0));
-      if Natural (T.Written.Length) /= 16 then
+      if T.Written.Length /= 16 then
          Fail ("write_all: empty slice should be a no-op");
       end if;
    end;
@@ -258,11 +229,11 @@ begin
             & "0" & ASCII.CR & ASCII.LF
             & ASCII.CR & ASCII.LF);
       declare
-         V : constant AHT.Bytes.Byte_Vector := AHT.HTTP.IO.Read_Chunked_Body (T);
+         V : constant AHT.Bytes.Buffer := AHT.HTTP.IO.Read_Chunked_Body (T);
       begin
-         if Vector_To_String (V) /= "Hello, Ada!" then
+         if Buf_To_String (V) /= "Hello, Ada!" then
             Fail ("chunked: assembled = """
-                  & Vector_To_String (V) & """");
+                  & Buf_To_String (V) & """");
          end if;
       end;
    end;
@@ -278,10 +249,10 @@ begin
             & "0" & ASCII.CR & ASCII.LF
             & ASCII.CR & ASCII.LF);
       declare
-         V : constant AHT.Bytes.Byte_Vector := AHT.HTTP.IO.Read_Chunked_Body (T);
+         V : constant AHT.Bytes.Buffer := AHT.HTTP.IO.Read_Chunked_Body (T);
       begin
-         if Vector_To_String (V) /= "0123456789" then
-            Fail ("chunk-ext: body = """ & Vector_To_String (V) & """");
+         if Buf_To_String (V) /= "0123456789" then
+            Fail ("chunk-ext: body = """ & Buf_To_String (V) & """");
          end if;
       end;
    end;
@@ -298,15 +269,15 @@ begin
             & "X-Other: two"   & ASCII.CR & ASCII.LF
             & ASCII.CR & ASCII.LF);
       declare
-         V : constant AHT.Bytes.Byte_Vector := AHT.HTTP.IO.Read_Chunked_Body (T);
+         V : constant AHT.Bytes.Buffer := AHT.HTTP.IO.Read_Chunked_Body (T);
       begin
-         if Vector_To_String (V) /= "abc" then
-            Fail ("trailer: body = """ & Vector_To_String (V) & """");
+         if Buf_To_String (V) /= "abc" then
+            Fail ("trailer: body = """ & Buf_To_String (V) & """");
          end if;
          --  Script must be fully consumed.
-         if T.Cursor - 1 /= Natural (T.Script.Length) then
+         if T.Cursor - 1 /= T.Script.Length then
             Fail ("trailer: cursor at" & T.Cursor'Image
-                  & " of" & Natural (T.Script.Length)'Image
+                  & " of" & T.Script.Length'Image
                   & " — trailer section not fully drained");
          end if;
       end;
@@ -319,7 +290,7 @@ begin
       Load (T, "xyz" & ASCII.CR & ASCII.LF);
       begin
          declare
-            V : constant AHT.Bytes.Byte_Vector := AHT.HTTP.IO.Read_Chunked_Body (T);
+            V : constant AHT.Bytes.Buffer := AHT.HTTP.IO.Read_Chunked_Body (T);
             pragma Unreferenced (V);
          begin
             Fail ("bad-hex: should have raised");
@@ -341,7 +312,7 @@ begin
             & "0" & ASCII.CR & ASCII.LF & ASCII.CR & ASCII.LF);
       begin
          declare
-            V : constant AHT.Bytes.Byte_Vector := AHT.HTTP.IO.Read_Chunked_Body (T);
+            V : constant AHT.Bytes.Buffer := AHT.HTTP.IO.Read_Chunked_Body (T);
             pragma Unreferenced (V);
          begin
             Fail ("bad-crlf: should have raised");

@@ -149,21 +149,6 @@ package body AHT.Websocket.Client is
       end loop;
    end Fill_Random;
 
-   --  Slice a Byte_Array out of a Byte_Vector's first N elements.
-   --  Used by the receiver to feed Frames.Decode without each
-   --  decode attempt allocating from scratch.
-   function Vector_To_Array
-     (V : AHT.Bytes.Byte_Vector; N : Natural)
-      return AHT.Bytes.Byte_Array
-   is
-      R : AHT.Bytes.Byte_Array (1 .. N);
-   begin
-      for I in 1 .. N loop
-         R (I) := V.Element (V.First_Index + I - 1);
-      end loop;
-      return R;
-   end Vector_To_Array;
-
    --  Build + send one masked frame on the active transport.
    --  Caller MUST hold the Send_Guard (Acquire / Release wrap this).
    --  The mask is drawn from the guard's PRNG; the encode happens
@@ -434,7 +419,7 @@ package body AHT.Websocket.Client is
       --  Continuation frames append; FIN=1 closes it.
       In_Reassembly   : Boolean        := False;
       Reassembly_Kind : Message_Kind   := Binary_Message;
-      Reassembly_Buf  : AHT.Bytes.Byte_Vector;
+      Reassembly_Buf  : AHT.Bytes.Buffer;
 
       Stop_Loop : Boolean := False;
 
@@ -542,7 +527,7 @@ package body AHT.Websocket.Client is
       end Send_Pong;
 
       procedure Deliver
-        (Kind : Message_Kind; Payload : AHT.Bytes.Byte_Vector)
+        (Kind : Message_Kind; Payload : AHT.Bytes.Buffer)
       is
       begin
          --  RFC 6455 §8.1: a text message (the complete, reassembled
@@ -573,9 +558,9 @@ package body AHT.Websocket.Client is
       end Deliver;
 
       procedure Handle_Close_Frame
-        (Payload : AHT.Bytes.Byte_Vector)
+        (Payload : AHT.Bytes.Buffer)
       is
-         Len    : constant Natural := Natural (Payload.Length);
+         Len    : constant Natural := Payload.Length;
          Info   : Close_Info;
          Reason : Unbounded_String;
       begin
@@ -619,14 +604,12 @@ package body AHT.Websocket.Client is
             begin
                Info := (Has_Code => True, Code => 256 * Hi + Lo);
             end;
-            for I in 3 .. Len loop
-               Append
-                 (Reason,
-                  Character'Val
-                    (Natural
-                       (Payload.Element
-                          (Payload.First_Index + I - 1))));
-            end loop;
+            --  Reason text is the bytes past the 2-byte code: one
+            --  block-copy slice (empty when Len = 2).
+            Append
+              (Reason,
+               Payload.To_String (Payload.First_Index + 2,
+                                  Payload.Last_Index));
          end if;
 
          Maybe_Send_Close_Echo;
@@ -637,11 +620,8 @@ package body AHT.Websocket.Client is
 
       procedure Handle_Frame
         (Hdr : AHT.Websocket.Frames.Frame_Header;
-         Payload : AHT.Bytes.Byte_Vector)
+         Payload : AHT.Bytes.Buffer)
       is
-         function To_Array
-           (V : AHT.Bytes.Byte_Vector) return AHT.Bytes.Byte_Array
-         is (Vector_To_Array (V, Natural (V.Length)));
       begin
          --  RFC 6455 §5.1: a client MUST NOT accept a masked
          --  frame from the server. The Frames codec is
@@ -681,10 +661,8 @@ package body AHT.Websocket.Client is
                     with "Receiver: Continuation frame without "
                       & "a preceding fragmented data frame";
                end if;
-               for I in 1 .. Natural (Payload.Length) loop
-                  Reassembly_Buf.Append
-                    (Payload.Element (Payload.First_Index + I - 1));
-               end loop;
+               --  Append the fragment's bytes in one block move.
+               Reassembly_Buf.Append (Payload);
                if Hdr.FIN then
                   Deliver (Reassembly_Kind, Reassembly_Buf);
                   In_Reassembly := False;
@@ -692,7 +670,7 @@ package body AHT.Websocket.Client is
                end if;
 
             when AHT.Websocket.Ping_Op =>
-               Send_Pong (To_Array (Payload));
+               Send_Pong (Payload.To_Array);
 
             when AHT.Websocket.Pong_Op =>
                --  Unsolicited Pong → drop (v1 doesn't track Pings).
@@ -718,7 +696,7 @@ package body AHT.Websocket.Client is
 
          declare
             Hdr  : AHT.Websocket.Frames.Frame_Header;
-            Payload : AHT.Bytes.Byte_Vector;
+            Payload : AHT.Bytes.Buffer;
             Last : Natural;
          begin
             if Live (Buf) = 0 then

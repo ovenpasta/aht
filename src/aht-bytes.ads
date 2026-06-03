@@ -24,7 +24,12 @@ package AHT.Bytes is
    --  (`B.Length`, `B.Append (X)`) the call sites use is available, not
    --  for inheritance.
    type Buffer is tagged private
-     with Default_Initial_Condition => Is_Empty (Buffer);
+     with Default_Initial_Condition => Is_Empty (Buffer),
+          Constant_Indexing         => Element;
+   --  Constant_Indexing lets call sites read a byte as `B (I)` (sugar
+   --  for `B.Element (I)`), matching the indexing the Byte_Vector this
+   --  type replaced offered. Read-only: there is no Variable_Indexing,
+   --  so `B (I) := X` is not provided — mutate through Append / Set.
 
    --  State / size (mirrors the Byte_Vector surface call sites use).
    function Length      (Self : Buffer) return Natural;
@@ -33,6 +38,12 @@ package AHT.Bytes is
    function Last_Index  (Self : Buffer) return Natural;     --  = Length
    function Element     (Self : Buffer; Index : Positive) return Octet
      with Pre => Index <= Length (Self);
+   --  The Pre states the caller obligation (and is what SPARK would
+   --  discharge). It is *also* enforced in the body: the release profile
+   --  drops -gnata so the contract is inert there, yet Data spans
+   --  capacity (>= Len), so an unchecked index would read a stale byte
+   --  rather than fail. The body raises Constraint_Error to keep the
+   --  guarantee in release builds too (debug fails the Pre first).
 
    --  Whole-buffer conversions — one block copy each.
    function To_Array  (Self : Buffer) return Byte_Array;
@@ -40,6 +51,8 @@ package AHT.Bytes is
 
    --  Slice extraction — one block copy of Self (Low .. High). Empty
    --  when High < Low (use High => Low - 1), matching Ada slice rules.
+   --  As with Element, the Pre is mirrored by a body check so a non-empty
+   --  span with High > Length still fails (Constraint_Error) in release.
    function To_Array
      (Self : Buffer; Low : Positive; High : Natural) return Byte_Array
      with Pre => Low <= Length (Self) + 1 and then High <= Length (Self);
@@ -59,6 +72,11 @@ package AHT.Bytes is
    procedure Reserve (Self : in out Buffer; Capacity : Natural);
    procedure Append  (Self : in out Buffer; Data  : Byte_Array);
    procedure Append  (Self : in out Buffer; Datum : Octet);
+   procedure Append  (Self : in out Buffer; Other : Buffer);
+   --  Block-move Other's live bytes onto the end of Self in one copy
+   --  into Self's (grown) storage; Other is unchanged. Avoids the
+   --  caller staging a temporary array or a per-byte Append loop to
+   --  concatenate two buffers (e.g. reassembling fragmented frames).
    procedure Set     (Self : in out Buffer; Data  : Byte_Array);
    procedure Set     (Self : in out Buffer; S     : String);
    --  Replace the contents in place — Len := 0 then one block move into

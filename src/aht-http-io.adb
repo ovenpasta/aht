@@ -211,15 +211,13 @@ package body AHT.HTTP.IO is
 
    function Read_Chunked_Body
      (T : in out AHT.Transport.Transport_Type'Class)
-      return AHT.Bytes.Byte_Vector
+      return AHT.Bytes.Buffer
    is
-      Result : AHT.Bytes.Byte_Vector;
+      Result : AHT.Bytes.Buffer;
 
       procedure Append_To_Result (Chunk : AHT.Bytes.Byte_Array) is
       begin
-         for B of Chunk loop
-            Result.Append (B);
-         end loop;
+         Result.Append (Chunk);
       end Append_To_Result;
    begin
       Read_Chunked_Body (T, Append_To_Result'Access);

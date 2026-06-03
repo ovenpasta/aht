@@ -1,6 +1,6 @@
 --  RFC 6455 frame codec — encode/decode round-trips plus the
 --  validation cases the Decode contract calls out. No sockets; the
---  codec works entirely over Byte_Array / Byte_Vector.
+--  codec works entirely over Byte_Array / Buffer.
 --
 --  Test vectors come from RFC 6455 §5.7 where applicable so
 --  byte-exact comparisons stay honest.
@@ -16,20 +16,13 @@ with AHT.Websocket.Frames;
 
 procedure Test_WS_Frames is
 
-   use type AHT.Bytes.Octet;
    use type AHT.Websocket.Opcode;
    use all type AHT.Websocket.Frames.Inbound_Close_Status;
 
    Failures : Natural := 0;
 
-   function To_Vec (A : AHT.Bytes.Byte_Array) return AHT.Bytes.Byte_Vector is
-   begin
-      return V : AHT.Bytes.Byte_Vector do
-         for B of A loop
-            V.Append (B);
-         end loop;
-      end return;
-   end To_Vec;
+   function To_Buf (A : AHT.Bytes.Byte_Array) return AHT.Bytes.Buffer is
+     (AHT.Bytes.To_Buffer (A));
 
    procedure Fail (Msg : String) is
    begin
@@ -37,15 +30,8 @@ procedure Test_WS_Frames is
       Failures := Failures + 1;
    end Fail;
 
-   function Vec_To_String (V : AHT.Bytes.Byte_Vector) return String is
-      S : String (1 .. Natural (V.Length));
-   begin
-      for I in S'Range loop
-         S (I) := Character'Val
-           (Natural (V.Element (V.First_Index + (I - 1))));
-      end loop;
-      return S;
-   end Vec_To_String;
+   function Buf_To_String (V : AHT.Bytes.Buffer) return String is
+     (AHT.Bytes.To_String (V));
 
    function Bytes_Equal
      (A : AHT.Bytes.Byte_Array; B : AHT.Bytes.Byte_Array)
@@ -83,7 +69,7 @@ begin
    --  Case 1: encode unmasked text "Hello" — RFC 6455 §5.7 first
    --  example. Expected wire: 81 05 48 65 6C 6C 6F.
    declare
-      Hdr : AHT.Websocket.Frames.Frame_Header :=
+      Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Text, Masked => False,
          others => <>);
       Payload : constant AHT.Bytes.Byte_Array :=
@@ -103,7 +89,7 @@ begin
    --  RFC 6455 §5.7 second example. Expected wire:
    --  81 85 37 FA 21 3D 7F 9F 4D 51 58.
    declare
-      Hdr : AHT.Websocket.Frames.Frame_Header :=
+      Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Text, Masked => True,
          Mask_Key => [16#37#, 16#FA#, 16#21#, 16#3D#],
          others => <>);
@@ -127,7 +113,7 @@ begin
       Wire : constant AHT.Bytes.Byte_Array :=
         [16#81#, 16#05#, 16#48#, 16#65#, 16#6C#, 16#6C#, 16#6F#];
       Hdr  : AHT.Websocket.Frames.Frame_Header;
-      Pay  : AHT.Bytes.Byte_Vector;
+      Pay  : AHT.Bytes.Buffer;
       Last : Natural;
    begin
       AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
@@ -139,9 +125,9 @@ begin
       then
          Fail ("decode-unmasked: header wrong");
       end if;
-      if Vec_To_String (Pay) /= "Hello" then
+      if Buf_To_String (Pay) /= "Hello" then
          Fail ("decode-unmasked: payload = """
-               & Vec_To_String (Pay) & """");
+               & Buf_To_String (Pay) & """");
       end if;
    end;
 
@@ -153,7 +139,7 @@ begin
          16#37#, 16#FA#, 16#21#, 16#3D#,
          16#7F#, 16#9F#, 16#4D#, 16#51#, 16#58#];
       Hdr  : AHT.Websocket.Frames.Frame_Header;
-      Pay  : AHT.Bytes.Byte_Vector;
+      Pay  : AHT.Bytes.Buffer;
       Last : Natural;
    begin
       AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
@@ -163,16 +149,16 @@ begin
       if not Hdr.Masked then
          Fail ("decode-masked: Masked false");
       end if;
-      if Vec_To_String (Pay) /= "Hello" then
+      if Buf_To_String (Pay) /= "Hello" then
          Fail ("decode-masked: payload = """
-               & Vec_To_String (Pay) & """");
+               & Buf_To_String (Pay) & """");
       end if;
    end;
 
    --  Case 5: round-trip a 200-byte binary masked frame —
    --  exercises the 2-byte extended-length path (126 .. 65535).
    declare
-      Hdr : AHT.Websocket.Frames.Frame_Header :=
+      Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Binary, Masked => True,
          Mask_Key => [16#AA#, 16#BB#, 16#CC#, 16#DD#],
          others => <>);
@@ -180,7 +166,7 @@ begin
       Wire : AHT.Bytes.Byte_Array (1 .. 200 + 8) := [others => 0];
       Wire_Len : Natural;
       Dec_Hdr : AHT.Websocket.Frames.Frame_Header;
-      Dec_Pay : AHT.Bytes.Byte_Vector;
+      Dec_Pay : AHT.Bytes.Buffer;
       Dec_Last : Natural;
    begin
       for I in Payload'Range loop
@@ -222,13 +208,13 @@ begin
    --  exercises the 8-byte extended-length path (> 65535).
    declare
       N : constant Natural := 70_000;
-      Hdr : AHT.Websocket.Frames.Frame_Header :=
+      Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Binary, Masked => True,
          Mask_Key => [16#01#, 16#02#, 16#03#, 16#04#],
          others => <>);
       Payload : AHT.Bytes.Byte_Array (1 .. N);
       Dec_Hdr : AHT.Websocket.Frames.Frame_Header;
-      Dec_Pay : AHT.Bytes.Byte_Vector;
+      Dec_Pay : AHT.Bytes.Buffer;
       Dec_Last : Natural;
    begin
       for I in Payload'Range loop
@@ -261,7 +247,7 @@ begin
 
    --  Case 7: encode a zero-payload ping.
    declare
-      Hdr : AHT.Websocket.Frames.Frame_Header :=
+      Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Ping_Op, Masked => True,
          Mask_Key => [16#11#, 16#22#, 16#33#, 16#44#],
          others => <>);
@@ -285,7 +271,7 @@ begin
         [16#01#, 16#03#, 16#48#, 16#65#, 16#6C#,   --  FIN=0 Text "Hel"
          16#80#, 16#02#, 16#6C#, 16#6F#];          --  FIN=1 Cont "lo"
       Hdr  : AHT.Websocket.Frames.Frame_Header;
-      Pay  : AHT.Bytes.Byte_Vector;
+      Pay  : AHT.Bytes.Buffer;
       Last : Natural;
    begin
       AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
@@ -295,8 +281,8 @@ begin
       if Hdr.FIN or else Hdr.Op /= AHT.Websocket.Text then
          Fail ("frag-1: header wrong");
       end if;
-      if Vec_To_String (Pay) /= "Hel" then
-         Fail ("frag-1: payload = """ & Vec_To_String (Pay) & """");
+      if Buf_To_String (Pay) /= "Hel" then
+         Fail ("frag-1: payload = """ & Buf_To_String (Pay) & """");
       end if;
 
       AHT.Websocket.Frames.Decode (Wire (6 .. Wire'Last), Hdr, Pay, Last);
@@ -306,8 +292,8 @@ begin
       if not Hdr.FIN or else Hdr.Op /= AHT.Websocket.Continuation then
          Fail ("frag-2: header wrong");
       end if;
-      if Vec_To_String (Pay) /= "lo" then
-         Fail ("frag-2: payload = """ & Vec_To_String (Pay) & """");
+      if Buf_To_String (Pay) /= "lo" then
+         Fail ("frag-2: payload = """ & Buf_To_String (Pay) & """");
       end if;
    end;
 
@@ -326,7 +312,7 @@ begin
       Short_Pay : constant AHT.Bytes.Byte_Array :=
         [16#81#, 16#05#, 16#48#, 16#65#];
       Hdr  : AHT.Websocket.Frames.Frame_Header;
-      Pay  : AHT.Bytes.Byte_Vector;
+      Pay  : AHT.Bytes.Buffer;
       Last : Natural;
    begin
       AHT.Websocket.Frames.Decode (Just_One, Hdr, Pay, Last);
@@ -355,7 +341,7 @@ begin
    declare
       Wire : constant AHT.Bytes.Byte_Array := [16#83#, 16#00#];
       Hdr  : AHT.Websocket.Frames.Frame_Header;
-      Pay  : AHT.Bytes.Byte_Vector;
+      Pay  : AHT.Bytes.Buffer;
       Last : Natural;
    begin
       AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
@@ -371,7 +357,7 @@ begin
    declare
       Wire : constant AHT.Bytes.Byte_Array := [16#08#, 16#00#];
       Hdr  : AHT.Websocket.Frames.Frame_Header;
-      Pay  : AHT.Bytes.Byte_Vector;
+      Pay  : AHT.Bytes.Buffer;
       Last : Natural;
    begin
       AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
@@ -390,7 +376,7 @@ begin
       Wire : constant AHT.Bytes.Byte_Array :=
         [16#89#, 16#7E#, 16#00#, 16#7E#];  -- ping ext-len=126
       Hdr  : AHT.Websocket.Frames.Frame_Header;
-      Pay  : AHT.Bytes.Byte_Vector;
+      Pay  : AHT.Bytes.Buffer;
       Last : Natural;
    begin
       AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
@@ -408,7 +394,7 @@ begin
       Wire : constant AHT.Bytes.Byte_Array :=
         [16#82#, 16#7E#, 16#00#, 16#64#];  -- ext-len 0x0064 = 100
       Hdr  : AHT.Websocket.Frames.Frame_Header;
-      Pay  : AHT.Bytes.Byte_Vector;
+      Pay  : AHT.Bytes.Buffer;
       Last : Natural;
    begin
       AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
@@ -425,7 +411,7 @@ begin
       Wire : constant AHT.Bytes.Byte_Array := [16#C1#, 16#00#];
       --  C1 = FIN|RSV1|Text, length 0
       Hdr  : AHT.Websocket.Frames.Frame_Header;
-      Pay  : AHT.Bytes.Byte_Vector;
+      Pay  : AHT.Bytes.Buffer;
       Last : Natural;
    begin
       AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
@@ -440,7 +426,7 @@ begin
    --  Case 15: outbound (Encode) control-frame validation —
    --  Encode with FIN=False on a Close opcode raises.
    declare
-      Hdr : AHT.Websocket.Frames.Frame_Header :=
+      Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => False, Op => AHT.Websocket.Close_Op,
          Masked => True,
          Mask_Key => [16#00#, 16#00#, 16#00#, 16#00#],
@@ -463,7 +449,7 @@ begin
    --  Case 16: Encode a Close with no payload and a Close with a
    --  valid 2-byte code+reason both succeed.
    declare
-      Hdr : AHT.Websocket.Frames.Frame_Header :=
+      Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Close_Op,
          Masked => True,
          Mask_Key => [16#01#, 16#02#, 16#03#, 16#04#],
@@ -496,7 +482,7 @@ begin
    --  Case 17: Encode Close with a 1-byte payload → Protocol_Error
    --  (RFC §5.5.1 — must be 0 or >= 2 bytes).
    declare
-      Hdr : AHT.Websocket.Frames.Frame_Header :=
+      Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Close_Op,
          Masked => True,
          Mask_Key => [16#00#, 16#00#, 16#00#, 16#00#],
@@ -519,7 +505,7 @@ begin
    --  Case 18: Encode Close with synthetic code 1005 →
    --  Protocol_Error (must never appear on the wire).
    declare
-      Hdr : AHT.Websocket.Frames.Frame_Header :=
+      Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Close_Op,
          Masked => True,
          Mask_Key => [16#00#, 16#00#, 16#00#, 16#00#],
@@ -543,7 +529,7 @@ begin
    --  Case 19: Encode Close with out-of-range code 999 →
    --  Protocol_Error.
    declare
-      Hdr : AHT.Websocket.Frames.Frame_Header :=
+      Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Close_Op,
          Masked => True,
          Mask_Key => [16#00#, 16#00#, 16#00#, 16#00#],
@@ -571,7 +557,7 @@ begin
       Wire : constant AHT.Bytes.Byte_Array :=
         [16#88#, 16#02#, 16#03#, 16#E8#];  -- FIN|Close, len 2, 1000
       Hdr  : AHT.Websocket.Frames.Frame_Header;
-      Pay  : AHT.Bytes.Byte_Vector;
+      Pay  : AHT.Bytes.Buffer;
       Last : Natural;
    begin
       AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
@@ -589,7 +575,7 @@ begin
       Wire : constant AHT.Bytes.Byte_Array :=
         [16#88#, 16#01#, 16#03#];  -- FIN|Close, len 1
       Hdr  : AHT.Websocket.Frames.Frame_Header;
-      Pay  : AHT.Bytes.Byte_Vector;
+      Pay  : AHT.Bytes.Buffer;
       Last : Natural;
    begin
       AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
@@ -607,7 +593,7 @@ begin
       Wire : constant AHT.Bytes.Byte_Array :=
         [16#88#, 16#02#, 16#03#, 16#E7#];  -- 999
       Hdr  : AHT.Websocket.Frames.Frame_Header;
-      Pay  : AHT.Bytes.Byte_Vector;
+      Pay  : AHT.Bytes.Buffer;
       Last : Natural;
    begin
       AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
@@ -629,16 +615,16 @@ begin
       Wire : constant AHT.Bytes.Byte_Array :=
         [16#88#, 16#02#, 16#03#, 16#EE#];  -- 1006
       Hdr  : AHT.Websocket.Frames.Frame_Header;
-      Pay  : AHT.Bytes.Byte_Vector;
+      Pay  : AHT.Bytes.Buffer;
       Last : Natural;
    begin
       AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
       if Last /= 4 then
          Fail ("decode-close-1006: Last =" & Last'Image);
       end if;
-      if Natural (Pay.Length) /= 2 then
+      if Pay.Length /= 2 then
          Fail ("decode-close-1006: payload length ="
-               & Natural'Image (Natural (Pay.Length)));
+               & Pay.Length'Image);
       end if;
    end;
 
@@ -646,7 +632,7 @@ begin
    --  1004 has no defined meaning and MUST NOT be sent (RFC §7.4.1), so
    --  Valid_Close_Code excludes it just like the synthetic 1005/1006/1015.
    declare
-      Hdr : AHT.Websocket.Frames.Frame_Header :=
+      Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Close_Op,
          Masked => True,
          Mask_Key => [16#00#, 16#00#, 16#00#, 16#00#],
@@ -670,7 +656,7 @@ begin
    --  Case 25: Classify_Inbound_Close on an empty payload → Accept_Close.
    --  A bodiless Close is the normal "no status" signal (RFC §5.5.1).
    declare
-      Empty : constant AHT.Bytes.Byte_Vector := To_Vec ([]);
+      Empty : constant AHT.Bytes.Buffer := To_Buf ([]);
    begin
       if AHT.Websocket.Frames.Classify_Inbound_Close (Empty)
         /= Accept_Close
@@ -681,8 +667,8 @@ begin
 
    --  Case 26: code 1000 + ASCII reason "bye" → Accept_Close.
    declare
-      Pay : constant AHT.Bytes.Byte_Vector :=
-        To_Vec ([16#03#, 16#E8#,  -- 1000
+      Pay : constant AHT.Bytes.Buffer :=
+        To_Buf ([16#03#, 16#E8#,  -- 1000
                  Character'Pos ('b'), Character'Pos ('y'),
                  Character'Pos ('e')]);
    begin
@@ -705,8 +691,8 @@ begin
    begin
       for P of Reserved loop
          declare
-            Pay : constant AHT.Bytes.Byte_Vector :=
-              To_Vec ([P (1), P (2)]);
+            Pay : constant AHT.Bytes.Buffer :=
+              To_Buf ([P (1), P (2)]);
          begin
             if AHT.Websocket.Frames.Classify_Inbound_Close (Pay)
               /= Reserved_Code
@@ -721,8 +707,8 @@ begin
    --  Case 28: acceptable code 1000 + ill-formed UTF-8 reason (a lone
    --  continuation byte 0x80) → Bad_Reason (RFC §8.1).
    declare
-      Pay : constant AHT.Bytes.Byte_Vector :=
-        To_Vec ([16#03#, 16#E8#, 16#80#]);  -- 1000 + 0x80
+      Pay : constant AHT.Bytes.Buffer :=
+        To_Buf ([16#03#, 16#E8#, 16#80#]);  -- 1000 + 0x80
    begin
       if AHT.Websocket.Frames.Classify_Inbound_Close (Pay)
         /= Bad_Reason
@@ -735,8 +721,8 @@ begin
    --  Accept_Close. Positive control that the reason check is not
    --  over-eager on legitimate non-ASCII text.
    declare
-      Pay : constant AHT.Bytes.Byte_Vector :=
-        To_Vec ([16#03#, 16#E8#, 16#C3#, 16#A9#]);  -- 1000 + U+00E9
+      Pay : constant AHT.Bytes.Buffer :=
+        To_Buf ([16#03#, 16#E8#, 16#C3#, 16#A9#]);  -- 1000 + U+00E9
    begin
       if AHT.Websocket.Frames.Classify_Inbound_Close (Pay)
         /= Accept_Close

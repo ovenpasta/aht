@@ -44,15 +44,8 @@ procedure Test_WS_Ping is
       Failures := Failures + 1;
    end Fail;
 
-   function To_String (V : AHT.Bytes.Byte_Vector) return String is
-      S : String (1 .. Natural (V.Length));
-   begin
-      for I in S'Range loop
-         S (I) := Character'Val
-           (Natural (V.Element (V.First_Index + I - 1)));
-      end loop;
-      return S;
-   end To_String;
+   function To_String (V : AHT.Bytes.Buffer) return String is
+     (AHT.Bytes.To_String (V));
 
    Ping_Payload : constant AHT.Bytes.Byte_Array :=
      AHT.Bytes.From_String ("aht-ping-payload");

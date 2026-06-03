@@ -78,8 +78,35 @@ package body AHT.Bytes is
    function First_Index (Self : Buffer) return Positive is (1);
    function Last_Index  (Self : Buffer) return Natural  is (Self.Len);
 
+   --  Mirrors the Pre at runtime: the release profile drops -gnata so the
+   --  contract is inert there, and Data is sized to capacity (>= Len), so
+   --  an unchecked Index in Len + 1 .. capacity would read a stale byte
+   --  instead of failing. Raising Constraint_Error keeps the bound live
+   --  in release and matches what Byte_Vector.Element gave.
    function Element (Self : Buffer; Index : Positive) return Octet is
-     (Self.Data (Index));
+   begin
+      if Index > Self.Len then
+         raise Constraint_Error
+           with "AHT.Bytes.Buffer.Element: index" & Index'Image
+              & " past length" & Self.Len'Image;
+      end if;
+      return Self.Data (Index);
+   end Element;
+
+   --  Release-mode mirror of the Low .. High readers' Pre. Same reason as
+   --  Element: the contracts are inert without -gnata and Data spans
+   --  capacity, so a High in Len + 1 .. capacity would silently read
+   --  stale bytes. Check only on the actual-read path (High >= Low, i.e.
+   --  a non-empty span) so the documented empty-slice forms (High < Low,
+   --  incl. the Low = Len + 1 boundary) keep returning empty.
+   procedure Validate_Span (Self : Buffer; Low : Positive; High : Natural) is
+   begin
+      if High >= Low and then High > Self.Len then
+         raise Constraint_Error
+           with "AHT.Bytes.Buffer: slice" & Low'Image & " .." & High'Image
+              & " out of range (length" & Self.Len'Image & ")";
+      end if;
+   end Validate_Span;
 
    function To_Array (Self : Buffer) return Byte_Array is
    begin
@@ -112,6 +139,7 @@ package body AHT.Bytes is
    is
       Span : constant Natural := (if High < Low then 0 else High - Low + 1);
    begin
+      Validate_Span (Self, Low, High);
       return Result : Byte_Array (1 .. Span) do
          if Span > 0 then
             Result := Self.Data (Low .. High);
@@ -124,6 +152,7 @@ package body AHT.Bytes is
    is
       Span : constant Natural := (if High < Low then 0 else High - Low + 1);
    begin
+      Validate_Span (Self, Low, High);
       return Result : String (1 .. Span) do
          if Span > 0 then
             declare
@@ -141,6 +170,7 @@ package body AHT.Bytes is
    is
       Span : constant Natural := (if High < Low then 0 else High - Low + 1);
    begin
+      Validate_Span (Self, Low, High);
       return Result : Buffer do
          if Span > 0 then
             Ensure_Capacity (Result, Span);
@@ -202,6 +232,20 @@ package body AHT.Bytes is
       Ensure_Capacity (Self, Self.Len + 1);
       Self.Data (Self.Len + 1) := Datum;
       Self.Len := Self.Len + 1;
+   end Append;
+
+   procedure Append (Self : in out Buffer; Other : Buffer) is
+      N : constant Natural := Other.Len;
+   begin
+      if N > 0 then
+         --  Grow first, then one block move. Sound even for Self.Append
+         --  (Self): Ensure_Capacity reallocs before the copy, and the
+         --  source (1 .. N) and destination (Len + 1 .. Len + N) ranges
+         --  never overlap.
+         Ensure_Capacity (Self, Self.Len + N);
+         Self.Data (Self.Len + 1 .. Self.Len + N) := Other.Data (1 .. N);
+         Self.Len := Self.Len + N;
+      end if;
    end Append;
 
    procedure Set (Self : in out Buffer; Data : Byte_Array) is

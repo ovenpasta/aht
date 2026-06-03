@@ -20,7 +20,7 @@ package AHT.Websocket.UTF8 is
    --    * no UTF-16 surrogate halves (U+D800 .. U+DFFF),
    --    * nothing above U+10FFFF.
 
-   function Is_Valid (Data : AHT.Bytes.Byte_Array)  return Boolean;
-   function Is_Valid (Data : AHT.Bytes.Byte_Vector) return Boolean;
+   function Is_Valid (Data : AHT.Bytes.Byte_Array) return Boolean;
+   function Is_Valid (Data : AHT.Bytes.Buffer)     return Boolean;
 
 end AHT.Websocket.UTF8;

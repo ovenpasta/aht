@@ -1,3 +1,4 @@
+with Ada.Assertions;
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
 
@@ -103,6 +104,97 @@ begin
       --  Empty bulk append is a no-op.
       Append (B, From_String (""));
       Check (To_String (B) = "foobar!", "empty append is no-op");
+   end;
+
+   --  Append (Buffer): block-move one buffer onto another, leaving the
+   --  source unchanged; empty source is a no-op.
+   declare
+      Dst : Buffer := To_Buffer ("foo");
+      Src : constant Buffer := To_Buffer ("bar");
+      Mt  : constant Buffer := To_Buffer ("");
+   begin
+      Append (Dst, Src);
+      Check (To_String (Dst) = "foobar", "Append(Buffer) concatenates");
+      Check (To_String (Src) = "bar",    "Append(Buffer) source unchanged");
+      Append (Dst, Mt);
+      Check (To_String (Dst) = "foobar", "Append(empty Buffer) is no-op");
+   end;
+
+   --  Append (Buffer) onto itself: the grow-then-block-move must stay
+   --  sound when source and destination are the same object (the source
+   --  range is captured before Ensure_Capacity reallocates).
+   declare
+      B : Buffer := To_Buffer ("abcde");
+   begin
+      Append (B, B);
+      Check (To_String (B) = "abcdeabcde", "self-Append(Buffer) doubles");
+   end;
+
+   --  Constant_Indexing: B (I) is read-only sugar for Element (B, I).
+   declare
+      B : constant Buffer := To_Buffer ("xyz");
+   begin
+      Check (B (1) = Character'Pos ('x'), "index B (1)");
+      Check (B (3) = Character'Pos ('z'), "index B (Last)");
+      Check (B (2) = Element (B, 2),      "index matches Element");
+   end;
+
+   --  Bounds: a read past the logical length must fail, not read a stale
+   --  capacity byte. The Pre fires in debug (Assertion_Error); the body
+   --  check fires in release (Constraint_Error, where -gnata is off and
+   --  the Pre is compiled out) — accept either. Reserve grows capacity
+   --  beyond Len so slots Len+1 .. capacity physically exist, proving the
+   --  guard checks length, not just the backing array's bounds.
+   declare
+      B : Buffer;
+   begin
+      Append (B, From_String ("ab"));   --  Len = 2
+      Reserve (B, 64);                  --  slots 3 .. 64 now exist
+      begin
+         declare
+            X : constant Octet := Element (B, 3);
+         begin
+            Check (False, "Element (B, 3) on Len=2 must raise, got" & X'Image);
+         end;
+      exception
+         when Constraint_Error | Ada.Assertions.Assertion_Error => null;
+         when others =>
+            Check (False, "Element past length: wrong exception");
+      end;
+      begin
+         declare
+            X : constant Octet := B (10);   --  indexing sugar
+         begin
+            Check (False, "B (10) on Len=2 must raise, got" & X'Image);
+         end;
+      exception
+         when Constraint_Error | Ada.Assertions.Assertion_Error => null;
+         when others =>
+            Check (False, "B (I) past length: wrong exception");
+      end;
+   end;
+
+   --  Slice bounds: a NON-EMPTY span past Length must fail (Pre in debug,
+   --  body check in release); an EMPTY span (High < Low) past Length reads
+   --  nothing, so it stays a harmless no-op returning empty (documented
+   --  behavior preserved).
+   declare
+      B : constant Buffer := To_Buffer ("abc");  --  Len = 3
+   begin
+      begin
+         declare
+            S : constant String := To_String (B, 1, 4);  --  High > Len
+         begin
+            Check (False,
+                   "To_String (B,1,4) on Len=3 must raise, got """ & S & """");
+         end;
+      exception
+         when Constraint_Error | Ada.Assertions.Assertion_Error => null;
+         when others =>
+            Check (False, "slice past length: wrong exception");
+      end;
+      Check (To_Array (B, Length (B) + 1, Length (B))'Length = 0,
+             "boundary empty span (Low = Length + 1) is a no-op");
    end;
 
    --  Set replaces wholesale.

@@ -1,4 +1,3 @@
-with Ada.Containers;
 with Interfaces; use Interfaces;
 
 with AHT.Websocket.UTF8;
@@ -68,9 +67,9 @@ package body AHT.Websocket.Frames is
    end Validate_Close_Encode;
 
    procedure Validate_Close_Decode
-     (Payload : AHT.Bytes.Byte_Vector)
+     (Payload : AHT.Bytes.Buffer)
    is
-      Len  : constant Natural := Natural (Payload.Length);
+      Len  : constant Natural := Payload.Length;
       Code : Natural;
    begin
       if Len = 0 then
@@ -95,9 +94,9 @@ package body AHT.Websocket.Frames is
    end Validate_Close_Decode;
 
    function Classify_Inbound_Close
-     (Payload : AHT.Bytes.Byte_Vector) return Inbound_Close_Status
+     (Payload : AHT.Bytes.Buffer) return Inbound_Close_Status
    is
-      Len  : constant Natural := Natural (Payload.Length);
+      Len  : constant Natural := Payload.Length;
       Code : Natural;
    begin
       if Len = 0 then
@@ -117,18 +116,15 @@ package body AHT.Websocket.Frames is
       end if;
 
       --  Bytes after the 2-byte code are the reason text, which MUST
-      --  be valid UTF-8 (RFC 6455 §8.1).
+      --  be valid UTF-8 (RFC 6455 §8.1). One block-copy slice of the
+      --  reason, validated through the Byte_Array scanner.
       if Len > 2 then
-         declare
-            Reason : AHT.Bytes.Byte_Vector;
-         begin
-            for I in Payload.First_Index + 2 .. Payload.Last_Index loop
-               Reason.Append (Payload.Element (I));
-            end loop;
-            if not AHT.Websocket.UTF8.Is_Valid (Reason) then
-               return Bad_Reason;
-            end if;
-         end;
+         if not AHT.Websocket.UTF8.Is_Valid
+                  (Payload.To_Array (Payload.First_Index + 2,
+                                     Payload.Last_Index))
+         then
+            return Bad_Reason;
+         end if;
       end if;
 
       return Accept_Close;
@@ -246,7 +242,7 @@ package body AHT.Websocket.Frames is
    procedure Decode
      (Input   : AHT.Bytes.Byte_Array;
       Hdr     : out Frame_Header;
-      Payload : out AHT.Bytes.Byte_Vector;
+      Payload : out AHT.Bytes.Buffer;
       Last    : out Natural)
    is
       Idx       : Positive;
@@ -377,17 +373,21 @@ package body AHT.Websocket.Frames is
       end if;
 
       Hdr.Payload_Length := Len;
-      Payload.Reserve_Capacity (Ada.Containers.Count_Type (Len));
       if Hdr.Masked then
+         --  Masking is a per-byte XOR (RFC §5.3), so there is no block
+         --  move to be had here; reserve once, then unmask into place.
+         --  Inbound server frames are never masked, so this path is
+         --  only the round-trip/test direction.
+         Payload.Reserve (Len);
          for I in 0 .. Len - 1 loop
             Payload.Append
               (Input (Idx + I)
                  xor Hdr.Mask_Key (Hdr.Mask_Key'First + (I mod 4)));
          end loop;
       else
-         for I in 0 .. Len - 1 loop
-            Payload.Append (Input (Idx + I));
-         end loop;
+         --  Unmasked (the inbound hot path): one block move of the
+         --  payload slice straight into the buffer.
+         Payload.Set (Input (Idx .. Idx + Len - 1));
       end if;
 
       --  Close-payload structural + code-range validation. Done

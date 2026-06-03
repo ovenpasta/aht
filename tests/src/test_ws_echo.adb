@@ -44,15 +44,8 @@ procedure Test_WS_Echo is
       Failures := Failures + 1;
    end Fail;
 
-   function To_String (V : AHT.Bytes.Byte_Vector) return String is
-      S : String (1 .. Natural (V.Length));
-   begin
-      for I in S'Range loop
-         S (I) := Character'Val
-           (Natural (V.Element (V.First_Index + I - 1)));
-      end loop;
-      return S;
-   end To_String;
+   function To_String (V : AHT.Bytes.Buffer) return String is
+     (AHT.Bytes.To_String (V));
 
 begin
    --  Case 1: text round-trip + clean Close.
@@ -121,9 +114,9 @@ begin
          Fail ("bin: Kind = " & Msg.Kind'Image
                & " (expected Binary_Message)");
       end if;
-      if Natural (Msg.Payload.Length) /= Data'Length then
+      if Msg.Payload.Length /= Data'Length then
          Fail ("bin: payload length ="
-               & Natural'Image (Natural (Msg.Payload.Length)));
+               & Msg.Payload.Length'Image);
       else
          for I in Data'Range loop
             if Msg.Payload.Element (I) /= Data (I) then
@@ -360,9 +353,9 @@ begin
          if Msg.Kind /= AHT.Websocket.Binary_Message then
             Fail ("large: Kind = " & Msg.Kind'Image
                   & " (expected Binary_Message)");
-         elsif Natural (Msg.Payload.Length) /= Size then
+         elsif Msg.Payload.Length /= Size then
             Fail ("large: payload length ="
-                  & Natural'Image (Natural (Msg.Payload.Length))
+                  & Msg.Payload.Length'Image
                   & " (expected" & Integer'Image (Size) & ")");
          else
             for I in Data'Range loop
@@ -419,9 +412,9 @@ begin
          if Msg.Kind /= AHT.Websocket.Text_Message then
             Fail ("large-send: Kind = " & Msg.Kind'Image
                   & " (expected Text_Message)");
-         elsif Natural (Msg.Payload.Length) /= Size then
+         elsif Msg.Payload.Length /= Size then
             Fail ("large-send: payload length ="
-                  & Natural'Image (Natural (Msg.Payload.Length))
+                  & Msg.Payload.Length'Image
                   & " (expected" & Integer'Image (Size) & ")");
          else
             for I in Src'Range loop

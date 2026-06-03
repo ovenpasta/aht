@@ -324,8 +324,8 @@ begin
    --  Case 1: RFC 4648 §10 base64 test vectors. Catches off-by-one
    --  in padding / index math before any networking is involved.
    declare
-      Vectors : constant array (Positive range <>) of
-        access constant String :=
+      type Const_String_Ref is access constant String;
+      Vectors : constant array (Positive range <>) of Const_String_Ref :=
           [new String'(""),       new String'(""),
            new String'("f"),      new String'("Zg=="),
            new String'("fo"),     new String'("Zm8="),
@@ -700,7 +700,7 @@ begin
             AHT.Websocket.Client.Receive (C, Msg, Timeout => 1.0);
             Fail ("server-mask: Receive returned without "
                   & "raising (delivered """
-                  & Integer'Image (Natural (Msg.Payload.Length))
+                  & Msg.Payload.Length'Image
                   & " bytes)");
          exception
             when AHT.Websocket.Closed_Error => null;

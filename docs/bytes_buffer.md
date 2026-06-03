@@ -4,7 +4,8 @@ Replacing `AHT.Bytes.Byte_Vector` with a purpose-built, array-backed
 byte buffer that supports **bulk (block-move) operations**. Tracks the
 design and the slice-by-slice migration.
 
-Last updated: 2026-06-03 (Slice B landed: HTTP bodies on `Buffer`).
+Last updated: 2026-06-03 (Slice C landed: `http-io` + WebSocket on
+`Buffer`; `Append (Buffer)` and `Constant_Indexing` added to the API).
 
 ## Why
 
@@ -40,7 +41,9 @@ elements), so conversions can be single block copies.
 ## Public API (in `AHT.Bytes`)
 
 ```ada
-type Buffer is private with Default_Initial_Condition => Is_Empty (Buffer);
+type Buffer is tagged private
+  with Default_Initial_Condition => Is_Empty (Buffer),
+       Constant_Indexing         => Element;  -- B (I) reads Element (B, I)
 
 --  State / size (mirrors the Byte_Vector surface the codebase + tests use)
 function Length      (Self : Buffer) return Natural;
@@ -48,14 +51,15 @@ function Is_Empty    (Self : Buffer) return Boolean;
 function First_Index (Self : Buffer) return Positive;   -- always 1
 function Last_Index  (Self : Buffer) return Natural;    -- = Length
 function Element     (Self : Buffer; Index : Positive) return Octet
-  with Pre => Index <= Length (Self);
+  with Pre => Index <= Length (Self);   -- mirrored by a body check (below)
 
 --  Whole-buffer conversions — one block copy each.
 function To_Array  (Self : Buffer) return Byte_Array;
 function To_String (Self : Buffer) return String;
 
 --  Slice extraction — one block copy of Self (Low .. High). Empty when
---  High < Low (use High => Low - 1), matching Ada slice conventions.
+--  High < Low (use High => Low - 1), matching Ada slice conventions. A
+--  non-empty span with High > Length fails (Pre / body check).
 function To_Array  (Self : Buffer; Low : Positive; High : Natural) return Byte_Array
   with Pre => Low <= Length (Self) + 1 and then High <= Length (Self);
 function To_String (Self : Buffer; Low : Positive; High : Natural) return String
@@ -72,6 +76,7 @@ procedure Clear   (Self : in out Buffer);
 procedure Reserve (Self : in out Buffer; Capacity : Natural);
 procedure Append  (Self : in out Buffer; Data  : Byte_Array);  -- bulk slice move
 procedure Append  (Self : in out Buffer; Datum : Octet);       -- single, compat
+procedure Append  (Self : in out Buffer; Other : Buffer);      -- buffer concat
 procedure Set     (Self : in out Buffer; Data  : Byte_Array);  -- replace
 procedure Set     (Self : in out Buffer; S     : String);      -- replace, in place
 
@@ -91,6 +96,42 @@ API notes:
   exist so the existing prefixed-call sites (incl. ~96 in tests) need
   minimal changes. `Length` returns `Natural` (was `Count_Type`); the
   two `Reserve_Capacity (Count_Type ...)` sites become `Reserve (...)`.
+- `Append (Buffer)` and `Constant_Indexing => Element` were **added in
+  Slice C**, when the migration surfaced two genuine gaps rather than
+  contorting call sites around them (per the "examples reveal API gaps —
+  fix the library" rule):
+  - **`Append (Buffer)`** concatenates one buffer onto another in a
+    single block move. Without it, reassembling fragmented WebSocket
+    frames (`Reassembly_Buf.Append (Payload)`) needed a `Query` closure
+    to reach the inner array, or a temporary `To_Array` round-trip. It
+    is self-append-safe: `Ensure_Capacity` reallocates *before* the copy
+    and the source/destination ranges never overlap.
+  - **`Constant_Indexing => Element`** restores the `B (I)` read sugar
+    `Byte_Vector` offered (e.g. the `test_http_io` mock transport indexes
+    its script buffer). Read-only by design: there is no
+    `Variable_Indexing`, so `B (I) := X` stays unsupported — no call site
+    needs it, and mutation goes through `Append`/`Set`.
+- **Bounds are guarded by `Pre` *and* a body check** (`Element` and the
+  `Low .. High` readers). The `Pre` states the caller obligation — useful
+  as documentation, enforced at the call boundary in debug, and what a
+  future SPARK adoption would discharge. But the `release` profile in
+  `aht.gpr` compiles without `-gnata`, so the `Pre` is **compiled out**
+  there; and because `Data` is sized to *capacity* (≥ `Len`) and capacity
+  survives `Clear`/reuse, an unchecked index in `Len + 1 .. capacity`
+  would silently read a **stale byte** rather than fail — a data-
+  disclosure regression versus `Byte_Vector.Element`, which always
+  checked. So the bodies *mirror* the `Pre` with an explicit runtime
+  check that raises `Constraint_Error`, keeping the guarantee live in
+  release. Cost: the exception differs by build mode (`Assertion_Error`
+  from the `Pre` in debug, `Constraint_Error` from the body in release) —
+  cosmetic, as neither is meant to be caught in normal flow. The slice
+  readers check only the actual-read path (a non-empty span), so the
+  documented empty-slice forms (`High < Low`, incl. the `Low = Length + 1`
+  boundary) still return empty. Verified by building `test_bytes_buffer`
+  under `BUILD_MODE=release` (no `-gnata`) and confirming the out-of-range
+  cases still raise. (The release-mode gap was found by Codex adversarial
+  review of Slice C; keeping the `Pre` alongside the check was a
+  follow-up call to preserve SPARK-readiness.)
 
 ## Semantics — the critical part
 
@@ -164,21 +205,30 @@ the same commit as the code.
       each collapse to a single bulk `Append (Chunk)`. The eight
       `test_http_*` `Body_To_String` helpers collapse to `To_String (V)`.
       Full suite green (28).
-- [ ] **C. `http-io` + WebSocket → `Buffer`.** `Read_Chunked_Body`
-      return; `Websocket.Frames` / `Websocket.Client` / `Websocket.UTF8`
-      payloads. Replace the frames close-reason byte-loop with a slice.
-      Sweep WS tests; run the **full WS suite** to guard the close-race
-      fix.
+- [x] **C. `http-io` + WebSocket → `Buffer`.** `Read_Chunked_Body`
+      returns `Buffer` (sink does bulk `Result.Append (Chunk)`);
+      `Websocket.Frames` `Decode`/`Validate_Close_Decode`/
+      `Classify_Inbound_Close`, `Websocket.Client` (`Message_Type.Payload`,
+      reassembly, ping/pong, close-reason), and `Websocket.UTF8.Is_Valid`
+      all take/return `Buffer`. The frames close-reason byte-loop is now a
+      `To_Array` slice; unmasked decode (the hot path — server→client
+      frames are never masked) is a single `Set` block move, the masked
+      path stays a per-byte XOR. WS test sweep done; full suite (28) green,
+      WS suite included to guard the close-race fix. Added `Append (Buffer)`
+      + `Constant_Indexing` (see API notes) with coverage in
+      `test_bytes_buffer`.
 - [ ] **D. Retire `Byte_Vector`.** Delete `Byte_Vectors` / `Byte_Vector`
       from `AHT.Bytes`; confirm no references remain; full suite green.
 
 ## Status
 
-Slices A–B landed. `Buffer` lives in `AHT.Bytes` alongside `Byte_Vector`,
+Slices A–C landed. `Buffer` lives in `AHT.Bytes` alongside `Byte_Vector`,
 with `test_bytes_buffer` green. `To_String`/`To_Buffer (String)` use a
 `Byte_Array`-over-`String` address overlay so the conversion is a single
-block move, not a per-character loop. The HTTP request/response bodies
-are now `Buffer`; the full suite (28 tests) is green.
+block move, not a per-character loop. The HTTP request/response bodies,
+`AHT.HTTP.IO.Read_Chunked_Body`, and the whole WebSocket payload path
+(frames, client, UTF-8) are now `Buffer`; the full suite (28 tests) is
+green. Only the library-side `Byte_Vector` deletion (Slice D) remains.
 
 `Buffer`'s **partial** view is `tagged private` (the full view extends
 `Ada.Finalization.Controlled`, so it is tagged anyway). This is
@@ -188,4 +238,4 @@ is tagged — `Byte_Vector`'s was, so the migration keeps those calls
 verbatim. The unit test calls the same ops in non-prefix form, so it
 compiled even before the partial view was tagged.
 
-Slices C–D pending.
+Slice D pending.

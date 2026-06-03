@@ -38,8 +38,8 @@ package AHT.HTTP.IO is
 
    function Read_Chunked_Body
      (T : in out AHT.Transport.Transport_Type'Class)
-      return AHT.Bytes.Byte_Vector;
-   --  Buffered convenience: assembles every chunk into one vector
+      return AHT.Bytes.Buffer;
+   --  Buffered convenience: assembles every chunk into one buffer
    --  by wrapping the streaming procedure with an appending sink.
 
 end AHT.HTTP.IO;
