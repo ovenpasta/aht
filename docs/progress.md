@@ -307,7 +307,7 @@ Transport-level TLS test against the HTTPS fixture
     pre-attempt budget check instead.
 
 Pure unit test of the WS framing codec (no sockets — works
-entirely over `Byte_Array` / `Byte_Vector`):
+entirely over `Byte_Array` / `Buffer`):
 
   - `tests/bin/test_ws_frames` — 29 cases covering (1–2) byte-
     exact RFC 6455 §5.7 encode vectors (unmasked + masked
@@ -342,7 +342,7 @@ entirely over `Byte_Array` / `Byte_Vector`):
     (`C3 A9`) → `Accept_Close`.
 
 Pure unit test of the RFC 3629 UTF-8 validator (no sockets — a
-predicate over `Byte_Array` / `Byte_Vector`, the check a WebSocket
+predicate over `Byte_Array` / `Buffer`, the check a WebSocket
 endpoint applies to inbound text payloads before accepting them):
 
   - `tests/bin/test_ws_utf8` — 30 cases over both `Is_Valid`

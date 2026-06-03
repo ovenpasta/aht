@@ -136,7 +136,7 @@ procedure Test_WS_Handshake is
       Setup_Error    : Unbounded_String;
       Runtime_Error  : Unbounded_String;
       Extra          : Unbounded_String;
-      Post           : AHT.Bytes.Byte_Vector;
+      Post           : AHT.Bytes.Buffer;
       Hold           : Duration := 0.0;
    begin
       accept Configure
@@ -250,14 +250,14 @@ procedure Test_WS_Handshake is
                      --  configured post-handshake bytes (e.g. a
                      --  malformed frame to exercise the receiver
                      --  side).
-                     if Natural (Post.Length) > 0 then
+                     if Post.Length > 0 then
                         declare
                            P_Buf : Stream_Element_Array
                              (1 .. Stream_Element_Offset
                                      (Post.Length));
                            Sent  : Stream_Element_Offset;
                         begin
-                           for I in 1 .. Natural (Post.Length) loop
+                           for I in 1 .. Post.Length loop
                               P_Buf
                                 (Stream_Element_Offset (I)) :=
                                 Stream_Element

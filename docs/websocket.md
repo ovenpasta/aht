@@ -110,7 +110,7 @@ function Encode
 procedure Decode
   (Input   : Byte_Array;
    Hdr     : out Frame_Header;
-   Payload : out Byte_Vector;
+   Payload : out Buffer;
    Last    : out Natural);
 ```
 
@@ -293,7 +293,7 @@ Owns the read side of the transport. Loop:
    - `Pong` → drop (no-op; app doesn't see unsolicited pongs).
    - `Close` → send echoing close through `Send_Guard` (if we haven't
      yet), fire `On_Close`, set `State := Closed` directly, exit.
-3. If data frame: buffer into a reassembly `Byte_Vector` until
+3. If data frame: buffer into a reassembly `Buffer` until
    `FIN = 1`. On completion, fire `On_Message` (if set) **and** enqueue
    into `Inbox` (if someone is blocked in `Receive` or will be later).
 4. On `Transport_Error` or malformed frame: fire `On_Error`, set

@@ -1,4 +1,3 @@
-with Ada.Containers.Vectors;
 with Ada.Finalization;
 with Interfaces;
 
@@ -6,17 +5,9 @@ package AHT.Bytes is
 
    pragma Preelaborate;
 
-   use type Interfaces.Unsigned_8;
-
    subtype Octet is Interfaces.Unsigned_8;
 
    type Byte_Array is array (Positive range <>) of Octet;
-
-   package Byte_Vectors is new Ada.Containers.Vectors
-     (Index_Type   => Positive,
-      Element_Type => Octet);
-
-   subtype Byte_Vector is Byte_Vectors.Vector;
 
    --  Array-backed byte buffer with value (copy) semantics. Bulk ops
    --  move whole slices: `Dst (Lo .. Hi) := Src` compiles to a single
@@ -27,11 +18,11 @@ package AHT.Bytes is
      with Default_Initial_Condition => Is_Empty (Buffer),
           Constant_Indexing         => Element;
    --  Constant_Indexing lets call sites read a byte as `B (I)` (sugar
-   --  for `B.Element (I)`), matching the indexing the Byte_Vector this
-   --  type replaced offered. Read-only: there is no Variable_Indexing,
-   --  so `B (I) := X` is not provided — mutate through Append / Set.
+   --  for `B.Element (I)`), the array-style indexing call sites expect.
+   --  Read-only: there is no Variable_Indexing, so `B (I) := X` is not
+   --  provided — mutate through Append / Set.
 
-   --  State / size (mirrors the Byte_Vector surface call sites use).
+   --  State / size: the length/index surface call sites query.
    function Length      (Self : Buffer) return Natural;
    function Is_Empty    (Self : Buffer) return Boolean;
    function First_Index (Self : Buffer) return Positive;   --  always 1

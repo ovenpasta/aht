@@ -25,9 +25,9 @@ procedure Test_HTTP_Wire is
 
    --  Same mock as test_http_io: script-backed Read, buffered Write.
    type Transport is new AHT.Transport.Transport_Type with record
-      Script  : AHT.Bytes.Byte_Vector;
+      Script  : AHT.Bytes.Buffer;
       Cursor  : Positive := 1;
-      Written : AHT.Bytes.Byte_Vector;
+      Written : AHT.Bytes.Buffer;
       Open    : Boolean  := True;
    end record;
 
@@ -59,7 +59,7 @@ procedure Test_HTTP_Wire is
       Last : out Natural)
    is
       Remaining : constant Natural :=
-        Natural (Self.Script.Length) - (Self.Cursor - 1);
+        Self.Script.Length - (Self.Cursor - 1);
       N         : Natural := Remaining;
    begin
       if Remaining = 0 then
@@ -92,18 +92,7 @@ procedure Test_HTTP_Wire is
    end Load;
 
    function Written_To_String (T : Transport) return String is
-      S : String (1 .. Natural (T.Written.Length));
-   begin
-      for I in S'Range loop
-         declare
-            B : constant AHT.Bytes.Octet :=
-              T.Written.Element (T.Written.First_Index + (I - 1));
-         begin
-            S (I) := Character'Val (Natural (B));
-         end;
-      end loop;
-      return S;
-   end Written_To_String;
+     (AHT.Bytes.To_String (T.Written));
 
    function Body_To_String (V : AHT.Bytes.Buffer) return String is
      (AHT.Bytes.To_String (V));

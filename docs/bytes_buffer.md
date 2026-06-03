@@ -4,8 +4,8 @@ Replacing `AHT.Bytes.Byte_Vector` with a purpose-built, array-backed
 byte buffer that supports **bulk (block-move) operations**. Tracks the
 design and the slice-by-slice migration.
 
-Last updated: 2026-06-03 (Slice C landed: `http-io` + WebSocket on
-`Buffer`; `Append (Buffer)` and `Constant_Indexing` added to the API).
+Last updated: 2026-06-03 (Slice D landed: `Byte_Vector` deleted from
+`AHT.Bytes`; `Buffer` is now the sole byte-buffer type. Migration complete).
 
 ## Why
 
@@ -45,7 +45,7 @@ type Buffer is tagged private
   with Default_Initial_Condition => Is_Empty (Buffer),
        Constant_Indexing         => Element;  -- B (I) reads Element (B, I)
 
---  State / size (mirrors the Byte_Vector surface the codebase + tests use)
+--  State / size: the length/index surface the codebase + tests query.
 function Length      (Self : Buffer) return Natural;
 function Is_Empty    (Self : Buffer) return Boolean;
 function First_Index (Self : Buffer) return Positive;   -- always 1
@@ -217,25 +217,34 @@ the same commit as the code.
       WS suite included to guard the close-race fix. Added `Append (Buffer)`
       + `Constant_Indexing` (see API notes) with coverage in
       `test_bytes_buffer`.
-- [ ] **D. Retire `Byte_Vector`.** Delete `Byte_Vectors` / `Byte_Vector`
-      from `AHT.Bytes`; confirm no references remain; full suite green.
+- [x] **D. Retire `Byte_Vector`.** Deleted `Byte_Vectors` / `Byte_Vector`
+      (and the now-unused `with Ada.Containers.Vectors`) from `AHT.Bytes`.
+      Migrated the last three holdouts off the vector: the `test_http_wire`
+      mock transport (`Script` / `Written` → `Buffer`), the
+      `test_ws_handshake` fake server's post-handshake byte store (`Post`),
+      and the Autobahn driver's echo helpers (which now call `Buffer`'s own
+      `To_String` / `To_Array` primitives — the extended-return block move
+      keeps the 8M/16M §9 payloads off the primary stack, same as the
+      hand-rolled helpers did). No `Byte_Vector` references remain in
+      `src`/`tests`. Library, `tests.gpr`, and the standalone `autobahn.gpr`
+      all build warning-free; full suite (28) green.
 
 ## Status
 
-Slices A–C landed. `Buffer` lives in `AHT.Bytes` alongside `Byte_Vector`,
-with `test_bytes_buffer` green. `To_String`/`To_Buffer (String)` use a
-`Byte_Array`-over-`String` address overlay so the conversion is a single
-block move, not a per-character loop. The HTTP request/response bodies,
-`AHT.HTTP.IO.Read_Chunked_Body`, and the whole WebSocket payload path
-(frames, client, UTF-8) are now `Buffer`; the full suite (28 tests) is
-green. Only the library-side `Byte_Vector` deletion (Slice D) remains.
+**Migration complete (Slices A–D landed).** `Buffer` is the sole
+byte-buffer type in `AHT.Bytes`; `Byte_Vector` / `Byte_Vectors` are gone,
+and no references remain in `src` or `tests`. `To_String`/`To_Buffer
+(String)` use a `Byte_Array`-over-`String` address overlay so the
+conversion is a single block move, not a per-character loop. HTTP
+request/response bodies, `AHT.HTTP.IO.Read_Chunked_Body`, and the whole
+WebSocket payload path (frames, client, UTF-8) are `Buffer`. The full
+suite (28 tests) is green, and the standalone `autobahn.gpr` driver
+builds and links clean against the new API.
 
 `Buffer`'s **partial** view is `tagged private` (the full view extends
 `Ada.Finalization.Controlled`, so it is tagged anyway). This is
 deliberate: the call sites use prefix notation (`Resp.Body_B.Length`,
 `Req.Body_B.Append (X)`), which is only available when the partial view
-is tagged — `Byte_Vector`'s was, so the migration keeps those calls
+is tagged — `Byte_Vector`'s was, so the migration kept those calls
 verbatim. The unit test calls the same ops in non-prefix form, so it
 compiled even before the partial view was tagged.
-
-Slice D pending.

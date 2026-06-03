@@ -70,7 +70,7 @@ type Request_Type is tagged record
    Method  : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET;
    Target  : AHT.URL.URL_Type;
    Headers : AHT.HTTP.Headers.Map;
-   Body_B  : AHT.Bytes.Byte_Vector;
+   Body_B  : AHT.Bytes.Buffer;
 end record;
 
 procedure Write
@@ -104,7 +104,7 @@ type Response_Type is tagged record
    Status  : AHT.HTTP.Status.Status_Code := 200;
    Reason  : Ada.Strings.Unbounded.Unbounded_String;
    Headers : AHT.HTTP.Headers.Map;
-   Body_B  : AHT.Bytes.Byte_Vector;
+   Body_B  : AHT.Bytes.Buffer;
 end record;
 
 procedure Read
@@ -171,7 +171,7 @@ reader forever.
   `Transport.Read`. Raises `Protocol_Error` if the peer closes
   before `Data'Length` bytes have been received. Zero-length slice
   is a no-op.
-- `Read_Chunked_Body (T) return Byte_Vector` — RFC 7230 §4.1
+- `Read_Chunked_Body (T) return Buffer` — RFC 7230 §4.1
   decoder. Each iteration reads a chunk-size line (hex digits,
   case-insensitive; `chunk-ext` after a `;` is ignored), reads the
   chunk-data with `Read_N`, then consumes the mandatory bare CRLF.

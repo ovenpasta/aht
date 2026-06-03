@@ -85,7 +85,7 @@ at `AHT.*` (e.g. `AHT.HTTP.Client`, `AHT.Websocket.Client`, `AHT.URL`,
 | `AHT.HTTP.Status` | `subtype Status_Code is Integer with Static_Predicate => Status_Code in 100 .. 599;` + `Reason_Phrase`. |
 | `AHT.HTTP.Headers` | Case-insensitive multimap: `Set`, `Append`, `Get`, `Get_All`, `Contains`, iteration. `Type_Invariant` that no name is empty and all names are normalized lowercase. |
 | `AHT.HTTP.Request` | `Request_Type` record; setters for method/URL/headers/body. |
-| `AHT.HTTP.Response` | `Response_Type` record: status, headers, body (`Byte_Vector`). |
+| `AHT.HTTP.Response` | `Response_Type` record: status, headers, body (`Buffer`). |
 | `AHT.HTTP.IO` | Transport-level helpers: `Read_Line` (CRLF-terminated, bounded), `Read_N_Bytes`, `Write_All`, chunked-transfer decoder. |
 | `AHT.HTTP.Client` | `Client_Type` (tagged). Methods: `Get`, `Post`, `Send (Request, Response)`. Handles scheme dispatch (`http` → TCP, `https` → TLS), connection establishment, request serialization, response parsing (status line → headers → body via `Content-Length` or `Transfer-Encoding: chunked`). One request per call (no keep-alive in v1; `Connection: close`). Thread-safe: each call owns its transport. |
 | `AHT.Websocket` | WS-specific types: `Opcode`, `Close_Code` (subtype predicate), `Message_Kind`. |

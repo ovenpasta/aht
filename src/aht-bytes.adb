@@ -81,8 +81,8 @@ package body AHT.Bytes is
    --  Mirrors the Pre at runtime: the release profile drops -gnata so the
    --  contract is inert there, and Data is sized to capacity (>= Len), so
    --  an unchecked Index in Len + 1 .. capacity would read a stale byte
-   --  instead of failing. Raising Constraint_Error keeps the bound live
-   --  in release and matches what Byte_Vector.Element gave.
+   --  instead of failing. Raising Constraint_Error keeps the fail-on-
+   --  out-of-range guarantee live in release too.
    function Element (Self : Buffer; Index : Positive) return Octet is
    begin
       if Index > Self.Len then
