@@ -9,6 +9,15 @@ package body AHT.HTTP.Request is
    function Image_No_Space (N : Natural) return String is
      (Ada.Strings.Fixed.Trim (Natural'Image (N), Ada.Strings.Left));
 
+   procedure Set_Body (Self : in out Request_Type; Text : String) is
+   begin
+      Self.Body_B.Clear;
+      Self.Body_B.Reserve_Capacity (Text'Length);
+      for C of Text loop
+         Self.Body_B.Append (Character'Pos (C));
+      end loop;
+   end Set_Body;
+
    procedure Write
      (Self : Request_Type;
       T    : in out AHT.Transport.Transport_Type'Class)

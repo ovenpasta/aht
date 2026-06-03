@@ -38,6 +38,13 @@ package AHT.HTTP.Response is
    --  `Self.Body_B` remains empty after the call. Same
    --  `Protocol_Error` conditions as `Read`.
 
+   function Body_Text (Self : Response_Type) return String;
+   --  The response body decoded one Character per byte (raw octets /
+   --  Latin-1), so it can be printed or compared as a String without
+   --  the caller hand-rolling a Byte_Vector walk. Empty when there is
+   --  no body (e.g. after a HEAD, or a streaming Read that drained the
+   --  body into a Sink). No charset decoding is attempted.
+
    procedure Read
      (Self   : out Response_Type;
       T      : in out AHT.Transport.Transport_Type'Class;

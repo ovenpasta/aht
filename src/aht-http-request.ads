@@ -13,6 +13,13 @@ package AHT.HTTP.Request is
       Body_B  : AHT.Bytes.Byte_Vector;
    end record;
 
+   procedure Set_Body (Self : in out Request_Type; Text : String);
+   --  Replaces the request body with the bytes of `Text`, one octet
+   --  per Character (raw / Latin-1, no charset encoding) — the inverse
+   --  of `Response.Body_Text`, so a String body needn't be walked into
+   --  `Body_B` by hand. `Content-Length` is synthesised by `Write`
+   --  from the resulting body, so the caller need not set it.
+
    procedure Write
      (Self : Request_Type;
       T    : in out AHT.Transport.Transport_Type'Class);

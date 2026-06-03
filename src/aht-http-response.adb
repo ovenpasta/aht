@@ -286,6 +286,16 @@ package body AHT.HTTP.Response is
       end if;
    end Read_Streaming;
 
+   function Body_Text (Self : Response_Type) return String is
+      S : String (1 .. Natural (Self.Body_B.Length));
+   begin
+      for I in S'Range loop
+         S (I) := Character'Val
+           (Natural (Self.Body_B.Element (Self.Body_B.First_Index + I - 1)));
+      end loop;
+      return S;
+   end Body_Text;
+
    procedure Read
      (Self   : out Response_Type;
       T      : in out AHT.Transport.Transport_Type'Class;
