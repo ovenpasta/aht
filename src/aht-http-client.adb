@@ -229,9 +229,7 @@ package body AHT.HTTP.Client is
       --  inner Parse_Head), so this builds up a fresh body.
       procedure Append_To_Body (Chunk : AHT.Bytes.Byte_Array) is
       begin
-         for B of Chunk loop
-            Resp.Body_B.Append (B);
-         end loop;
+         Resp.Body_B.Append (Chunk);
       end Append_To_Body;
    begin
       Run_Request (Self, Req, Resp,
@@ -247,9 +245,7 @@ package body AHT.HTTP.Client is
    is
       procedure Append_To_Body (Chunk : AHT.Bytes.Byte_Array) is
       begin
-         for B of Chunk loop
-            Resp.Body_B.Append (B);
-         end loop;
+         Resp.Body_B.Append (Chunk);
       end Append_To_Body;
    begin
       Run_Request (Self, Req, Resp,
@@ -384,9 +380,7 @@ package body AHT.HTTP.Client is
 
       procedure Append_To_Resp (Chunk : AHT.Bytes.Byte_Array) is
       begin
-         for B of Chunk loop
-            Resp.Body_B.Append (B);
-         end loop;
+         Resp.Body_B.Append (Chunk);
       end Append_To_Resp;
    begin
       --  Wait for Send_Async to fire Start. If the handle goes out

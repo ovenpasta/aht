@@ -12,7 +12,7 @@ package AHT.HTTP.Response is
       Status  : AHT.HTTP.Status.Status_Code := 200;
       Reason  : Ada.Strings.Unbounded.Unbounded_String;
       Headers : AHT.HTTP.Headers.Map;
-      Body_B  : AHT.Bytes.Byte_Vector;
+      Body_B  : AHT.Bytes.Buffer;
    end record;
 
    procedure Read_Streaming

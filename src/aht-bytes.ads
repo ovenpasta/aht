@@ -20,8 +20,11 @@ package AHT.Bytes is
 
    --  Array-backed byte buffer with value (copy) semantics. Bulk ops
    --  move whole slices: `Dst (Lo .. Hi) := Src` compiles to a single
-   --  block move, no per-element loop.
-   type Buffer is private with Default_Initial_Condition => Is_Empty (Buffer);
+   --  block move, no per-element loop. Tagged so the prefix-call style
+   --  (`B.Length`, `B.Append (X)`) the call sites use is available, not
+   --  for inheritance.
+   type Buffer is tagged private
+     with Default_Initial_Condition => Is_Empty (Buffer);
 
    --  State / size (mirrors the Byte_Vector surface call sites use).
    function Length      (Self : Buffer) return Natural;
@@ -57,6 +60,11 @@ package AHT.Bytes is
    procedure Append  (Self : in out Buffer; Data  : Byte_Array);
    procedure Append  (Self : in out Buffer; Datum : Octet);
    procedure Set     (Self : in out Buffer; Data  : Byte_Array);
+   procedure Set     (Self : in out Buffer; S     : String);
+   --  Replace the contents in place — Len := 0 then one block move into
+   --  Self's own (reused/grown) storage. Unlike `Self := To_Buffer (S)`,
+   --  there is no temporary buffer and no controlled `Adjust` copy, so a
+   --  large body costs one allocation/copy, not two.
 
    --  Zero-copy read for the wire path: Process is called once with a
    --  view of the live bytes (Self is not copied). Used by Request.Write

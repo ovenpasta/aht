@@ -216,19 +216,8 @@ procedure Test_HTTP_Client is
       end select;
    end HTTP_Server;
 
-   function Body_To_String (V : AHT.Bytes.Byte_Vector) return String is
-      S : String (1 .. Natural (V.Length));
-   begin
-      for I in S'Range loop
-         declare
-            B : constant AHT.Bytes.Octet :=
-              V.Element (V.First_Index + (I - 1));
-         begin
-            S (I) := Character'Val (Natural (B));
-         end;
-      end loop;
-      return S;
-   end Body_To_String;
+   function Body_To_String (V : AHT.Bytes.Buffer) return String is
+     (AHT.Bytes.To_String (V));
 
    function Contains (Haystack, Needle : String) return Boolean is
      (Ada.Strings.Fixed.Index (Haystack, Needle) /= 0);
@@ -422,9 +411,9 @@ begin
          if Resp.Status /= 200 then
             Fail ("HEAD: status =" & Resp.Status'Image);
          end if;
-         if Natural (Resp.Body_B.Length) /= 0 then
+         if Resp.Body_B.Length /= 0 then
             Fail ("HEAD: body non-empty, length ="
-                  & Natural'Image (Natural (Resp.Body_B.Length)));
+                  & Natural'Image (Resp.Body_B.Length));
          end if;
          if Ada.Calendar.Clock - Started > 1.5 then
             Fail ("HEAD: Send took >1.5s — body suppression likely "

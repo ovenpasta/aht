@@ -210,6 +210,25 @@ package body AHT.Bytes is
       Append (Self, Data);
    end Set;
 
+   --  In-place String fill: reuse/grow Self's own array and block-move
+   --  the String straight in through a Byte_Array overlay. No temporary
+   --  Buffer, no Adjust — one allocation/copy, not the two that
+   --  `Self := To_Buffer (S)` would incur.
+   procedure Set (Self : in out Buffer; S : String) is
+   begin
+      Self.Len := 0;
+      if S'Length > 0 then
+         Ensure_Capacity (Self, S'Length);
+         declare
+            View : Byte_Array (1 .. S'Length)
+              with Import, Address => S'Address;
+         begin
+            Self.Data (1 .. S'Length) := View;
+         end;
+         Self.Len := S'Length;
+      end if;
+   end Set;
+
    procedure Query
      (Self : Buffer; Process : not null access procedure (Data : Byte_Array))
    is

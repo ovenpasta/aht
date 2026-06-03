@@ -11,11 +11,7 @@ package body AHT.HTTP.Request is
 
    procedure Set_Body (Self : in out Request_Type; Text : String) is
    begin
-      Self.Body_B.Clear;
-      Self.Body_B.Reserve_Capacity (Text'Length);
-      for C of Text loop
-         Self.Body_B.Append (Character'Pos (C));
-      end loop;
+      Self.Body_B.Set (Text);
    end Set_Body;
 
    procedure Write
@@ -73,12 +69,11 @@ package body AHT.HTTP.Request is
       --  frame the body explicitly. Without this a request with a
       --  body and no Content-Length is a protocol error — easy to
       --  forget, cheap to fix here.
-      if Natural (Self.Body_B.Length) > 0
+      if Self.Body_B.Length > 0
         and then not Self.Headers.Contains ("content-length")
       then
          Emit_Header
-           ("content-length",
-            Image_No_Space (Natural (Self.Body_B.Length)));
+           ("content-length", Image_No_Space (Self.Body_B.Length));
       end if;
 
       --  Blank line ends the head section.
@@ -86,16 +81,16 @@ package body AHT.HTTP.Request is
 
       AHT.HTTP.IO.Write_All (T, AHT.Bytes.From_String (To_String (Buf)));
 
-      if Natural (Self.Body_B.Length) > 0 then
+      --  Body straight from the buffer to the socket: Query hands the
+      --  sink a view of the live bytes, so there's no array rebuild.
+      if Self.Body_B.Length > 0 then
          declare
-            Body_Bytes : AHT.Bytes.Byte_Array
-              (1 .. Natural (Self.Body_B.Length));
+            procedure Emit_Body (Data : AHT.Bytes.Byte_Array) is
+            begin
+               AHT.HTTP.IO.Write_All (T, Data);
+            end Emit_Body;
          begin
-            for I in Body_Bytes'Range loop
-               Body_Bytes (I) :=
-                 Self.Body_B.Element (Self.Body_B.First_Index + (I - 1));
-            end loop;
-            AHT.HTTP.IO.Write_All (T, Body_Bytes);
+            Self.Body_B.Query (Emit_Body'Access);
          end;
       end if;
    end Write;

@@ -287,14 +287,7 @@ package body AHT.HTTP.Response is
    end Read_Streaming;
 
    function Body_Text (Self : Response_Type) return String is
-      S : String (1 .. Natural (Self.Body_B.Length));
-   begin
-      for I in S'Range loop
-         S (I) := Character'Val
-           (Natural (Self.Body_B.Element (Self.Body_B.First_Index + I - 1)));
-      end loop;
-      return S;
-   end Body_Text;
+     (AHT.Bytes.To_String (Self.Body_B));
 
    procedure Read
      (Self   : out Response_Type;
@@ -307,9 +300,7 @@ package body AHT.HTTP.Response is
       --  up a fresh body.
       procedure Append_To_Body (Chunk : AHT.Bytes.Byte_Array) is
       begin
-         for B of Chunk loop
-            Self.Body_B.Append (B);
-         end loop;
+         Self.Body_B.Append (Chunk);
       end Append_To_Body;
    begin
       Read_Streaming (Self, T, Append_To_Body'Access, Method);

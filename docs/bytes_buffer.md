@@ -4,7 +4,7 @@ Replacing `AHT.Bytes.Byte_Vector` with a purpose-built, array-backed
 byte buffer that supports **bulk (block-move) operations**. Tracks the
 design and the slice-by-slice migration.
 
-Last updated: 2026-06-02 (Slice A landed: `Buffer` + `test_bytes_buffer`).
+Last updated: 2026-06-03 (Slice B landed: HTTP bodies on `Buffer`).
 
 ## Why
 
@@ -73,6 +73,7 @@ procedure Reserve (Self : in out Buffer; Capacity : Natural);
 procedure Append  (Self : in out Buffer; Data  : Byte_Array);  -- bulk slice move
 procedure Append  (Self : in out Buffer; Datum : Octet);       -- single, compat
 procedure Set     (Self : in out Buffer; Data  : Byte_Array);  -- replace
+procedure Set     (Self : in out Buffer; S     : String);      -- replace, in place
 
 --  Zero-copy read for the wire path: Process is called once with a view
 --  of the live bytes (Self is not copied). Used by Request.Write so a
@@ -151,10 +152,18 @@ the same commit as the code.
       `Low = Length + 1` boundary), large append (1 MB) stays correct,
       `Clear`/`Reserve`/`Set`/`Is_Empty`, `Query` view matches contents.
       Wired into `tests.gpr`.
-- [ ] **B. HTTP bodies → `Buffer`.** `Request.Body_B` / `Response.Body_B`
-      become `Buffer`. `Set_Body` uses `Set`/`To_Buffer` (bulk);
-      `Body_Text` uses `To_String`; `Write` uses `Query` for a
-      **zero-copy** body→socket path. Sweep `test_http_*`.
+- [x] **B. HTTP bodies → `Buffer`.** `Request.Body_B` / `Response.Body_B`
+      are now `Buffer`. `Set_Body` is `Self.Body_B.Set (Text)` — an
+      **in-place** String fill (one allocation/copy). `:= To_Buffer (Text)`
+      was rejected: assigning a function result drives controlled
+      `Adjust`, which allocates and copies the payload a *second* time
+      before the temporary is finalized — a transient 2× peak that could
+      turn a large upload into `Storage_Error`. `Body_Text` is
+      `To_String (Self.Body_B)`; `Write` streams the body through `Query`
+      (zero-copy view → socket); the response and three client body sinks
+      each collapse to a single bulk `Append (Chunk)`. The eight
+      `test_http_*` `Body_To_String` helpers collapse to `To_String (V)`.
+      Full suite green (28).
 - [ ] **C. `http-io` + WebSocket → `Buffer`.** `Read_Chunked_Body`
       return; `Websocket.Frames` / `Websocket.Client` / `Websocket.UTF8`
       payloads. Replace the frames close-reason byte-loop with a slice.
@@ -165,7 +174,18 @@ the same commit as the code.
 
 ## Status
 
-Slice A landed: `Buffer` lives in `AHT.Bytes` alongside `Byte_Vector`,
+Slices A–B landed. `Buffer` lives in `AHT.Bytes` alongside `Byte_Vector`,
 with `test_bytes_buffer` green. `To_String`/`To_Buffer (String)` use a
 `Byte_Array`-over-`String` address overlay so the conversion is a single
-block move, not a per-character loop. Slices B–D pending.
+block move, not a per-character loop. The HTTP request/response bodies
+are now `Buffer`; the full suite (28 tests) is green.
+
+`Buffer`'s **partial** view is `tagged private` (the full view extends
+`Ada.Finalization.Controlled`, so it is tagged anyway). This is
+deliberate: the call sites use prefix notation (`Resp.Body_B.Length`,
+`Req.Body_B.Append (X)`), which is only available when the partial view
+is tagged — `Byte_Vector`'s was, so the migration keeps those calls
+verbatim. The unit test calls the same ops in non-prefix form, so it
+compiled even before the partial view was tagged.
+
+Slices C–D pending.

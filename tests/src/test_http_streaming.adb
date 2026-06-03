@@ -320,9 +320,9 @@ begin
       if Resp.Status /= 200 then
          Fail ("chunked: status =" & Resp.Status'Image);
       end if;
-      if Natural (Resp.Body_B.Length) /= 0 then
+      if Resp.Body_B.Length /= 0 then
          Fail ("chunked: Body_B not empty after streaming, length ="
-               & Natural'Image (Natural (Resp.Body_B.Length)));
+               & Natural'Image (Resp.Body_B.Length));
       end if;
       if To_String (Body_S) /= "AHT rocks!" & ASCII.LF then
          Fail ("chunked: assembled = """
@@ -365,9 +365,9 @@ begin
       if Resp.Status /= 200 then
          Fail ("CL: status =" & Resp.Status'Image);
       end if;
-      if Natural (Resp.Body_B.Length) /= 0 then
+      if Resp.Body_B.Length /= 0 then
          Fail ("CL: Body_B not empty, length ="
-               & Natural'Image (Natural (Resp.Body_B.Length)));
+               & Natural'Image (Resp.Body_B.Length));
       end if;
       if To_String (Body_S) /= "hello, world" & ASCII.LF then
          Fail ("CL: assembled = """ & To_String (Body_S) & """");

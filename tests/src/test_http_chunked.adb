@@ -25,19 +25,8 @@ procedure Test_HTTP_Chunked is
       Failures := Failures + 1;
    end Fail;
 
-   function Body_To_String (V : AHT.Bytes.Byte_Vector) return String is
-      S : String (1 .. Natural (V.Length));
-   begin
-      for I in S'Range loop
-         declare
-            B : constant AHT.Bytes.Octet :=
-              V.Element (V.First_Index + (I - 1));
-         begin
-            S (I) := Character'Val (Natural (B));
-         end;
-      end loop;
-      return S;
-   end Body_To_String;
+   function Body_To_String (V : AHT.Bytes.Buffer) return String is
+     (AHT.Bytes.To_String (V));
 
    Expected : constant String := "AHT rocks!" & ASCII.LF;
    C        : AHT.HTTP.Client.Client_Type;
@@ -98,9 +87,9 @@ begin
       if Got then
          if Resp2.Status /= 200 then
             Fail ("chunked-big: status =" & Resp2.Status'Image);
-         elsif Natural (Resp2.Body_B.Length) /= N then
+         elsif Resp2.Body_B.Length /= N then
             Fail ("chunked-big: body length ="
-                  & Natural'Image (Natural (Resp2.Body_B.Length))
+                  & Natural'Image (Resp2.Body_B.Length)
                   & " (expected" & Integer'Image (N) & ")");
          else
             for I in 0 .. N - 1 loop

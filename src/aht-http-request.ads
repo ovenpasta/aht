@@ -10,7 +10,7 @@ package AHT.HTTP.Request is
       Method  : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET;
       Target  : AHT.URL.URL_Type;
       Headers : AHT.HTTP.Headers.Map;
-      Body_B  : AHT.Bytes.Byte_Vector;
+      Body_B  : AHT.Bytes.Buffer;
    end record;
 
    procedure Set_Body (Self : in out Request_Type; Text : String);

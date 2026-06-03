@@ -113,6 +113,25 @@ begin
       Check (To_String (B) = "kept", "Set replaces contents");
    end;
 
+   --  Set (String): in-place fill, replaces prior contents, reuses the
+   --  buffer's own storage (no temporary / Adjust copy). Cover replace,
+   --  empty, and a grow past the initial capacity.
+   declare
+      B : Buffer := To_Buffer ("discard this longer string");
+   begin
+      Set (B, "kept");
+      Check (To_String (B) = "kept", "Set(String) replaces contents");
+      Set (B, "");
+      Check (Is_Empty (B), "Set(String) empty clears");
+      declare
+         Big : constant String (1 .. 100_000) := [others => 'Z'];
+      begin
+         Set (B, Big);
+         Check (Length (B) = 100_000, "Set(String) large length");
+         Check (To_String (B) = Big,  "Set(String) large contents");
+      end;
+   end;
+
    --  Slice extraction: array / string / sub-buffer + empty (High < Low).
    declare
       B : constant Buffer := To_Buffer ("0123456789");
