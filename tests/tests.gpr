@@ -24,6 +24,7 @@ project Tests is
       "test_http_cancel.adb",
       "test_http_streaming.adb",
       "test_http_async.adb",
+      "test_httpbin.adb",
       "test_ws_frames.adb",
       "test_ws_utf8.adb",
       "test_ws_handshake.adb",

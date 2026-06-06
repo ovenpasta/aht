@@ -5,8 +5,9 @@
 # on 8766, a silent stall server on 8767 for the TLS handshake-timeout
 # test, a TLS-wrapped WebSocket echo on 8768, and a deaf-TLS server on
 # 8769 that handshakes then never reads for the TLS write-poison test),
-# runs every test main listed in tests/tests.gpr, and tears the
-# fixtures down on exit.
+# optionally brings up go-httpbin on 8770 when a Go toolchain is
+# available (see tests/httpbin/get_httpbin.sh), runs every test main
+# listed in tests/tests.gpr, and tears the fixtures down on exit.
 #
 # Self-contained tests (test_url, test_url_encoding, test_headers,
 # test_log, test_tcp, test_http_io, test_http_wire, test_http_client,
@@ -31,6 +32,7 @@ TLS_PID=
 STALL_PID=
 WSS_PID=
 TLSDEAF_PID=
+HTTPBIN_PID=
 
 cleanup() {
     if [ -n "$HTTP_PID" ]; then
@@ -56,6 +58,10 @@ cleanup() {
     if [ -n "$TLSDEAF_PID" ]; then
         kill "$TLSDEAF_PID" 2>/dev/null || true
         wait "$TLSDEAF_PID" 2>/dev/null || true
+    fi
+    if [ -n "$HTTPBIN_PID" ]; then
+        kill "$HTTPBIN_PID" 2>/dev/null || true
+        wait "$HTTPBIN_PID" 2>/dev/null || true
     fi
     rm -f "$LOG"
 }
@@ -126,6 +132,35 @@ then
     echo "tlsdeaf=$HAS_TLSDEAF); log follows:"
     cat "$LOG"
     exit 2
+fi
+
+# Optional fixture: go-httpbin (mccutchen/go-httpbin), a real
+# third-party HTTP/1.1 server. Enabled only when a Go toolchain can
+# produce the binary (the helper installs it from the module cache and
+# works offline once cached); otherwise the test_httpbin main SKIPs
+# because AHT_HTTPBIN_URL stays unset. Never fatal — third-party interop
+# is a bonus, not a gate on machines without Go.
+echo "==> ensuring go-httpbin fixture (optional)"
+if HTTPBIN_BIN=$(sh tests/httpbin/get_httpbin.sh 2>>"$LOG"); then
+    "$HTTPBIN_BIN" -host 127.0.0.1 -port 8770 >>"$LOG" 2>&1 &
+    HTTPBIN_PID=$!
+    for _ in $(seq 1 50); do
+        if grep -q 'go-httpbin listening' "$LOG" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+    if grep -q 'go-httpbin listening' "$LOG" 2>/dev/null; then
+        AHT_HTTPBIN_URL=http://127.0.0.1:8770
+        export AHT_HTTPBIN_URL
+        echo "==> go-httpbin listening on 8770 (test_httpbin enabled)"
+    else
+        echo "==> go-httpbin did not become ready; test_httpbin will SKIP"
+        kill "$HTTPBIN_PID" 2>/dev/null || true
+        HTTPBIN_PID=
+    fi
+else
+    echo "==> go-httpbin unavailable (no Go toolchain?); test_httpbin will SKIP"
 fi
 
 echo "==> running tests"
