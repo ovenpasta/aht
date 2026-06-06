@@ -5,6 +5,7 @@ with Ada.Streams; use Ada.Streams;
 with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Text_IO; use Ada.Text_IO;
+with Ada.Unchecked_Deallocation;
 with GNAT.Sockets; use GNAT.Sockets;
 
 with AHT.Bytes;
@@ -236,8 +237,370 @@ procedure Test_TCP is
       end Wait_Done;
    end Silent_Server;
 
+   --  A server that accepts one client, shrinks its receive buffer so the
+   --  kernel absorbs almost nothing, and then never reads — it parks on the
+   --  Release rendezvous, holding the connection open. The client's Write
+   --  fills the send + receive buffers and blocks on a full window, so the
+   --  only way Write can return is via Set_Write_Deadline expiry or
+   --  Abort_Pending. The main task calls Release once its write attempt has
+   --  resolved, letting the server drop the connection and finish.
+
+   task type Deaf_Server is
+      entry Get_Port
+        (P   : out AHT.URL.Port_Number;
+         Err : out Unbounded_String);
+      entry Release;
+      entry Wait_Done (Runtime_Err : out Unbounded_String);
+   end Deaf_Server;
+
+   task body Deaf_Server is
+      Server        : Socket_Type := No_Socket;
+      Client        : Socket_Type;
+      Peer          : Sock_Addr_Type;
+      Bind_To       : Sock_Addr_Type;
+      Bound         : Port_Type := 0;
+      Setup_Error   : Unbounded_String;
+      Runtime_Error : Unbounded_String;
+      Accepted      : Boolean := False;
+   begin
+      begin
+         Create_Socket (Server, Family_Inet, Socket_Stream);
+         Set_Socket_Option
+           (Server, Socket_Level, (Name => Reuse_Address, Enabled => True));
+         --  Tiny receive buffer (inherited by the accepted socket) so the
+         --  peer side absorbs almost nothing and the client's Write blocks
+         --  on a full window quickly and deterministically.
+         Set_Socket_Option
+           (Server, Socket_Level, (Name => Receive_Buffer, Size => 2048));
+         Bind_To.Addr := Inet_Addr ("127.0.0.1");
+         Bind_To.Port := 0;
+         Bind_Socket (Server, Bind_To);
+         Listen_Socket (Server, 1);
+         Bound := Get_Socket_Name (Server).Port;
+      exception
+         when E : others =>
+            Setup_Error := To_Unbounded_String
+              ("Deaf_Server setup: "
+               & Ada.Exceptions.Exception_Message (E));
+      end;
+
+      accept Get_Port
+        (P   : out AHT.URL.Port_Number;
+         Err : out Unbounded_String)
+      do
+         if Length (Setup_Error) > 0 then
+            P := 1;
+         else
+            P := AHT.URL.Port_Number (Bound);
+         end if;
+         Err := Setup_Error;
+      end Get_Port;
+
+      if Length (Setup_Error) = 0 then
+         declare
+            Selector : Selector_Type;
+            R_Set    : Socket_Set_Type;
+            W_Set    : Socket_Set_Type;
+            Status   : Selector_Status;
+         begin
+            Create_Selector (Selector);
+            Set (R_Set, Server);
+            Check_Selector
+              (Selector, R_Set, W_Set, Status, Timeout => 2.0);
+            Close_Selector (Selector);
+
+            if Status /= Completed then
+               Runtime_Error := To_Unbounded_String
+                 ("deaf accept timed out (no client connected within 2s)");
+            else
+               begin
+                  Accept_Socket (Server, Client, Peer);
+                  Accepted := True;
+               exception
+                  when E : others =>
+                     Runtime_Error := To_Unbounded_String
+                       ("Deaf_Server accept: "
+                        & Ada.Exceptions.Exception_Name (E) & " — "
+                        & Ada.Exceptions.Exception_Message (E));
+               end;
+            end if;
+         exception
+            when E : others =>
+               Runtime_Error := To_Unbounded_String
+                 ("Deaf_Server selector: "
+                  & Ada.Exceptions.Exception_Message (E));
+         end;
+      end if;
+
+      --  Hold the connection open without ever reading until the client's
+      --  write attempt resolves, then drop it.
+      accept Release;
+
+      if Accepted then
+         begin
+            Shutdown_Socket (Client, Shut_Read_Write);
+            Close_Socket (Client);
+         exception
+            when others => null;
+         end;
+      end if;
+      if Server /= No_Socket then
+         begin Close_Socket (Server); exception when others => null; end;
+      end if;
+
+      accept Wait_Done (Runtime_Err : out Unbounded_String) do
+         Runtime_Err := Runtime_Error;
+      end Wait_Done;
+   end Deaf_Server;
+
+   --  Accepts one client and, like Deaf_Server, never reads — so the
+   --  client's large Write fills the buffers and parks in the selector
+   --  after at least one successful partial send. Only when the caller
+   --  signals Close_Now (after the client is demonstrably blocked) does
+   --  it drop the connection, forcing the resume-after-partial-send path
+   --  to wake on the peer's RST. This is what makes Case 13 actually
+   --  exercise the non-blocking loop's peer-close handling rather than a
+   --  trivial fail-on-first-send (Codex F2).
+   task type Closer_Server is
+      entry Get_Port
+        (P   : out AHT.URL.Port_Number;
+         Err : out Unbounded_String);
+      entry Close_Now;
+      entry Wait_Done (Runtime_Err : out Unbounded_String);
+   end Closer_Server;
+
+   task body Closer_Server is
+      Server        : Socket_Type := No_Socket;
+      Client        : Socket_Type;
+      Peer          : Sock_Addr_Type;
+      Bind_To       : Sock_Addr_Type;
+      Bound         : Port_Type := 0;
+      Setup_Error   : Unbounded_String;
+      Runtime_Error : Unbounded_String;
+      Accepted      : Boolean := False;
+   begin
+      begin
+         Create_Socket (Server, Family_Inet, Socket_Stream);
+         Set_Socket_Option
+           (Server, Socket_Level, (Name => Reuse_Address, Enabled => True));
+         --  Tiny receive buffer so the client fills the buffers and parks
+         --  almost immediately, guaranteeing it is blocked in the selector
+         --  (past its first partial send) by the time Close_Now fires.
+         Set_Socket_Option
+           (Server, Socket_Level, (Name => Receive_Buffer, Size => 2048));
+         Bind_To.Addr := Inet_Addr ("127.0.0.1");
+         Bind_To.Port := 0;
+         Bind_Socket (Server, Bind_To);
+         Listen_Socket (Server, 1);
+         Bound := Get_Socket_Name (Server).Port;
+      exception
+         when E : others =>
+            Setup_Error := To_Unbounded_String
+              ("Closer_Server setup: "
+               & Ada.Exceptions.Exception_Message (E));
+      end;
+
+      accept Get_Port
+        (P   : out AHT.URL.Port_Number;
+         Err : out Unbounded_String)
+      do
+         if Length (Setup_Error) > 0 then
+            P := 1;
+         else
+            P := AHT.URL.Port_Number (Bound);
+         end if;
+         Err := Setup_Error;
+      end Get_Port;
+
+      if Length (Setup_Error) = 0 then
+         declare
+            Selector : Selector_Type;
+            R_Set    : Socket_Set_Type;
+            W_Set    : Socket_Set_Type;
+            Status   : Selector_Status;
+         begin
+            Create_Selector (Selector);
+            Set (R_Set, Server);
+            Check_Selector
+              (Selector, R_Set, W_Set, Status, Timeout => 2.0);
+            Close_Selector (Selector);
+
+            if Status /= Completed then
+               Runtime_Error := To_Unbounded_String
+                 ("closer accept timed out (no client connected within 2s)");
+            else
+               begin
+                  Accept_Socket (Server, Client, Peer);
+                  Accepted := True;
+               exception
+                  when E : others =>
+                     Runtime_Error := To_Unbounded_String
+                       ("Closer_Server accept: "
+                        & Ada.Exceptions.Exception_Name (E) & " — "
+                        & Ada.Exceptions.Exception_Message (E));
+               end;
+            end if;
+         exception
+            when E : others =>
+               Runtime_Error := To_Unbounded_String
+                 ("Closer_Server selector: "
+                  & Ada.Exceptions.Exception_Message (E));
+         end;
+      end if;
+
+      --  Hold the connection open (never reading) until the caller — which
+      --  has by now started the big write and let it block — says to drop
+      --  it. The shutdown+close sends a RST that wakes the parked write.
+      accept Close_Now;
+
+      if Accepted then
+         begin
+            Shutdown_Socket (Client, Shut_Read_Write);
+            Close_Socket (Client);
+         exception
+            when others => null;
+         end;
+      end if;
+      if Server /= No_Socket then
+         begin Close_Socket (Server); exception when others => null; end;
+      end if;
+
+      accept Wait_Done (Runtime_Err : out Unbounded_String) do
+         Runtime_Err := Runtime_Error;
+      end Wait_Done;
+   end Closer_Server;
+
+   --  Accepts one client and, only once the caller signals Reset_Now,
+   --  RST-closes it (SO_LINGER 0), so a client that connects, triggers the
+   --  reset, lets it settle, then writes hits a dead endpoint on its *first*
+   --  send — zero bytes accepted. This drives the zero-progress poison path:
+   --  a peer reset must tear the transport down even though no byte of the
+   --  write went out (Codex slice-1 F-C). The reset is caller-gated (not
+   --  fired right at accept) so it can never race the client's
+   --  connect-completion check — under load an accept-time RST surfaces as a
+   --  Connect failure instead of the first-send failure this case exercises.
+   task type Resetter_Server is
+      entry Get_Port
+        (P   : out AHT.URL.Port_Number;
+         Err : out Unbounded_String);
+      entry Reset_Now;
+      entry Wait_Done (Runtime_Err : out Unbounded_String);
+   end Resetter_Server;
+
+   task body Resetter_Server is
+      Server        : Socket_Type := No_Socket;
+      Client        : Socket_Type;
+      Peer          : Sock_Addr_Type;
+      Bind_To       : Sock_Addr_Type;
+      Bound         : Port_Type := 0;
+      Setup_Error   : Unbounded_String;
+      Runtime_Error : Unbounded_String;
+      Accepted      : Boolean := False;
+   begin
+      begin
+         Create_Socket (Server, Family_Inet, Socket_Stream);
+         Set_Socket_Option
+           (Server, Socket_Level, (Name => Reuse_Address, Enabled => True));
+         Bind_To.Addr := Inet_Addr ("127.0.0.1");
+         Bind_To.Port := 0;
+         Bind_Socket (Server, Bind_To);
+         Listen_Socket (Server, 1);
+         Bound := Get_Socket_Name (Server).Port;
+      exception
+         when E : others =>
+            Setup_Error := To_Unbounded_String
+              ("Resetter_Server setup: "
+               & Ada.Exceptions.Exception_Message (E));
+      end;
+
+      accept Get_Port
+        (P   : out AHT.URL.Port_Number;
+         Err : out Unbounded_String)
+      do
+         if Length (Setup_Error) > 0 then
+            P := 1;
+         else
+            P := AHT.URL.Port_Number (Bound);
+         end if;
+         Err := Setup_Error;
+      end Get_Port;
+
+      if Length (Setup_Error) = 0 then
+         declare
+            Selector : Selector_Type;
+            R_Set    : Socket_Set_Type;
+            W_Set    : Socket_Set_Type;
+            Status   : Selector_Status;
+         begin
+            Create_Selector (Selector);
+            Set (R_Set, Server);
+            Check_Selector
+              (Selector, R_Set, W_Set, Status, Timeout => 2.0);
+            Close_Selector (Selector);
+
+            if Status /= Completed then
+               Runtime_Error := To_Unbounded_String
+                 ("resetter accept timed out (no client within 2s)");
+            else
+               begin
+                  Accept_Socket (Server, Client, Peer);
+                  Accepted := True;
+               exception
+                  when E : others =>
+                     Runtime_Error := To_Unbounded_String
+                       ("Resetter_Server accept: "
+                        & Ada.Exceptions.Exception_Name (E) & " — "
+                        & Ada.Exceptions.Exception_Message (E));
+               end;
+            end if;
+         exception
+            when E : others =>
+               Runtime_Error := To_Unbounded_String
+                 ("Resetter_Server selector: "
+                  & Ada.Exceptions.Exception_Message (E));
+         end;
+      end if;
+
+      --  Always accepted (even on the setup/accept error path) so the client,
+      --  which calls Reset_Now unconditionally, never deadlocks. The reset
+      --  fires only after the client has finished connecting and signalled.
+      accept Reset_Now;
+
+      if Accepted then
+         begin
+            --  Linger enabled with a 0-second timeout makes Close send a RST
+            --  instead of a graceful FIN, so the peer's next send fails
+            --  immediately rather than draining a FIN.
+            Set_Socket_Option
+              (Client, Socket_Level,
+               (Name => Linger, Enabled => True, Seconds => 0));
+            Close_Socket (Client);
+         exception
+            when others => null;
+         end;
+      end if;
+
+      if Server /= No_Socket then
+         begin Close_Socket (Server); exception when others => null; end;
+      end if;
+
+      accept Wait_Done (Runtime_Err : out Unbounded_String) do
+         Runtime_Err := Runtime_Error;
+      end Wait_Done;
+   end Resetter_Server;
+
    Payload : constant AHT.Bytes.Byte_Array :=
                AHT.Bytes.From_String ("ping");
+
+   type Byte_Array_Access is access AHT.Bytes.Byte_Array;
+   procedure Free is
+     new Ada.Unchecked_Deallocation
+       (AHT.Bytes.Byte_Array, Byte_Array_Access);
+
+   --  Bigger than any plausible socket send + receive buffer, so a Write
+   --  to a peer that never reads is guaranteed to block. Heap-allocated to
+   --  keep it off the (fixed) task stack.
+   Big_Write_Len : constant := 4 * 1024 * 1024;
 
    procedure Close_Quietly (T : in out AHT.Transport.TCP.TCP_Transport) is
    begin
@@ -873,6 +1236,609 @@ begin
       if Refuser /= No_Socket then
          begin Close_Socket (Refuser); exception when others => null; end;
       end if;
+   end;
+
+   --  Case 11: Set_Write_Deadline causes a stuck Write to raise
+   --  Timeout_Error. The deaf server accepts and never reads, so after
+   --  the kernel buffers fill the client's non-blocking partial-send loop
+   --  re-parks in Check_Selector and the write deadline trips — proving a
+   --  wedged upload is bounded, not hung forever.
+   declare
+      Srv         : Deaf_Server;
+      Port        : AHT.URL.Port_Number;
+      Err         : Unbounded_String;
+      Runtime_Err : Unbounded_String;
+   begin
+      Srv.Get_Port (Port, Err);
+      if Length (Err) > 0 then
+         Fail ("write-timeout: server setup — " & To_String (Err));
+         Srv.Release;
+      else
+         declare
+            T   : AHT.Transport.TCP.TCP_Transport;
+            Big : Byte_Array_Access :=
+              new AHT.Bytes.Byte_Array'(1 .. Big_Write_Len => 65);
+         begin
+            begin
+               T.Connect ("127.0.0.1", Port);
+            exception
+               when E : others =>
+                  Fail ("write-timeout: Connect — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+
+            if T.Is_Connected then
+               T.Set_Write_Deadline (0.3);
+               declare
+                  T_Start : constant Time := Clock;
+                  Elapsed : Duration;
+               begin
+                  T.Write (Big.all);
+                  Fail ("write-timeout: Write returned normally "
+                        & "(peer never read — should have blocked)");
+               exception
+                  when AHT.Transport.Timeout_Error =>
+                     Elapsed := Clock - T_Start;
+                     if Elapsed < 0.05 then
+                        Fail ("write-timeout: fired too early — "
+                              & Duration'Image (Elapsed) & "s");
+                     end if;
+                     if Elapsed > 2.0 then
+                        Fail ("write-timeout: took too long — "
+                              & Duration'Image (Elapsed) & "s");
+                     end if;
+                  when E : others =>
+                     Fail ("write-timeout: unexpected "
+                           & Ada.Exceptions.Exception_Name (E) & " — "
+                           & Ada.Exceptions.Exception_Message (E));
+               end;
+
+               --  A timeout after a partial send leaves a truncated message
+               --  on the wire, so the transport must be poisoned (Finding B):
+               --  Is_Connected goes False and a retry is rejected rather than
+               --  appending onto the desynchronised stream.
+               if T.Is_Connected then
+                  Fail ("write-timeout: still connected after a mid-send "
+                        & "timeout (truncated stream left reusable)");
+               else
+                  begin
+                     T.Write (Big.all);
+                     Fail ("write-timeout: second Write succeeded on a "
+                           & "poisoned transport (should raise)");
+                  exception
+                     when AHT.Transport.Transport_Error =>
+                        null;  --  expected: "TCP write on closed transport"
+                     when E : others =>
+                        Fail ("write-timeout: second Write raised unexpected "
+                              & Ada.Exceptions.Exception_Name (E) & " — "
+                              & Ada.Exceptions.Exception_Message (E));
+                  end;
+               end if;
+            end if;
+
+            Srv.Release;
+            Close_Quietly (T);
+            Free (Big);
+         end;
+      end if;
+      Srv.Wait_Done (Runtime_Err);
+      Check_Server_Runtime ("write-timeout (server)", Runtime_Err);
+   end;
+
+   --  Case 12: Abort_Pending unblocks a Write wedged on a deaf peer. A
+   --  sibling task calls Abort_Pending after a short delay; because each
+   --  send is non-blocking and partial, the abort bites at the next
+   --  re-park (one selector cycle) — proving the cancel is not lost inside
+   --  an in-flight syscall, the exact race slice 1 must close. No write
+   --  deadline is set, so only the abort can end the Write.
+   declare
+      Srv         : Deaf_Server;
+      Port        : AHT.URL.Port_Number;
+      Err         : Unbounded_String;
+      Runtime_Err : Unbounded_String;
+   begin
+      Srv.Get_Port (Port, Err);
+      if Length (Err) > 0 then
+         Fail ("write-abort: server setup — " & To_String (Err));
+         Srv.Release;
+      else
+         declare
+            T   : AHT.Transport.TCP.TCP_Transport;
+            Big : Byte_Array_Access :=
+              new AHT.Bytes.Byte_Array'(1 .. Big_Write_Len => 65);
+
+            task Aborter;
+            task body Aborter is
+            begin
+               delay 0.1;
+               T.Abort_Pending;
+            exception
+               when others => null;
+            end Aborter;
+         begin
+            begin
+               T.Connect ("127.0.0.1", Port);
+            exception
+               when E : others =>
+                  Fail ("write-abort: Connect — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+
+            if T.Is_Connected then
+               declare
+                  T_Start : constant Time := Clock;
+                  Elapsed : Duration;
+               begin
+                  T.Write (Big.all);
+                  Fail ("write-abort: Write returned normally "
+                        & "(peer never read — should have blocked)");
+               exception
+                  when AHT.Transport.Aborted_Error =>
+                     Elapsed := Clock - T_Start;
+                     if Elapsed > 1.5 then
+                        Fail ("write-abort: took too long — "
+                              & Duration'Image (Elapsed) & "s");
+                     end if;
+                  when E : others =>
+                     Fail ("write-abort: unexpected "
+                           & Ada.Exceptions.Exception_Name (E) & " — "
+                           & Ada.Exceptions.Exception_Message (E));
+               end;
+
+               --  Same poisoning contract as the timeout case (Finding B):
+               --  an abort mid-send truncated the message, so the transport
+               --  is torn down and a retry must be rejected.
+               if T.Is_Connected then
+                  Fail ("write-abort: still connected after a mid-send "
+                        & "abort (truncated stream left reusable)");
+               else
+                  begin
+                     T.Write (Big.all);
+                     Fail ("write-abort: second Write succeeded on a "
+                           & "poisoned transport (should raise)");
+                  exception
+                     when AHT.Transport.Transport_Error =>
+                        null;  --  expected: "TCP write on closed transport"
+                     when E : others =>
+                        Fail ("write-abort: second Write raised unexpected "
+                              & Ada.Exceptions.Exception_Name (E) & " — "
+                              & Ada.Exceptions.Exception_Message (E));
+                  end;
+               end if;
+            end if;
+
+            Srv.Release;
+            Close_Quietly (T);
+            Free (Big);
+            --  Aborter is declared in this block, so the enclosing end
+            --  joins it before we leave the scope.
+         end;
+      end if;
+      Srv.Wait_Done (Runtime_Err);
+      Check_Server_Runtime ("write-abort (server)", Runtime_Err);
+   end;
+
+   --  Case 13: a peer that accepts then closes *mid-upload* must surface
+   --  Transport_Error promptly, not spin or hang. The closer server stays
+   --  deaf (never reads) after accept, so the client's non-blocking write
+   --  succeeds with at least one partial send and then parks in the
+   --  selector on the full buffer. A sibling Closer task waits 0.1 s — long
+   --  enough for the write to be demonstrably blocked past its first
+   --  partial send — then signals Close_Now, which RST-closes the peer and
+   --  wakes the parked write. The resumed send then fails (or returns the
+   --  zero-byte closed-peer signal), which the loop turns into
+   --  Transport_Error rather than re-parking forever. This is the
+   --  resume-after-partial-send path Codex F2 asked Case 13 to exercise.
+   --  A generous write deadline is set purely as a backstop: if it ever
+   --  fired we'd see Timeout_Error, which we treat as a FAIL because it
+   --  would mean the close was *not* detected and the write hung.
+   declare
+      Srv         : Closer_Server;
+      Port        : AHT.URL.Port_Number;
+      Err         : Unbounded_String;
+      Runtime_Err : Unbounded_String;
+   begin
+      Srv.Get_Port (Port, Err);
+      if Length (Err) > 0 then
+         Fail ("write-close: server setup — " & To_String (Err));
+      else
+         declare
+            T   : AHT.Transport.TCP.TCP_Transport;
+            Big : Byte_Array_Access :=
+              new AHT.Bytes.Byte_Array'(1 .. Big_Write_Len => 65);
+
+            --  Fires the peer close only once the big write below is parked
+            --  on the saturated buffer (mirrors Case 12's Aborter). Swallows
+            --  any error so a setup hiccup can't crash the test task.
+            task Closer;
+            task body Closer is
+            begin
+               delay 0.1;
+               Srv.Close_Now;
+            exception
+               when others => null;
+            end Closer;
+         begin
+            begin
+               T.Connect ("127.0.0.1", Port);
+            exception
+               when E : others =>
+                  Fail ("write-close: Connect — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+
+            if T.Is_Connected then
+               T.Set_Write_Deadline (5.0);
+               declare
+                  T_Start : constant Time := Clock;
+                  Elapsed : Duration;
+               begin
+                  T.Write (Big.all);
+                  Fail ("write-close: Write returned normally "
+                        & "(peer closed — should have failed)");
+               exception
+                  when AHT.Transport.Transport_Error =>
+                     Elapsed := Clock - T_Start;
+                     if Elapsed > 3.0 then
+                        Fail ("write-close: took too long — "
+                              & Duration'Image (Elapsed) & "s");
+                     end if;
+                  when AHT.Transport.Timeout_Error =>
+                     Fail ("write-close: hit the write deadline — peer "
+                           & "close was not detected (write hung)");
+                  when E : others =>
+                     Fail ("write-close: unexpected "
+                           & Ada.Exceptions.Exception_Name (E) & " — "
+                           & Ada.Exceptions.Exception_Message (E));
+               end;
+            end if;
+
+            Close_Quietly (T);
+            Free (Big);
+         end;
+      end if;
+      Srv.Wait_Done (Runtime_Err);
+      Check_Server_Runtime ("write-close (server)", Runtime_Err);
+   end;
+
+   --  Case 14: a peer reset before the *first* byte is accepted must still
+   --  poison the transport (Codex slice-1 F-C — the zero-progress path the
+   --  Progress-only gate missed). The resetter waits for our Reset_Now, then
+   --  RST-closes; the client connects, signals the reset, lets it settle,
+   --  then writes a tiny payload, so the very first send hits a dead endpoint
+   --  with no byte accepted. The write must raise Transport_Error,
+   --  Is_Connected must go False, and a retry must be rejected — even though
+   --  Progress was never set. The reset is gated on Reset_Now (not fired at
+   --  accept) so it cannot race the connect and masquerade as a Connect
+   --  failure under load.
+   declare
+      Srv         : Resetter_Server;
+      Port        : AHT.URL.Port_Number;
+      Err         : Unbounded_String;
+      Runtime_Err : Unbounded_String;
+   begin
+      Srv.Get_Port (Port, Err);
+      if Length (Err) > 0 then
+         Fail ("write-reset: server setup — " & To_String (Err));
+         Srv.Reset_Now;
+      else
+         declare
+            T : AHT.Transport.TCP.TCP_Transport;
+         begin
+            begin
+               T.Connect ("127.0.0.1", Port);
+            exception
+               when E : others =>
+                  Fail ("write-reset: Connect — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+
+            --  Now that the connect handshake is done, tell the server to RST.
+            --  Driving the reset here (rather than at accept) keeps it from
+            --  racing the connect-completion check under load.
+            Srv.Reset_Now;
+
+            if T.Is_Connected then
+               --  Let the server's RST arrive and be processed so the first
+               --  send below fails immediately with zero bytes accepted.
+               delay 0.3;
+               --  Backstop only: a reset socket reports writable-with-error,
+               --  so the send should fail at once; if this deadline ever
+               --  fired we'd see Timeout_Error and treat it as a FAIL.
+               T.Set_Write_Deadline (2.0);
+               begin
+                  T.Write (Payload);
+                  Fail ("write-reset: first Write returned normally "
+                        & "(peer reset — should have failed)");
+               exception
+                  when AHT.Transport.Transport_Error =>
+                     null;  --  expected: reset surfaced as Transport_Error
+                  when AHT.Transport.Timeout_Error =>
+                     Fail ("write-reset: hit the write deadline — the reset "
+                           & "was not detected on the first send");
+                  when E : others =>
+                     Fail ("write-reset: unexpected "
+                           & Ada.Exceptions.Exception_Name (E) & " — "
+                           & Ada.Exceptions.Exception_Message (E));
+               end;
+
+               --  Zero-progress, but the endpoint is gone: the transport
+               --  must be poisoned regardless of how many bytes went out.
+               if T.Is_Connected then
+                  Fail ("write-reset: still connected after a peer reset on "
+                        & "the first send (dead socket left reusable)");
+               else
+                  begin
+                     T.Write (Payload);
+                     Fail ("write-reset: second Write succeeded on a "
+                           & "poisoned transport (should raise)");
+                  exception
+                     when AHT.Transport.Transport_Error =>
+                        null;  --  expected: "TCP write on closed transport"
+                     when E : others =>
+                        Fail ("write-reset: second Write raised unexpected "
+                              & Ada.Exceptions.Exception_Name (E) & " — "
+                              & Ada.Exceptions.Exception_Message (E));
+                  end;
+               end if;
+            end if;
+
+            Close_Quietly (T);
+         end;
+      end if;
+      Srv.Wait_Done (Runtime_Err);
+      Check_Server_Runtime ("write-reset (server)", Runtime_Err);
+   end;
+
+   --  Case 15: a write-side teardown while another task is parked in Read on
+   --  the *same* transport must not race the reader's selector (Codex slice-1
+   --  F-D). This package supports concurrent read+write on one connection, so
+   --  Write's failure path must not Close_Selector while a reader is still
+   --  inside Check_Selector — it Poisons instead, shutting the socket down to
+   --  wake the reader with EOF and deferring the selector reclaim to the
+   --  single-threaded Close. Here a reader parks on a deaf peer; the writer
+   --  saturates the send buffer and trips its write deadline, whose handler
+   --  poisons the transport. Asserts: the write fails (bounded), the parked
+   --  reader is woken by the poison (not by its own 5 s backstop deadline),
+   --  the transport ends disconnected, and nothing hangs.
+   declare
+      Srv         : Deaf_Server;
+      Port        : AHT.URL.Port_Number;
+      Err         : Unbounded_String;
+      Runtime_Err : Unbounded_String;
+   begin
+      Srv.Get_Port (Port, Err);
+      if Length (Err) > 0 then
+         Fail ("write-vs-read: server setup — " & To_String (Err));
+         Srv.Release;
+      else
+         declare
+            T          : AHT.Transport.TCP.TCP_Transport;
+            Big        : Byte_Array_Access :=
+              new AHT.Bytes.Byte_Array'(1 .. Big_Write_Len => 65);
+            Reader_Out : Unbounded_String;
+         begin
+            begin
+               T.Connect ("127.0.0.1", Port);
+            exception
+               when E : others =>
+                  Fail ("write-vs-read: Connect — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+
+            if T.Is_Connected then
+               --  Backstop only: Poison should wake the reader within the
+               --  0.3 s write deadline below. If the reader ever falls
+               --  through to this 5 s read deadline, the poison failed to
+               --  unblock it and we flag the selector race as a FAIL.
+               T.Set_Read_Deadline (5.0);
+
+               declare
+                  task Reader;
+                  task body Reader is
+                     Buf  : AHT.Bytes.Byte_Array (1 .. 64);
+                     Last : Natural;
+                  begin
+                     T.Read (Buf, Last);
+                     if Last = 0 then
+                        Reader_Out := To_Unbounded_String ("eof");
+                     else
+                        Reader_Out := To_Unbounded_String ("data");
+                     end if;
+                  exception
+                     when AHT.Transport.Timeout_Error =>
+                        Reader_Out := To_Unbounded_String ("timeout");
+                     when AHT.Transport.Aborted_Error =>
+                        Reader_Out := To_Unbounded_String ("aborted");
+                     when AHT.Transport.Transport_Error =>
+                        Reader_Out := To_Unbounded_String ("transport");
+                     when E : others =>
+                        Reader_Out := To_Unbounded_String
+                          ("exn:" & Ada.Exceptions.Exception_Name (E));
+                  end Reader;
+               begin
+                  --  Let the reader reach Check_Selector before the write
+                  --  begins tearing the socket down.
+                  delay 0.2;
+
+                  T.Set_Write_Deadline (0.3);
+                  begin
+                     T.Write (Big.all);
+                     Fail ("write-vs-read: Write returned normally on a "
+                           & "deaf peer (expected a bounded failure)");
+                  exception
+                     when AHT.Transport.Timeout_Error
+                        | AHT.Transport.Transport_Error =>
+                        null;  --  expected: bounded write failure → Poison
+                     when E : others =>
+                        Fail ("write-vs-read: Write raised unexpected "
+                              & Ada.Exceptions.Exception_Name (E) & " — "
+                              & Ada.Exceptions.Exception_Message (E));
+                  end;
+                  --  Exiting this block joins Reader: if the poison failed to
+                  --  wake it the test stalls only until the 5 s backstop,
+                  --  never forever.
+               end;
+
+               --  Reader has terminated; its outcome is now safe to read.
+               declare
+                  Outcome : constant String := To_String (Reader_Out);
+               begin
+                  if Outcome = "eof" or else Outcome = "aborted"
+                    or else Outcome = "transport"
+                  then
+                     null;  --  poison unblocked the parked reader (the point)
+                  elsif Outcome = "timeout" then
+                     Fail ("write-vs-read: parked reader was NOT woken by the "
+                           & "poison — it fell through to its own 5 s backstop "
+                           & "deadline (write-side teardown raced/ignored the "
+                           & "reader's selector)");
+                  elsif Outcome = "data" then
+                     Fail ("write-vs-read: reader saw data from a deaf peer");
+                  else
+                     Fail ("write-vs-read: reader raised " & Outcome);
+                  end if;
+               end;
+
+               if T.Is_Connected then
+                  Fail ("write-vs-read: transport still connected after a "
+                        & "poisoning write failure");
+               end if;
+            end if;
+
+            Srv.Release;
+            Close_Quietly (T);
+            Free (Big);
+         end;
+      end if;
+      Srv.Wait_Done (Runtime_Err);
+      Check_Server_Runtime ("write-vs-read (server)", Runtime_Err);
+   end;
+
+   --  Case 16: a transport is single-use (Codex slice-1 F-E / F-F). A
+   --  transport poisoned by a write failure still owns its fd/selectors
+   --  (poison leaves them live for the single-threaded Close to reclaim, so
+   --  Is_Connected reads False while the socket is still open). Connect must
+   --  NOT silently reclaim such an object in place: a reader parked on the
+   --  old session could wake after a new fd was swapped in and read the
+   --  wrong generation. So reconnecting the SAME poisoned object must be
+   --  rejected; the caller has to Close it (single-threaded, after reads
+   --  have stopped) and use a fresh transport. Phase 1 poisons T on a deaf
+   --  peer; phase 2 asserts an in-place reconnect raises; phase 3 Closes T
+   --  (reclaim must not hang/raise) and round-trips a FRESH transport to the
+   --  echo server, proving the dead session was fully released and a clean
+   --  object works.
+   declare
+      Deaf        : Deaf_Server;
+      Echo        : Echo_Server;
+      Deaf_Port   : AHT.URL.Port_Number;
+      Echo_Port   : AHT.URL.Port_Number;
+      Deaf_Err    : Unbounded_String;
+      Echo_Err    : Unbounded_String;
+      Deaf_RT     : Unbounded_String;
+      Echo_RT     : Unbounded_String;
+   begin
+      Deaf.Get_Port (Deaf_Port, Deaf_Err);
+      Echo.Get_Port (Echo_Port, Echo_Err);
+      if Length (Deaf_Err) > 0 then
+         Fail ("reconnect: deaf server setup — " & To_String (Deaf_Err));
+         Deaf.Release;
+      elsif Length (Echo_Err) > 0 then
+         Fail ("reconnect: echo server setup — " & To_String (Echo_Err));
+         Deaf.Release;
+      else
+         declare
+            T   : AHT.Transport.TCP.TCP_Transport;
+            Big : Byte_Array_Access :=
+              new AHT.Bytes.Byte_Array'(1 .. Big_Write_Len => 65);
+         begin
+            --  Phase 1: poison T on the deaf peer (mid-send write timeout).
+            begin
+               T.Connect ("127.0.0.1", Deaf_Port);
+            exception
+               when E : others =>
+                  Fail ("reconnect: phase-1 Connect — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+
+            if T.Is_Connected then
+               T.Set_Write_Deadline (0.3);
+               begin
+                  T.Write (Big.all);
+                  Fail ("reconnect: phase-1 Write returned normally "
+                        & "(deaf peer — expected a bounded failure)");
+               exception
+                  when AHT.Transport.Timeout_Error =>
+                     null;  --  expected: mid-send timeout -> poison
+                  when E : others =>
+                     Fail ("reconnect: phase-1 Write raised unexpected "
+                           & Ada.Exceptions.Exception_Name (E) & " — "
+                           & Ada.Exceptions.Exception_Message (E));
+               end;
+               if T.Is_Connected then
+                  Fail ("reconnect: not poisoned after the phase-1 timeout");
+               end if;
+            end if;
+            Deaf.Release;
+            Free (Big);
+
+            --  Phase 2: an in-place reconnect of the SAME poisoned (never
+            --  Closed) object must be rejected — the fd is still owned, so
+            --  recycling it would race a stale reader. No silent reuse/leak.
+            begin
+               T.Connect ("127.0.0.1", Echo_Port);
+               Fail ("reconnect: in-place Connect on a poisoned transport "
+                     & "succeeded (must reject; transport is single-use)");
+               Close_Quietly (T);
+            exception
+               when AHT.Transport.Transport_Error =>
+                  null;  --  expected: "still owns a connection; Close it ..."
+               when E : others =>
+                  Fail ("reconnect: in-place Connect raised unexpected "
+                        & Ada.Exceptions.Exception_Name (E) & " — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+
+            --  Phase 3: Close reclaims the poisoned fd/selectors (must not
+            --  hang or raise). Single-use is permanent: even after Close, a
+            --  Connect on the SAME (already-used) object must still raise —
+            --  this is the latch that survives a Close which raced a parked
+            --  reader and could only best-effort the selector teardown.
+            Close_Quietly (T);
+            begin
+               T.Connect ("127.0.0.1", Echo_Port);
+               Fail ("reconnect: Connect on a closed, already-used transport "
+                     & "succeeded (single-use must be permanent)");
+               Close_Quietly (T);
+            exception
+               when AHT.Transport.Transport_Error =>
+                  null;  --  expected: "single-use; use a fresh transport"
+               when E : others =>
+                  Fail ("reconnect: post-Close Connect raised unexpected "
+                        & Ada.Exceptions.Exception_Name (E) & " — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+
+            --  A FRESH transport, by contrast, connects and round-trips
+            --  cleanly — proving nothing global was corrupted. Drive_Echo
+            --  closes Fresh.
+            declare
+               Fresh : AHT.Transport.TCP.TCP_Transport;
+            begin
+               Fresh.Connect ("127.0.0.1", Echo_Port);
+               Drive_Echo ("reconnect (fresh)", Fresh);
+            exception
+               when E : others =>
+                  Fail ("reconnect: fresh transport — "
+                        & Ada.Exceptions.Exception_Name (E) & " — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+         end;
+      end if;
+      Deaf.Wait_Done (Deaf_RT);
+      Echo.Wait_Done (Echo_RT);
+      Check_Server_Runtime ("reconnect (deaf server)", Deaf_RT);
+      Check_Server_Runtime ("reconnect (echo server)", Echo_RT);
    end;
 
    if Failures = 0 then

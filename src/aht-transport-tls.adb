@@ -58,6 +58,9 @@ package body AHT.Transport.TLS is
          return C.int (N);
       end;
    exception
+      when AHT.Transport.Timeout_Error =>
+         BC.Last_Error := BIO_Timeout;
+         return M.ERR_NET_SEND_FAILED;
       when AHT.Transport.Aborted_Error =>
          BC.Last_Error := BIO_Aborted;
          return M.ERR_NET_SEND_FAILED;
@@ -120,7 +123,7 @@ package body AHT.Transport.TLS is
       case Kind is
          when BIO_Timeout =>
             raise AHT.Transport.Timeout_Error
-              with Where & ": read deadline expired";
+              with Where & ": deadline expired";
          when BIO_Aborted =>
             raise AHT.Transport.Aborted_Error
               with Where & ": aborted";
@@ -160,6 +163,31 @@ package body AHT.Transport.TLS is
       end if;
    end Free_Contexts;
 
+   --  Tear a desynchronised session down hard. A write that fails partway
+   --  through a TLS record (timeout/abort/transport error reported by
+   --  Send_CB) may already have put some bytes of that record on the wire
+   --  while mbedTLS believes none were sent — the outbound record stream
+   --  is now corrupt and the session must never be reused. Mark it closed
+   --  (so any further Read/Write raises) and poison the underlying TCP
+   --  *without* a close_notify, which would only push another record onto
+   --  the broken stream. We Poison rather than Close the inner TCP because
+   --  a WSS receiver task may still be parked in Check_Selector on it; Close
+   --  would race that selector (GNAT forbids Close_Selector while a task
+   --  waits on it). Poison just shuts the socket down (waking the reader
+   --  with EOF) and leaves the FD/selector reclaim to the eventual Close.
+   --  The mbedTLS contexts are left for the eventual Close/finalization to
+   --  free; Last_Error is preserved so the caller's Raise_From_Code still
+   --  reports the originating exception.
+   procedure Drop_Connection (Self : in out TLS_Transport) is
+   begin
+      Self.Connected := False;
+      begin
+         Self.TCP.Poison;
+      exception
+         when others => null;
+      end;
+   end Drop_Connection;
+
    ---------------------------------------------------------------
    --  Connect
    ---------------------------------------------------------------
@@ -190,6 +218,18 @@ package body AHT.Transport.TLS is
       if Self.Connected then
          raise TLS_Error with "TLS transport already connected";
       end if;
+
+      --  A TLS transport is single-use. We must NOT free/reinitialize the
+      --  mbedTLS contexts in place to "recycle" a dropped session: a WSS
+      --  receiver task may still be unwinding through TLS.Read / the BIO
+      --  callbacks, so freeing SSL/config/CA/RNG here would be a
+      --  use-after-free. A poisoned object (Drop_Connection flipped
+      --  Connected False but left the inner TCP poisoned and the contexts
+      --  live for Close/finalization) is therefore rejected by the inner
+      --  AHT.Transport.TCP.Connect guard below — its socket is still owned,
+      --  so TCP.Connect raises before any TLS state is touched. The caller
+      --  must Close (after every read/write task has quiesced) and use a
+      --  fresh transport to reconnect.
 
       --  1. Plain TCP first: DNS multi-candidate fallback, the
       --     selector, the compound deadline and Abort_Pending all come
@@ -378,6 +418,12 @@ package body AHT.Transport.TLS is
          if Ret = M.ERR_WANT_READ or else Ret = M.ERR_WANT_WRITE then
             null;  --  retry the same cursor
          elsif Ret < 0 then
+            --  Any fatal write error means the TLS record stream may be
+            --  half-written and irrecoverable, so the session is dropped
+            --  before the exception propagates (Codex F1): the transport
+            --  reports Is_Connected = False and a retry raises rather than
+            --  emitting onto a desynchronised stream.
+            Drop_Connection (Self);
             Raise_From_Code (Self, Ret, "TLS write");
          else
             Cursor := Cursor + Natural (Ret);
@@ -424,6 +470,13 @@ package body AHT.Transport.TLS is
    begin
       Self.TCP.Set_Read_Deadline (Deadline);
    end Set_Read_Deadline;
+
+   overriding procedure Set_Write_Deadline
+     (Self     : in out TLS_Transport;
+      Deadline : Duration) is
+   begin
+      Self.TCP.Set_Write_Deadline (Deadline);
+   end Set_Write_Deadline;
 
    overriding procedure Abort_Pending (Self : in out TLS_Transport) is
    begin

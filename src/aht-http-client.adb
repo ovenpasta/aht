@@ -83,11 +83,20 @@ package body AHT.HTTP.Client is
       Sink    : not null access
         procedure (Chunk : AHT.Bytes.Byte_Array)) is
    begin
+      --  Arm the write deadline before sending the request; arm the read
+      --  deadline only *after* the body is fully on the wire. Set_Read_Deadline
+      --  is a compound budget measured from when it is armed, so arming it up
+      --  front would let a slow/large upload burn the response-read budget and
+      --  surface a spurious Timeout_Error the instant the upload completes.
       if Self.Timeout_Seconds > 0 then
-         T.Set_Read_Deadline (Duration (Self.Timeout_Seconds));
+         T.Set_Write_Deadline (Duration (Self.Timeout_Seconds));
       end if;
 
       AHT.HTTP.Request.Write (Working, T);
+
+      if Self.Timeout_Seconds > 0 then
+         T.Set_Read_Deadline (Duration (Self.Timeout_Seconds));
+      end if;
 
       loop
          AHT.HTTP.Response.Read_Streaming
@@ -117,10 +126,11 @@ package body AHT.HTTP.Client is
    is
       Working : AHT.HTTP.Request.Request_Type := Req;
 
-      --  Timeout_Seconds bounds each connect phase independently rather
-      --  than as one end-to-end deadline: it is the TCP-connect budget,
-      --  the TLS-handshake deadline, and (via Set_Read_Deadline in
-      --  Wire_Round_Trip) the response-read deadline. 0 means no limit.
+      --  Timeout_Seconds bounds each phase independently rather than as
+      --  one end-to-end deadline: it is the TCP-connect budget, the
+      --  TLS-handshake deadline, and (via Set_Write_Deadline /
+      --  Set_Read_Deadline in Wire_Round_Trip) the request-write and
+      --  response-read deadlines. 0 means no limit.
       Budget : constant Duration :=
         (if Self.Timeout_Seconds > 0
          then Duration (Self.Timeout_Seconds)

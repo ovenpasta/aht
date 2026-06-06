@@ -151,8 +151,25 @@ package body AHT.Transport.TCP is
       end Try;
 
    begin
-      if Self.Connected then
-         raise Transport_Error with "TCP transport already connected";
+      --  A transport is permanently single-use. `Used` latches True at the
+      --  first fully-successful Connect and is never cleared, so a reused
+      --  object is rejected even after Close — crucially even if that Close
+      --  raced a parked reader and could only best-effort the selector
+      --  teardown (leaving the ownership bits looking clean). The
+      --  Socket/Selector checks additionally reject any object that still
+      --  owns OS resources before a first success completes (live or
+      --  poisoned). We must NOT reclaim in place: a reader parked in Read on
+      --  the old session could wake after this swaps in a new fd and then
+      --  Receive_Socket against the wrong generation. The caller must Close
+      --  (single-threaded, after every read/write task has quiesced) and
+      --  connect a *fresh* object instead.
+      if Self.Used
+        or else Self.Socket /= No_Socket
+        or else Self.Selector_Open
+      then
+         raise Transport_Error with
+           "TCP transport is single-use; use a fresh transport to connect "
+           & "(this one has already been connected — Close it and discard)";
       end if;
 
       for E of Endpoints loop
@@ -186,10 +203,21 @@ package body AHT.Transport.TCP is
       if not Self.Selector_Open then
          begin
             Create_Selector (Self.Selector);
+            Create_Selector (Self.Write_Selector);
             Self.Selector_Open := True;
          exception
             when E : Socket_Error =>
                Self.Connected := False;
+               begin
+                  Close_Selector (Self.Selector);
+               exception
+                  when Socket_Error => null;
+               end;
+               begin
+                  Close_Selector (Self.Write_Selector);
+               exception
+                  when Socket_Error => null;
+               end;
                begin
                   Close_Socket (Self.Socket);
                exception
@@ -201,6 +229,46 @@ package body AHT.Transport.TCP is
                  & Ada.Exceptions.Exception_Message (E);
          end;
       end if;
+
+      --  Switch to non-blocking IO so neither Send_Socket nor
+      --  Receive_Socket can block in the kernel: the per-connection
+      --  Selector becomes the *only* place Read/Write park, which is what
+      --  lets the read/write deadlines and Abort_Pending bite at every
+      --  re-park instead of being stuck inside an in-flight syscall.
+      declare
+         Nonblock : Request_Type (Name => Non_Blocking_IO) :=
+           (Name => Non_Blocking_IO, Enabled => True);
+      begin
+         Control_Socket (Self.Socket, Nonblock);
+      exception
+         when E : Socket_Error =>
+            Self.Connected := False;
+            begin
+               Close_Selector (Self.Selector);
+            exception
+               when Socket_Error => null;
+            end;
+            begin
+               Close_Selector (Self.Write_Selector);
+            exception
+               when Socket_Error => null;
+            end;
+            Self.Selector_Open := False;
+            begin
+               Close_Socket (Self.Socket);
+            exception
+               when Socket_Error => null;
+            end;
+            Self.Socket := No_Socket;
+            raise Transport_Error with
+              "TCP connect: set non-blocking failed: "
+              & Ada.Exceptions.Exception_Message (E);
+      end;
+
+      --  Fully connected: socket up, both selectors open, non-blocking set.
+      --  Latch single-use here (the definite-success point) so every later
+      --  Connect is rejected even after a Close — see the guard above.
+      Self.Used := True;
    end Connect_Candidates;
 
    function Is_IP_Literal (Host : String) return Boolean is
@@ -263,6 +331,15 @@ package body AHT.Transport.TCP is
       Buffer     : Stream_Element_Array (1 .. Window_Max);
       Sent       : Stream_Element_Offset;
       Pos        : Natural := Data'First;
+      R_Set      : Socket_Set_Type;
+      W_Set      : Socket_Set_Type;
+      Status     : Selector_Status;
+
+      --  True once any byte of this Write has been accepted by the kernel.
+      --  If a later park then fails (deadline, abort, peer close, socket
+      --  error), the application message on the wire is truncated and the
+      --  connection must not be reused — see the exception handler.
+      Progress   : Boolean := False;
    begin
       if not Self.Connected then
          raise Transport_Error with "TCP write on closed transport";
@@ -277,22 +354,111 @@ package body AHT.Transport.TCP is
             Cursor : Stream_Element_Offset := Slice'First;
          begin
             To_SEA (Data (Pos .. Pos + Window - 1), Slice);
+
+            --  The socket is non-blocking, so a single Send_Socket only
+            --  accepts whatever the kernel buffer has room for. Park in
+            --  Check_Selector until the socket is writable, send the
+            --  partial count, advance, re-park — so the write deadline
+            --  and Abort_Pending bite at every park, never inside an
+            --  in-flight syscall.
             while Cursor <= Slice'Last loop
-               Send_Socket (Self.Socket, Slice (Cursor .. Slice'Last), Sent);
-               exit when Sent < Cursor;
-               Cursor := Sent + 1;
+               declare
+                  Timeout : Duration := Duration'Last;
+               begin
+                  if Self.Has_Write_Deadline then
+                     declare
+                        Remaining : constant Time_Span :=
+                          Self.Write_Deadline_At - Clock;
+                     begin
+                        if Remaining <= Time_Span_Zero then
+                           Log.Debug ("write deadline expired (pre-park)");
+                           raise Timeout_Error
+                             with "TCP write deadline expired";
+                        end if;
+                        Timeout := To_Duration (Remaining);
+                     end;
+                  end if;
+
+                  Empty (W_Set);
+                  Set (W_Set, Self.Socket);
+                  Check_Selector
+                    (Selector     => Self.Write_Selector,
+                     R_Socket_Set => R_Set,
+                     W_Socket_Set => W_Set,
+                     Status       => Status,
+                     Timeout      => Timeout);
+
+                  case Status is
+                     when Completed =>
+                        begin
+                           Send_Socket
+                             (Self.Socket, Slice (Cursor .. Slice'Last), Sent);
+                           if Sent >= Cursor then
+                              Cursor := Sent + 1;
+                              Progress := True;
+                           else
+                              --  Selector reported writable but the send
+                              --  accepted zero bytes (Last < First). On a
+                              --  non-blocking socket a transient can't-send is
+                              --  EAGAIN (the Socket_Error path below), so a
+                              --  zero-length send on a ready socket is GNAT's
+                              --  closed-peer signal (cf. Stream_Write's
+                              --  "exit when Index < First"). Re-parking would
+                              --  busy-spin on the still-writable socket, so
+                              --  fail fast instead.
+                              raise Transport_Error
+                                with "TCP write: peer closed connection";
+                           end if;
+                        exception
+                           when Ex : Socket_Error =>
+                              if Resolve_Exception (Ex)
+                                /= Resource_Temporarily_Unavailable
+                              then
+                                 raise;
+                              end if;
+                              --  would-block: re-park
+                        end;
+                     when Expired =>
+                        Log.Debug ("write deadline expired");
+                        raise Timeout_Error with "TCP write deadline expired";
+                     when Aborted =>
+                        Log.Debug ("write aborted");
+                        raise Aborted_Error with "TCP write aborted";
+                  end case;
+               end;
             end loop;
-            if Cursor <= Slice'Last then
-               raise Transport_Error
-                 with "TCP write: short send (peer closed?)";
-            end if;
             Pos := Pos + Window;
          end;
       end loop;
    exception
+      --  Poison the connection on any fatal write so a desynchronised or
+      --  dead socket is never reused (the TCP analogue of TLS's
+      --  Drop_Connection): Is_Connected then reads False and a retry raises
+      --  "TCP write on closed transport". The decision is by *cause*, not
+      --  just by how many bytes went out:
       when E : Socket_Error =>
+         --  Non-EAGAIN socket error = the endpoint is gone (reset, broken
+         --  pipe, ...). Dead regardless of progress, so always poison. We
+         --  poison rather than Close because a concurrent reader may still
+         --  be parked in Check_Selector and Close would race its selector.
+         Poison (Self);
          raise Transport_Error with
            "TCP write failed: " & Ada.Exceptions.Exception_Message (E);
+      when Transport_Error =>
+         --  Peer-closed-mid-write (the zero-byte send signal) — the endpoint
+         --  is gone, so always poison. (The pre-loop "closed transport"
+         --  guard also lands here; Poison is then a harmless no-op.)
+         Poison (Self);
+         raise;
+      when others =>
+         --  A *local* interruption (Timeout_Error / Aborted_Error). With no
+         --  byte accepted the byte stream is intact and the connection stays
+         --  reusable; only a partial send (Progress) truncated a message and
+         --  forces a teardown.
+         if Progress then
+            Poison (Self);
+         end if;
+         raise;
    end Write;
 
    overriding procedure Read
@@ -316,53 +482,78 @@ package body AHT.Transport.TCP is
          raise Transport_Error with "TCP read on closed transport";
       end if;
 
-      --  Resolve the compound deadline. Subtracting the stored
-      --  absolute instant from now gives *remaining* budget; if it's
-      --  gone (or just about to go), fail without even parking.
-      if Self.Has_Deadline then
-         declare
-            Remaining : constant Time_Span :=
-              Self.Deadline_At - Clock;
-         begin
-            if Remaining <= Time_Span_Zero then
-               Log.Debug ("read deadline expired (pre-park)");
+      loop
+         Timeout := Duration'Last;
+
+         --  Resolve the compound deadline. Subtracting the stored
+         --  absolute instant from now gives *remaining* budget; if it's
+         --  gone (or just about to go), fail without even parking.
+         if Self.Has_Deadline then
+            declare
+               Remaining : constant Time_Span :=
+                 Self.Deadline_At - Clock;
+            begin
+               if Remaining <= Time_Span_Zero then
+                  Log.Debug ("read deadline expired (pre-park)");
+                  raise Timeout_Error with "TCP read deadline expired";
+               end if;
+               Timeout := To_Duration (Remaining);
+            end;
+         end if;
+
+         --  Park in Check_Selector first so the read honours the
+         --  deadline (via Timeout) and stays interruptible by
+         --  Abort_Pending (via Abort_Selector on the same selector).
+         Empty (R_Set);
+         Set (R_Set, Self.Socket);
+         Check_Selector
+           (Selector     => Self.Selector,
+            R_Socket_Set => R_Set,
+            W_Socket_Set => W_Set,
+            Status       => Status,
+            Timeout      => Timeout);
+
+         case Status is
+            when Completed =>
+               null;
+            when Expired =>
+               Log.Debug ("read deadline expired");
                raise Timeout_Error with "TCP read deadline expired";
+            when Aborted =>
+               Log.Debug ("read aborted");
+               raise Aborted_Error with "TCP read aborted";
+         end case;
+
+         --  The socket is non-blocking: a Completed wake only means the
+         --  selector saw readiness, which can be spurious. If the receive
+         --  would block, re-park rather than erroring.
+         declare
+            Would_Block : Boolean := False;
+         begin
+            begin
+               Receive_Socket (Self.Socket, Buffer, Got_Last);
+            exception
+               when Ex : Socket_Error =>
+                  if Resolve_Exception (Ex)
+                    = Resource_Temporarily_Unavailable
+                  then
+                     Would_Block := True;
+                  else
+                     raise;
+                  end if;
+            end;
+
+            if not Would_Block then
+               if Got_Last < Buffer'First then
+                  Last := 0;
+               else
+                  From_SEA (Buffer, Buffer'First, Got_Last, Data, Count);
+                  Last := Data'First + Count - 1;
+               end if;
+               return;
             end if;
-            Timeout := To_Duration (Remaining);
          end;
-      end if;
-
-      --  Park in Check_Selector first so the read honours the
-      --  deadline (via Timeout) and stays interruptible by
-      --  Abort_Pending (via Abort_Selector on the same selector).
-      Set (R_Set, Self.Socket);
-      Check_Selector
-        (Selector     => Self.Selector,
-         R_Socket_Set => R_Set,
-         W_Socket_Set => W_Set,
-         Status       => Status,
-         Timeout      => Timeout);
-
-      case Status is
-         when Completed =>
-            null;
-         when Expired =>
-            Log.Debug ("read deadline expired");
-            raise Timeout_Error with "TCP read deadline expired";
-         when Aborted =>
-            Log.Debug ("read aborted");
-            raise Aborted_Error with "TCP read aborted";
-      end case;
-
-      Receive_Socket (Self.Socket, Buffer, Got_Last);
-
-      if Got_Last < Buffer'First then
-         Last := 0;
-         return;
-      end if;
-
-      From_SEA (Buffer, Buffer'First, Got_Last, Data, Count);
-      Last := Data'First + Count - 1;
+      end loop;
    exception
       when E : Socket_Error =>
          raise Transport_Error with
@@ -371,7 +562,11 @@ package body AHT.Transport.TCP is
 
    overriding procedure Close (Self : in out TCP_Transport) is
    begin
-      if Self.Connected then
+      --  Guard on the FD, not Connected: a poisoned transport has already
+      --  set Connected False but still owns the socket (Poison defers the
+      --  reclaim to here), so this single-threaded lifecycle Close must
+      --  still free it. Double-Close is a no-op once Socket is No_Socket.
+      if Self.Socket /= No_Socket then
          Self.Connected := False;
          Log.Debug ("close");
 
@@ -397,10 +592,16 @@ package body AHT.Transport.TCP is
          exception
             when Socket_Error => null;
          end;
+         begin
+            Close_Selector (Self.Write_Selector);
+         exception
+            when Socket_Error => null;
+         end;
          Self.Selector_Open := False;
       end if;
 
       Self.Has_Deadline := False;
+      Self.Has_Write_Deadline := False;
    end Close;
 
    overriding function Is_Connected (Self : TCP_Transport) return Boolean is
@@ -419,16 +620,62 @@ package body AHT.Transport.TCP is
       end if;
    end Set_Read_Deadline;
 
+   overriding procedure Set_Write_Deadline
+     (Self     : in out TCP_Transport;
+      Deadline : Duration)
+   is
+   begin
+      if Deadline = Duration'Last then
+         Self.Has_Write_Deadline := False;
+      else
+         Self.Has_Write_Deadline := True;
+         Self.Write_Deadline_At := Clock + To_Time_Span (Deadline);
+      end if;
+   end Set_Write_Deadline;
+
    overriding procedure Abort_Pending (Self : in out TCP_Transport) is
    begin
       if Self.Selector_Open then
+         --  Wake whichever direction is parked: the read selector for a
+         --  blocked Read, the write selector for a blocked Write. Both
+         --  aborts are idempotent, so signalling the idle one is harmless.
          begin
             Abort_Selector (Self.Selector);
-            Log.Debug ("abort pending");
+         exception
+            when Socket_Error => null;
+         end;
+         begin
+            Abort_Selector (Self.Write_Selector);
+         exception
+            when Socket_Error => null;
+         end;
+         Log.Debug ("abort pending");
+      end if;
+   end Abort_Pending;
+
+   procedure Poison (Self : in out TCP_Transport) is
+   begin
+      if not Self.Connected then
+         return;  --  already poisoned or closed
+      end if;
+      Self.Connected := False;
+      Log.Debug ("poison");
+
+      --  Shutdown (not close) the data socket. This wakes a reader parked
+      --  in Check_Selector on Self.Selector — the socket goes readable and
+      --  Receive_Socket then returns 0 (EOF) — and a parked writer with
+      --  EPIPE, all without freeing the FD or selectors. Closing the
+      --  selectors here would race that concurrent reader (GNAT forbids
+      --  Close_Selector while a task is in Check_Selector); reclamation is
+      --  left to the single-threaded Close, which the Socket /= No_Socket
+      --  guard lets run even though Connected is already False.
+      if Self.Socket /= No_Socket then
+         begin
+            Shutdown_Socket (Self.Socket, Shut_Read_Write);
          exception
             when Socket_Error => null;
          end;
       end if;
-   end Abort_Pending;
+   end Poison;
 
 end AHT.Transport.TCP;

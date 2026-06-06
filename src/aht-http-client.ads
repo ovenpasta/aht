@@ -90,6 +90,18 @@ package AHT.HTTP.Client is
    --  `AHT.Transport.TLS.TLS_Error` on a TLS failure such as an
    --  untrusted/invalid certificate chain. The transport is closed
    --  in every exit path.
+   --
+   --  Retry-safety: once `Self.Timeout_Seconds > 0` arms a write
+   --  deadline (or a `Cancel` fires), a `Timeout_Error` / `Aborted_Error`
+   --  can be raised *while the request is mid-flight on the wire* — some
+   --  request bytes may already have reached the peer (see the partial-send
+   --  note on `AHT.Transport.Write`). Such a failure is therefore
+   --  **retry-unsafe** for a non-idempotent request: the library cannot tell
+   --  "never sent" from "partially sent", so a blind retry could duplicate a
+   --  side effect. The fresh-per-request transport is closed on the exit
+   --  path, so the partially-written connection is never silently reused;
+   --  whether to retry is the caller's call (safe for idempotent methods,
+   --  unsafe otherwise).
 
    procedure Send
      (Self   : in out Client_Type;
