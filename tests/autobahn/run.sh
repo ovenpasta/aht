@@ -54,6 +54,12 @@ set -eu
 cd "$(dirname "$0")"
 HERE=$(pwd)
 
+# Build profile (debug|release) the testee was built under; selects the
+# per-mode Exec_Dir (bin/$BUILD_MODE). Defaults to debug, matching the
+# `alr exec -- gprbuild -P tests/autobahn/autobahn.gpr` build hint above.
+BUILD_MODE=${BUILD_MODE:-debug}
+BIN="bin/$BUILD_MODE/aht_autobahn"
+
 URL=${AUTOBAHN_URL:-ws://127.0.0.1:9001}
 AGENT=${AUTOBAHN_AGENT:-AHT}
 IMAGE=${AUTOBAHN_IMAGE:-crossbario/autobahn-testsuite}
@@ -89,8 +95,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if [ ! -x bin/aht_autobahn ]; then
-    echo "FATAL: bin/aht_autobahn not built. Build it first, as yourself:"
+if [ ! -x "$BIN" ]; then
+    echo "FATAL: $BIN not built. Build it first, as yourself:"
     echo "    alr exec -- gprbuild -P tests/autobahn/autobahn.gpr"
     exit 2
 fi
@@ -151,6 +157,6 @@ else
 fi
 
 echo "==> running cases (agent $AGENT)"
-bin/aht_autobahn "$URL" "$AGENT"
+"$BIN" "$URL" "$AGENT"
 
 echo "==> reports in $HERE/reports (open index.html / index.json)"

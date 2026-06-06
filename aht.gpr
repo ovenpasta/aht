@@ -5,11 +5,17 @@ library project Aht is
 
    for Languages   use ("Ada", "C");
    for Source_Dirs use ("src", "csrc");
-   for Object_Dir  use "obj";
-   for Library_Dir use "lib";
 
    type Build_Mode_Kind is ("debug", "release");
    Build_Mode : Build_Mode_Kind := external ("BUILD_MODE", "debug");
+
+   --  Output dirs are per-mode so debug and release artifacts never
+   --  clobber each other (a release build used to overwrite the debug
+   --  .o/.ali/libaht.a in a shared dir, forcing a full rebuild on the
+   --  next debug run). Consumers reach the library through this project,
+   --  so the suffixed Library_Dir resolves automatically.
+   for Object_Dir  use "obj/" & Build_Mode;
+   for Library_Dir use "lib/" & Build_Mode;
 
    --  Absolute paths: gprbuild runs the compilers from the object dir, so
    --  a project-relative path would not resolve. Aht'Project_Dir is the

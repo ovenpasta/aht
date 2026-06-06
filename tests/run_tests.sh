@@ -15,6 +15,12 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
+# Build profile (debug|release). Exported so the gpr `external("BUILD_MODE")`
+# picks it up for both `alr build` and the tests build, and so the per-mode
+# Exec_Dir (tests/bin/$BUILD_MODE) resolves to the binaries we just built.
+BUILD_MODE=${BUILD_MODE:-debug}
+export BUILD_MODE
+
 VENV=tests/.venv
 LOG=$(mktemp -t aht-server.XXXXXX.log)
 HTTP_PID=
@@ -125,7 +131,7 @@ fi
 FAILED=0
 TOTAL=0
 for name in $NAMES; do
-    bin="tests/bin/$name"
+    bin="tests/bin/$BUILD_MODE/$name"
     TOTAL=$((TOTAL + 1))
     if [ ! -x "$bin" ]; then
         echo "  MISSING $name (not built)"
