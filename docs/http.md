@@ -8,7 +8,7 @@ Packages under `AHT.HTTP`:
 | `AHT.HTTP.Methods` | implemented |
 | `AHT.HTTP.Status` | implemented |
 | `AHT.HTTP.Headers` | implemented |
-| `AHT.HTTP.Request` | implemented (wire write) |
+| `AHT.HTTP.Request` | implemented (buffered + streaming wire write) |
 | `AHT.HTTP.Response` | implemented (wire read) |
 | `AHT.HTTP.IO` | implemented (chunked decoder has streaming + buffered overloads) |
 | `AHT.HTTP.Client` | implemented (HTTP + HTTPS, sync + streaming + async, with cancel) |
@@ -90,12 +90,73 @@ framed. It does **not** invent `Host`, `User-Agent`, `Connection`,
 or `Authorization`: routing and policy headers stay the caller's job
 (the `Client` layer above is the one that merges them in).
 
-If the caller sets `Transfer-Encoding`, `Write` raises
-`Protocol_Error`. v1 does not do chunked request bodies — `Write`
-transcribes `Body_B` verbatim, and emitting a TE-chunked header
-with raw body bytes would produce malformed wire that the peer
-would reject (or worse, misparse). Streaming upload is a separate
-API still to land.
+### Anti-smuggling framing checks
+
+`Write` (and `Write_Streaming` below) reject framing that RFC 7230
+§3.3.3 calls out as a request-smuggling hazard, each raising
+`Protocol_Error` before any wire byte is written:
+
+- **`Transfer-Encoding` from the caller is rejected.** v1's buffered
+  `Write` transcribes `Body_B` verbatim, so a TE-chunked header over
+  raw bytes is malformed wire; the chunked encoder is `Write_Streaming`'s
+  job and it owns that header. Use `Write_Streaming` (without a
+  `Content-Length`) for chunked upload.
+- **A duplicate `Content-Length` is rejected.** The header map allows
+  repeated names, and intermediaries can disagree on which value wins.
+- **A single caller `Content-Length` must match the body.** For
+  buffered `Write` it must equal `Body_B.Length`; a declared-vs-actual
+  mismatch (e.g. `Content-Length: 1` over a 4-byte body) would truncate
+  the upload or hang the peer.
+
+### Streaming upload — `Write_Streaming`
+
+```ada
+type Body_Source is limited interface;
+procedure Read_Chunk
+  (Self : in out Body_Source;
+   Buf  : out AHT.Bytes.Byte_Array;
+   Last : out Natural) is abstract;
+
+subtype Byte_Count is Interfaces.Integer_64 range 0 .. Interfaces.Integer_64'Last;
+procedure Set_Content_Length (Self : in out Request_Type; N : Byte_Count);
+
+procedure Write_Streaming
+  (Self        : Request_Type;
+   T           : in out AHT.Transport.Transport_Type'Class;
+   Source      : in out Body_Source'Class;
+   Abort_Check : access function return Boolean := null);
+```
+
+`Write_Streaming` pumps a request body from a pull-style `Source`
+straight to the wire, never buffering it — so a multi-GB upload runs in
+O(1) memory. The caller derives a concrete type from `Body_Source` and
+implements `Read_Chunk`, which fills the library-provided window
+`Buf (Buf'First .. Last)` with the next bytes and signals end-of-stream
+with `Last < Buf'First` (canonically `Last = 0`). Upload state (a file
+handle, a generator cursor) lives in that derived type, so no closure or
+`'Unrestricted_Access` is needed; the source is passed by reference and
+the whole upload completes before the call returns.
+
+The head is built exactly like `Write` (same request line, same
+lowercase headers, same anti-smuggling checks). Framing is header-driven:
+
+- **Fixed** — a single `Content-Length` (set it with `Set_Content_Length`,
+  which takes a 64-bit `Byte_Count` so multi-GB sizes are expressible)
+  streams exactly N raw bytes. A source that signals EOF early
+  (under-run) or hands over more than N (over-run) raises
+  `Protocol_Error`; the stream stops at exactly N.
+- **Chunked** — with no `Content-Length`, the encoder emits
+  `Transfer-Encoding: chunked` and frames each window as
+  `{hex-size}CRLF {bytes} CRLF`, closing with `0 CRLF CRLF`
+  (lowercase hex chunk size, no leading zeros — RFC 7230 §4.1). An empty
+  body is just the terminator.
+
+`Abort_Check`, when non-null, is polled between windows; a `True` result
+raises `AHT.Transport.Aborted_Error` mid-body. It is a cheap secondary
+fast-exit — the real bound on a stuck send is the transport's
+non-blocking write deadline / `Abort_Pending`. A `Timeout_Error` /
+`Aborted_Error` can fire after some body bytes have reached the peer, so
+a failed streaming upload is retry-unsafe for a non-idempotent request.
 
 ## `AHT.HTTP.Response`
 

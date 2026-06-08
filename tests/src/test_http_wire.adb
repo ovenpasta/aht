@@ -100,6 +100,61 @@ procedure Test_HTTP_Wire is
    function Contains (Haystack, Needle : String) return Boolean is
      (Ada.Strings.Fixed.Index (Haystack, Needle) /= 0);
 
+   --  Test-only pull source: hands out its stored bytes in slices of at
+   --  most Chunk per Read_Chunk so a small payload still exercises the
+   --  multi-window path; signals EOF once drained.
+   type Array_Source is new AHT.HTTP.Request.Body_Source with record
+      Data   : AHT.Bytes.Buffer;
+      Cursor : Positive := 1;
+      Chunk  : Positive := Positive'Last;
+   end record;
+
+   overriding procedure Read_Chunk
+     (Self : in out Array_Source;
+      Buf  : out AHT.Bytes.Byte_Array;
+      Last : out Natural);
+
+   overriding procedure Read_Chunk
+     (Self : in out Array_Source;
+      Buf  : out AHT.Bytes.Byte_Array;
+      Last : out Natural)
+   is
+      Remaining : constant Natural := Self.Data.Length - (Self.Cursor - 1);
+      N         : Natural := Remaining;
+   begin
+      if Remaining = 0 then
+         Last := Buf'First - 1;  --  EOF
+         return;
+      end if;
+      if N > Self.Chunk  then N := Self.Chunk;  end if;
+      if N > Buf'Length  then N := Buf'Length;  end if;
+      for I in 0 .. N - 1 loop
+         Buf (Buf'First + I) := Self.Data (Self.Cursor + I);
+      end loop;
+      Self.Cursor := Self.Cursor + N;
+      Last := Buf'First + N - 1;
+   end Read_Chunk;
+
+   procedure Load_Source
+     (S : in out Array_Source; Str : String; Chunk : Positive := Positive'Last)
+   is
+   begin
+      S.Data.Set (Str);
+      S.Cursor := 1;
+      S.Chunk  := Chunk;
+   end Load_Source;
+
+   --  Stateful cancel hook: returns True only once it has been polled
+   --  more than Abort_After times, so a test can flip cancel mid-stream.
+   Abort_After : Natural := 0;
+   Abort_Calls : Natural := 0;
+
+   function Abort_Flag return Boolean is
+   begin
+      Abort_Calls := Abort_Calls + 1;
+      return Abort_Calls > Abort_After;
+   end Abort_Flag;
+
 begin
    --  Case 1: GET — request line, caller-supplied headers, no body,
    --  no synthesized Content-Length.
@@ -538,6 +593,386 @@ begin
       if Last /= Leftover'First + 7 then
          Fail ("HEAD: trailing bytes consumed; Last =" & Last'Image);
       end if;
+   end;
+
+   --  Case 17: Write_Streaming chunked, multi-window. No Content-Length
+   --  is set, so the encoder frames each window as {hex}CRLF data CRLF
+   --  and closes with 0 CRLF CRLF. "Hello world" at Chunk=5 → 5/5/1.
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+      Src : Array_Source;
+   begin
+      Req.Method := AHT.HTTP.Methods.POST;
+      Req.Target := AHT.URL.Parse ("http://example.com/up");
+      Req.Headers.Set ("host", "example.com");
+      Load_Source (Src, "Hello world", Chunk => 5);
+
+      Req.Write_Streaming (T, Src);
+
+      declare
+         Wire : constant String := Written_To_String (T);
+         Body_Wire : constant String :=
+           ASCII.CR & ASCII.LF & ASCII.CR & ASCII.LF
+           & "5" & ASCII.CR & ASCII.LF & "Hello" & ASCII.CR & ASCII.LF
+           & "5" & ASCII.CR & ASCII.LF & " worl" & ASCII.CR & ASCII.LF
+           & "1" & ASCII.CR & ASCII.LF & "d" & ASCII.CR & ASCII.LF
+           & "0" & ASCII.CR & ASCII.LF & ASCII.CR & ASCII.LF;
+      begin
+         if not Contains (Wire, "transfer-encoding: chunked"
+                                & ASCII.CR & ASCII.LF) then
+            Fail ("stream-chunked: TE header missing: """ & Wire & """");
+         end if;
+         if Contains (Wire, "content-length") then
+            Fail ("stream-chunked: unexpected Content-Length: """
+                  & Wire & """");
+         end if;
+         if not Contains (Wire, Body_Wire) then
+            Fail ("stream-chunked: body framing wrong: """ & Wire & """");
+         end if;
+      end;
+   end;
+
+   --  Case 18: Write_Streaming chunked, empty body (immediate EOF) →
+   --  just the 0-size terminator after the head.
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+      Src : Array_Source;
+   begin
+      Req.Method := AHT.HTTP.Methods.POST;
+      Req.Target := AHT.URL.Parse ("http://example.com/up");
+      Load_Source (Src, "");
+
+      Req.Write_Streaming (T, Src);
+
+      declare
+         Wire : constant String := Written_To_String (T);
+      begin
+         if not Contains (Wire, "transfer-encoding: chunked"
+                                & ASCII.CR & ASCII.LF) then
+            Fail ("stream-empty: TE header missing: """ & Wire & """");
+         end if;
+         if Wire (Wire'Last - 6 .. Wire'Last) /=
+           ASCII.CR & ASCII.LF & "0"
+           & ASCII.CR & ASCII.LF & ASCII.CR & ASCII.LF
+         then
+            Fail ("stream-empty: terminator wrong: """ & Wire & """");
+         end if;
+      end;
+   end;
+
+   --  Case 19: Write_Streaming fixed framing. A single Content-Length
+   --  selects raw (un-framed) streaming of exactly N bytes across
+   --  several windows; no chunk sizes appear.
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+      Src : Array_Source;
+   begin
+      Req.Method := AHT.HTTP.Methods.PUT;
+      Req.Target := AHT.URL.Parse ("http://example.com/up");
+      Req.Set_Content_Length (11);
+      Load_Source (Src, "Hello world", Chunk => 4);
+
+      Req.Write_Streaming (T, Src);
+
+      declare
+         Wire : constant String := Written_To_String (T);
+      begin
+         if not Contains (Wire, "content-length: 11"
+                                & ASCII.CR & ASCII.LF) then
+            Fail ("stream-fixed: Content-Length missing: """ & Wire & """");
+         end if;
+         if Contains (Wire, "transfer-encoding") then
+            Fail ("stream-fixed: unexpected TE: """ & Wire & """");
+         end if;
+         if not Contains (Wire,
+            ASCII.CR & ASCII.LF & ASCII.CR & ASCII.LF & "Hello world")
+         then
+            Fail ("stream-fixed: raw body wrong: """ & Wire & """");
+         end if;
+      end;
+   end;
+
+   --  Case 20: fixed framing under-run — source EOFs before N bytes.
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+      Src : Array_Source;
+   begin
+      Req.Method := AHT.HTTP.Methods.PUT;
+      Req.Target := AHT.URL.Parse ("http://example.com/up");
+      Req.Set_Content_Length (20);
+      Load_Source (Src, "short");
+      begin
+         Req.Write_Streaming (T, Src);
+         Fail ("stream-underrun: returned normally");
+      exception
+         when AHT.HTTP.Protocol_Error => null;
+         when E : others =>
+            Fail ("stream-underrun: wrong exception: "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+   end;
+
+   --  Case 21: fixed framing over-run — source hands over more than N.
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+      Src : Array_Source;
+   begin
+      Req.Method := AHT.HTTP.Methods.PUT;
+      Req.Target := AHT.URL.Parse ("http://example.com/up");
+      Req.Set_Content_Length (3);
+      Load_Source (Src, "longer");
+      begin
+         Req.Write_Streaming (T, Src);
+         Fail ("stream-overrun: returned normally");
+      exception
+         when AHT.HTTP.Protocol_Error => null;
+         when E : others =>
+            Fail ("stream-overrun: wrong exception: "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+   end;
+
+   --  Case 22: caller set Transfer-Encoding on Write_Streaming — the
+   --  encoder owns that header, so this is rejected before any wire byte.
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+      Src : Array_Source;
+   begin
+      Req.Method := AHT.HTTP.Methods.POST;
+      Req.Target := AHT.URL.Parse ("http://example.com/up");
+      Req.Headers.Set ("transfer-encoding", "chunked");
+      Load_Source (Src, "data");
+      begin
+         Req.Write_Streaming (T, Src);
+         Fail ("stream-caller-TE: returned normally");
+      exception
+         when AHT.HTTP.Protocol_Error =>
+            if T.Written.Length /= 0 then
+               Fail ("stream-caller-TE: wrote bytes before failing");
+            end if;
+         when E : others =>
+            Fail ("stream-caller-TE: wrong exception: "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+   end;
+
+   --  Case 23: duplicate Content-Length (caller Appends two) → rejected
+   --  as a request-smuggling hazard.
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+      Src : Array_Source;
+   begin
+      Req.Method := AHT.HTTP.Methods.PUT;
+      Req.Target := AHT.URL.Parse ("http://example.com/up");
+      Req.Headers.Append ("content-length", "5");
+      Req.Headers.Append ("content-length", "6");
+      Load_Source (Src, "hello");
+      begin
+         Req.Write_Streaming (T, Src);
+         Fail ("stream-dup-CL: returned normally");
+      exception
+         when AHT.HTTP.Protocol_Error =>
+            if T.Written.Length /= 0 then
+               Fail ("stream-dup-CL: wrote bytes before failing");
+            end if;
+         when E : others =>
+            Fail ("stream-dup-CL: wrong exception: "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+   end;
+
+   --  Case 24: buffered Write with a declared Content-Length that does
+   --  not match the body → Protocol_Error (RFC 7230 §3.3.3 framing lie).
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+   begin
+      Req.Method := AHT.HTTP.Methods.POST;
+      Req.Target := AHT.URL.Parse ("http://example.com/echo");
+      Req.Body_B.Set ("ping!");          --  5 bytes
+      Req.Headers.Set ("content-length", "1");
+      begin
+         Req.Write (T);
+         Fail ("buffered-CL-mismatch: returned normally");
+      exception
+         when AHT.HTTP.Protocol_Error =>
+            if T.Written.Length /= 0 then
+               Fail ("buffered-CL-mismatch: wrote bytes before failing");
+            end if;
+         when E : others =>
+            Fail ("buffered-CL-mismatch: wrong exception: "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+   end;
+
+   --  Case 25: buffered Write with a matching caller Content-Length ships
+   --  verbatim (the single-CL == body path is allowed).
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+   begin
+      Req.Method := AHT.HTTP.Methods.POST;
+      Req.Target := AHT.URL.Parse ("http://example.com/echo");
+      Req.Body_B.Set ("ping!");
+      Req.Headers.Set ("content-length", "5");
+      Req.Write (T);
+      declare
+         Wire : constant String := Written_To_String (T);
+      begin
+         if not Contains (Wire, "content-length: 5"
+                                & ASCII.CR & ASCII.LF) then
+            Fail ("buffered-CL-match: CL missing: """ & Wire & """");
+         end if;
+         if not Contains (Wire,
+            ASCII.CR & ASCII.LF & ASCII.CR & ASCII.LF & "ping!")
+         then
+            Fail ("buffered-CL-match: body missing: """ & Wire & """");
+         end if;
+      end;
+   end;
+
+   --  Case 26: chunk-size hex across the digit-count boundary. A single
+   --  window of 255 bytes frames as "ff"; 256 bytes as "100".
+   declare
+      T255, T256 : Transport;
+      R255, R256 : AHT.HTTP.Request.Request_Type;
+      S255, S256 : Array_Source;
+   begin
+      R255.Method := AHT.HTTP.Methods.POST;
+      R255.Target := AHT.URL.Parse ("http://example.com/up");
+      Load_Source (S255, String'(1 .. 255 => 'A'));
+      R255.Write_Streaming (T255, S255);
+
+      R256.Method := AHT.HTTP.Methods.POST;
+      R256.Target := AHT.URL.Parse ("http://example.com/up");
+      Load_Source (S256, String'(1 .. 256 => 'A'));
+      R256.Write_Streaming (T256, S256);
+
+      if not Contains (Written_To_String (T255),
+         ASCII.CR & ASCII.LF & ASCII.CR & ASCII.LF & "ff" & ASCII.CR & ASCII.LF)
+      then
+         Fail ("hex-255: size not ""ff""");
+      end if;
+      if not Contains (Written_To_String (T256),
+         ASCII.CR & ASCII.LF & ASCII.CR & ASCII.LF & "100" & ASCII.CR & ASCII.LF)
+      then
+         Fail ("hex-256: size not ""100""");
+      end if;
+   end;
+
+   --  Case 27: 64-bit Content-Length. Set_Content_Length images a value
+   --  above Natural'Last correctly, and the fixed pump accounts in
+   --  Byte_Count — a source that under-runs that huge N raises
+   --  Protocol_Error without integer overflow (no GBs written).
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+      Src : Array_Source;
+   begin
+      Req.Method := AHT.HTTP.Methods.PUT;
+      Req.Target := AHT.URL.Parse ("http://example.com/up");
+      Req.Set_Content_Length (5_000_000_000);
+      if Req.Headers.Get ("content-length") /= "5000000000" then
+         Fail ("64bit: CL image = """
+               & Req.Headers.Get ("content-length") & """");
+      end if;
+      Load_Source (Src, "abc");
+      begin
+         Req.Write_Streaming (T, Src);
+         Fail ("64bit: under-run returned normally");
+      exception
+         when AHT.HTTP.Protocol_Error => null;
+         when E : others =>
+            Fail ("64bit: wrong exception: "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+   end;
+
+   --  Case 28: between-window cancel. The hook flips True after the first
+   --  window, so Write_Streaming raises Aborted_Error mid-body.
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+      Src : Array_Source;
+   begin
+      Req.Method := AHT.HTTP.Methods.POST;
+      Req.Target := AHT.URL.Parse ("http://example.com/up");
+      Load_Source (Src, "Hello world", Chunk => 5);
+      Abort_Calls := 0;
+      Abort_After := 1;
+      begin
+         Req.Write_Streaming (T, Src, Abort_Flag'Access);
+         Fail ("stream-cancel: returned normally");
+      exception
+         when AHT.Transport.Aborted_Error => null;
+         when E : others =>
+            Fail ("stream-cancel: wrong exception: "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+   end;
+
+   --  Case 29: fixed framing over-run that sums to exactly N across
+   --  windows and then keeps going. With Content-Length 4, Chunk 4 and an
+   --  8-byte source, window 1 hits Sent = N exactly; the pump must read
+   --  once more, see the trailing bytes, and raise rather than silently
+   --  truncate to N. (Regression for the dropped `exit when Sent = N`.)
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+      Src : Array_Source;
+   begin
+      Req.Method := AHT.HTTP.Methods.PUT;
+      Req.Target := AHT.URL.Parse ("http://example.com/up");
+      Req.Set_Content_Length (4);
+      Load_Source (Src, "abcdefgh", Chunk => 4);
+      begin
+         Req.Write_Streaming (T, Src);
+         Fail ("stream-overrun-exact: returned normally");
+      exception
+         when AHT.HTTP.Protocol_Error => null;
+         when E : others =>
+            Fail ("stream-overrun-exact: wrong exception: "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+   end;
+
+   --  Case 30: a malformed single Content-Length is rejected by the strict
+   --  Parse_Byte_Count (empty, non-digit, and overflow past Byte_Count'Last),
+   --  before any wire byte. Set the raw header directly since
+   --  Set_Content_Length only ever emits valid digits.
+   declare
+      procedure Expect_Bad_CL (Val : String) is
+         T   : Transport;
+         Req : AHT.HTTP.Request.Request_Type;
+         Src : Array_Source;
+      begin
+         Req.Method := AHT.HTTP.Methods.PUT;
+         Req.Target := AHT.URL.Parse ("http://example.com/up");
+         Req.Headers.Set ("content-length", Val);
+         Load_Source (Src, "data");
+         Req.Write_Streaming (T, Src);
+         Fail ("stream-bad-CL: returned normally for """ & Val & """");
+      exception
+         when AHT.HTTP.Protocol_Error =>
+            if T.Written.Length /= 0 then
+               Fail ("stream-bad-CL: wrote bytes before failing for """
+                     & Val & """");
+            end if;
+         when E : others =>
+            Fail ("stream-bad-CL: wrong exception for """ & Val & """: "
+                  & Ada.Exceptions.Exception_Name (E));
+      end Expect_Bad_CL;
+   begin
+      Expect_Bad_CL ("");
+      Expect_Bad_CL ("12x");
+      Expect_Bad_CL ("99999999999999999999999999");
    end;
 
    if Failures = 0 then
