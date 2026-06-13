@@ -213,6 +213,16 @@ package body AHT.Websocket.Client is
          null;
       end Wait_Closed;
 
+      procedure Begin_Closing (Already_Closed : out Boolean) is
+      begin
+         if Current = Closed then
+            Already_Closed := True;
+         else
+            Current        := Closing;
+            Already_Closed := False;
+         end if;
+      end Begin_Closing;
+
       procedure Try_Mark_Local_Close (Should_Send : out Boolean) is
       begin
          if Local_Closed then
@@ -1040,7 +1050,8 @@ package body AHT.Websocket.Client is
       Reason  : String := "";
       Timeout : Duration := 5.0)
    is
-      Should_Send : Boolean;
+      Should_Send    : Boolean;
+      Already_Closed : Boolean;
    begin
       if Self.State.Get = Connecting then
          --  Never handshook; nothing to do.
@@ -1082,7 +1093,20 @@ package body AHT.Websocket.Client is
          Self.Guard.Mark_Close_Sent;
          Self.Guard.Release;
       end if;
-      Self.State.Set (Closing);
+
+      --  Move to Closing, but never clobber a Closed the receiver may
+      --  have published while we were sending our Close frame (the
+      --  peer can EOF or echo Close mid-handshake, run the receiver's
+      --  exit path, and terminate). If that already happened there is
+      --  no receiver left to ever re-publish Closed, so an
+      --  unconditional Set (Closing) here would make Wait_Closed hang
+      --  forever -- detect it and tear down directly instead.
+      Self.State.Begin_Closing (Already_Closed);
+      if Already_Closed then
+         Self.Open := False;
+         Self.Active.Close;
+         return;
+      end if;
 
       --  Bounded wait: if the peer never echoes our Close in
       --  `Timeout` seconds, kick the receiver out via

@@ -751,6 +751,75 @@ begin
       end if;
    end;
 
+   --  Case 14: close-during-receiver-EOF race (regression). The fake
+   --  server completes the handshake then immediately drops the socket
+   --  (Hold => 0.0), so the receiver task hits EOF and winds up to
+   --  Closed while Close is still mid-handshake. The old Close did an
+   --  unconditional State.Set (Closing) after sending its Close frame,
+   --  clobbering the Closed the receiver had just published — and since
+   --  the receiver was already gone, Wait_Closed (barrier Current =
+   --  Closed) then parked forever. That deadlocked ~1-in-5 process
+   --  runs. Loop the scenario so a re-introduced clobber reliably hangs
+   --  (caught by the suite timeout) rather than slipping through; with
+   --  the fix every iteration tears down promptly.
+   declare
+      Iterations : constant := 50;
+   begin
+      Race_Loop :
+      for I in 1 .. Iterations loop
+         declare
+            Server   : Fake_Server;
+            Port     : AHT.URL.Port_Number;
+            Setup_Err, Run_Err : Unbounded_String;
+            C        : AHT.Websocket.Client.Client_Type;
+            Headers  : AHT.HTTP.Headers.Map;
+            Started, Ended : Time;
+         begin
+            Server.Configure
+              (Extra_Headers => "",
+               Post_Bytes    => AHT.Bytes.Byte_Array'(1 .. 0 => 0),
+               Hold_Seconds  => 0.0);
+            Server.Get_Port (Port, Setup_Err);
+            if Length (Setup_Err) > 0 then
+               Fail ("close-race: server setup: " & To_String (Setup_Err));
+               exit Race_Loop;
+            end if;
+
+            begin
+               AHT.Websocket.Client.Connect
+                 (Self          => C,
+                  URL           => URL_For (Port),
+                  Extra_Headers => Headers);
+            exception
+               when E : others =>
+                  Fail ("close-race: connect raised "
+                        & Ada.Exceptions.Exception_Name (E)
+                        & " (iter" & Integer'Image (I) & ")");
+                  Server.Wait_Done (Run_Err);
+                  exit Race_Loop;
+            end;
+
+            Started := Clock;
+            AHT.Websocket.Client.Close (C);
+            Ended := Clock;
+            Server.Wait_Done (Run_Err);
+
+            if AHT.Websocket.Client.Is_Open (C) then
+               Fail ("close-race: Is_Open true after Close (iter"
+                     & Integer'Image (I) & ")");
+               exit Race_Loop;
+            end if;
+            if Ended - Started > 1.0 then
+               Fail ("close-race: Close took"
+                     & Duration'Image (Ended - Started)
+                     & "s (iter" & Integer'Image (I)
+                     & "); handshake not completing promptly");
+               exit Race_Loop;
+            end if;
+         end;
+      end loop Race_Loop;
+   end;
+
    if Failures = 0 then
       Put_Line ("test_ws_handshake: OK");
       Ada.Command_Line.Set_Exit_Status (0);

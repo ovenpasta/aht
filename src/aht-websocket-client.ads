@@ -120,6 +120,15 @@ private
       procedure Set (S : State_Kind);
       function  Get return State_Kind;
       entry     Wait_Closed;
+      --  Atomically move Open/Closing -> Closing without ever
+      --  downgrading a Closed the receiver published concurrently.
+      --  Returns Already_Closed = True iff Current is already Closed
+      --  (the receiver has marked the connection closed -- via its
+      --  EOF/echo/protocol-failure paths -- and will not touch the
+      --  transport again); the caller must then skip the close
+      --  handshake, since Wait_Closed is already open and no further
+      --  Closed will ever be published.
+      procedure Begin_Closing (Already_Closed : out Boolean);
       --  Atomic "did we already send a Close on the wire?". Both
       --  the user-initiated Close path and the receiver's echo
       --  path call this; whichever wins (returns True via the
