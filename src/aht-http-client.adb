@@ -74,6 +74,12 @@ package body AHT.HTTP.Client is
    --  Sink receives the body bytes chunk-by-chunk. The buffered
    --  Send overload supplies a sink that appends to Resp.Body_B;
    --  Send_Streaming forwards the caller's sink unchanged.
+   --
+   --  Source, when non-null, streams the *request* body from the
+   --  caller's pull source (Write_Streaming) instead of emitting the
+   --  buffered Request.Body_B; Cancel feeds the between-window abort
+   --  check so a cross-task Cancel trips Aborted_Error out of the
+   --  upload loop even between transport syscalls.
    procedure Wire_Round_Trip
      (Self    : Client_Type;
       Working : AHT.HTTP.Request.Request_Type;
@@ -81,19 +87,36 @@ package body AHT.HTTP.Client is
       T       : in out AHT.Transport.Transport_Type'Class;
       Resp    : out AHT.HTTP.Response.Response_Type;
       Sink    : not null access
-        procedure (Chunk : AHT.Bytes.Byte_Array)) is
+        procedure (Chunk : AHT.Bytes.Byte_Array);
+      Source  : access AHT.HTTP.Request.Body_Source'Class := null;
+      Cancel  : access Cancel_State := null)
+   is
+      function Aborted return Boolean is
+        (Cancel /= null and then Cancel.Was_Cancelled);
    begin
-      --  Arm the write deadline before sending the request; arm the read
-      --  deadline only *after* the body is fully on the wire. Set_Read_Deadline
-      --  is a compound budget measured from when it is armed, so arming it up
-      --  front would let a slow/large upload burn the response-read budget and
-      --  surface a spurious Timeout_Error the instant the upload completes.
-      if Self.Timeout_Seconds > 0 then
-         T.Set_Write_Deadline (Duration (Self.Timeout_Seconds));
+      if Source /= null then
+         --  Streaming upload only: bound a stuck *send* (a peer that
+         --  stops reading mid-upload) by the same budget as the response
+         --  read, so a parked Write raises Timeout_Error instead of
+         --  hanging. The deadline bites only once control is inside
+         --  Transport.Write; a Source.Read_Chunk that blocks is the
+         --  caller's responsibility (see the spec). Buffered Write needs
+         --  no write deadline -- its body is already in RAM and drains in
+         --  one shot -- so this leaves the buffered Send path unchanged.
+         if Self.Timeout_Seconds > 0 then
+            T.Set_Write_Deadline (Duration (Self.Timeout_Seconds));
+         end if;
+         AHT.HTTP.Request.Write_Streaming
+           (Working, T, Source.all, Aborted'Access);
+      else
+         AHT.HTTP.Request.Write (Working, T);
       end if;
 
-      AHT.HTTP.Request.Write (Working, T);
-
+      --  Arm the read deadline only *after* the body is fully on the
+      --  wire. Set_Read_Deadline is a compound budget measured from when
+      --  it is armed, so arming it up front would let a slow/large upload
+      --  burn the response-read budget and surface a spurious
+      --  Timeout_Error the instant the upload completes.
       if Self.Timeout_Seconds > 0 then
          T.Set_Read_Deadline (Duration (Self.Timeout_Seconds));
       end if;
@@ -114,6 +137,11 @@ package body AHT.HTTP.Client is
    --  live transport is threaded into the protected state so a
    --  concurrent Cancel can Abort_Pending on it.
    --
+   --  `Source`, when non-null, streams the request body from the
+   --  caller's pull source (Send_Streaming_Body); when null the
+   --  buffered `Req.Body_B` is written. Either way the response is
+   --  delivered through `Sink`.
+   --
    --  Pre-cancel is honoured *before* connect — a handle that was
    --  Cancelled before Send started must not even dial.
    procedure Run_Request
@@ -122,15 +150,17 @@ package body AHT.HTTP.Client is
       Resp   : out AHT.HTTP.Response.Response_Type;
       Sink   : not null access
         procedure (Chunk : AHT.Bytes.Byte_Array);
-      Cancel : access Cancel_State)
+      Cancel : access Cancel_State;
+      Source : access AHT.HTTP.Request.Body_Source'Class := null)
    is
       Working : AHT.HTTP.Request.Request_Type := Req;
 
       --  Timeout_Seconds bounds each phase independently rather than as
       --  one end-to-end deadline: it is the TCP-connect budget, the
-      --  TLS-handshake deadline, and (via Set_Write_Deadline /
-      --  Set_Read_Deadline in Wire_Round_Trip) the request-write and
-      --  response-read deadlines. 0 means no limit.
+      --  TLS-handshake deadline, the response-read deadline
+      --  (Set_Read_Deadline in Wire_Round_Trip), and -- on the
+      --  streaming-upload path only -- the request-write deadline
+      --  (Set_Write_Deadline). 0 means no limit.
       Budget : constant Duration :=
         (if Self.Timeout_Seconds > 0
          then Duration (Self.Timeout_Seconds)
@@ -167,7 +197,8 @@ package body AHT.HTTP.Client is
 
                begin
                   Wire_Round_Trip
-                    (Self, Working, Req.Method, T, Resp, Sink);
+                    (Self, Working, Req.Method, T, Resp, Sink,
+                     Source, Cancel);
                exception
                   when others =>
                      if Cancel /= null then
@@ -206,7 +237,8 @@ package body AHT.HTTP.Client is
 
                begin
                   Wire_Round_Trip
-                    (Self, Working, Req.Method, T, Resp, Sink);
+                    (Self, Working, Req.Method, T, Resp, Sink,
+                     Source, Cancel);
                exception
                   when others =>
                      if Cancel /= null then
@@ -285,6 +317,41 @@ package body AHT.HTTP.Client is
                    Sink   => Sink,
                    Cancel => Cancel.State'Access);
    end Send_Streaming;
+
+   procedure Send_Streaming_Body
+     (Self   : in out Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Source : in out AHT.HTTP.Request.Body_Source'Class)
+   is
+      procedure Append_To_Body (Chunk : AHT.Bytes.Byte_Array) is
+      begin
+         Resp.Body_B.Append (Chunk);
+      end Append_To_Body;
+   begin
+      Run_Request (Self, Req, Resp,
+                   Sink   => Append_To_Body'Access,
+                   Cancel => null,
+                   Source => Source'Access);
+   end Send_Streaming_Body;
+
+   procedure Send_Streaming_Body
+     (Self   : in out Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Source : in out AHT.HTTP.Request.Body_Source'Class;
+      Cancel : in out Cancel_Handle)
+   is
+      procedure Append_To_Body (Chunk : AHT.Bytes.Byte_Array) is
+      begin
+         Resp.Body_B.Append (Chunk);
+      end Append_To_Body;
+   begin
+      Run_Request (Self, Req, Resp,
+                   Sink   => Append_To_Body'Access,
+                   Cancel => Cancel.State'Access,
+                   Source => Source'Access);
+   end Send_Streaming_Body;
 
    function Get
      (Self : in out Client_Type;

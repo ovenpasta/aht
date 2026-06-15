@@ -321,10 +321,13 @@ function  Get  (Self, URL) return Response_Type;
   Content-Length (which it commonly does, advertising the
   GET-equivalent size).
 
-- **Deadline.** When `Timeout_Seconds > 0`, `Send` calls
-  `Set_Read_Deadline` on the transport before writing. The deadline
-  is the wall-clock budget for the whole response (status line +
-  headers + body), not per-`Read`.
+- **Deadline.** When `Timeout_Seconds > 0`, `Send` arms
+  `Set_Read_Deadline` on the transport *after* the request body is on
+  the wire — so a slow or large upload can't burn the response budget —
+  as one wall-clock budget for the whole response (status line +
+  headers + body), not per-`Read`. (The streaming-upload path
+  additionally arms a write deadline; see
+  [Streaming upload](#streaming-upload--send_streaming_body).)
 
 - **Body framing.** Inherited from `Response.Read` — chunked >
   Content-Length > read-until-EOF for `Connection: close`.
@@ -383,6 +386,75 @@ is in mid-call).
 `Sink` is **not called for 1xx responses** (no body) and **not
 called for 101 Switching Protocols** (post-header bytes are left
 on the wire for the WebSocket layer).
+
+### Streaming upload — `Send_Streaming_Body`
+
+```ada
+procedure Send_Streaming_Body
+  (Self   : in out Client_Type;
+   Req    : Request_Type;
+   Resp   : out Response_Type;
+   Source : in out Request.Body_Source'Class);
+procedure Send_Streaming_Body
+  (Self, Req, Resp, Source, Cancel : ...);  -- + Cancel_Handle
+```
+
+The mirror of `Send_Streaming`: where that streams the *download*
+to a `Sink`, this streams the *upload* from a pull-style
+`Source`, so a multi-GB body never has to be materialised in RAM.
+The body is pulled via `Source.Read_Chunk` and framed on the wire
+by `Request.Write_Streaming` — see
+[`AHT.HTTP.Request` → Streaming upload](#streaming-upload--write_streaming)
+for the `Body_Source` interface, `Set_Content_Length`, and the
+fixed-vs-chunked framing rules. The **response is buffered** into
+`Resp.Body_B` exactly like the plain `Send` — only the upload
+streams.
+
+Everything else matches `Send`: header merging, scheme dispatch,
+the 1xx loop, and HEAD suppression are identical (it threads the
+same `Run_Request` core, passing the `Source` instead of a
+buffered body). Framing is header-driven:
+
+- a single `Content-Length` on `Req` (set it with
+  `Request.Set_Content_Length`) → fixed framing of exactly that
+  many bytes; an under- or over-run raises `Protocol_Error`;
+- otherwise → `Transfer-Encoding: chunked`.
+
+The call is **synchronous** — it runs the whole upload and reads
+the response before returning — so `Source` need only outlive the
+call (there is no cross-task lifetime question). `Source.Read_Chunk`
+runs on the caller's task and **must not block indefinitely**: on the
+streaming-upload path `Timeout_Seconds` arms a write deadline (in
+addition to the usual read deadline), but it only bounds a stalled
+*transmit* — a peer that stops reading — because it bites only once
+control is inside the transport write. It does **not** interrupt a
+`Read_Chunk` that is itself blocked, so a source that can stall must
+enforce its own timeout. (Buffered `Send`/`Get`/`Send_Streaming` are
+unchanged: they arm no write deadline, since their body is already in
+RAM and drains in one shot.)
+
+The write deadline is what makes a stalled send bounded: the
+transport's non-blocking write loop re-parks on its selector and
+raises `Timeout_Error` at the deadline instead of hanging forever.
+
+The cancellable overload takes a `Cancel_Handle` with the same
+semantics as the other cancellable surfaces. Cancel during an upload
+bites at two points: the in-flight write is broken via `Abort_Pending`
+(the parked non-blocking send wakes with `Aborted_Error`), and the
+pump polls the handle **between source windows** before each
+`Read_Chunk`. So a long upload or a peer that stalls the send is
+interruptible — but a `Read_Chunk` already in progress is not
+interrupted (cancel is observed before the next window, not during a
+blocked read).
+
+Same retry-safety caveat as `Send`: a `Timeout_Error` /
+`Aborted_Error` can be raised mid-upload with some bytes already
+on the wire, so a failed streaming upload of a non-idempotent
+request is retry-unsafe.
+
+Streaming upload on the **async** surface is not offered yet
+(`Send_Async` stays buffered); it is a deferred follow-up on top
+of this same `Body_Source` interface.
 
 ### Cancellation — `Cancel_Handle`
 

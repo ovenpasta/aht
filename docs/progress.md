@@ -425,6 +425,44 @@ sink-raise cases):
     `chunk-ext`, accepts upper-case hex, drains trailer headers,
     and raises on non-hex size or missing post-data CRLF.
 
+Streaming request-body **upload** (the mirror of the download
+streaming above): a request body is pulled from a caller-supplied
+`AHT.HTTP.Request.Body_Source` (`Read_Chunk` fills a reused 64 KiB
+window; `Last = 0` signals EOF) and framed on the wire without ever
+being buffered, so a multi-GB body stays O(1) in memory. Framing is
+header-driven — a single `Content-Length` (`Request.Set_Content_Length`,
+a 64-bit `Byte_Count`) selects fixed framing of exactly N bytes;
+otherwise `Transfer-Encoding: chunked`. This rests on two pieces that
+landed first: the transport's non-blocking, deadline- and
+abort-bounded `Write` (so a peer that stops reading can't hang the
+send — it re-parks on the selector and honours `Set_Write_Deadline` /
+`Abort_Pending`), and `AHT.HTTP.Request.Write_Streaming`'s framing
+encoder (with the anti-smuggling validation: caller `Transfer-Encoding`
+rejected, exactly one `Content-Length`, no mixed CL/TE, fixed-framing
+under/over-run → `Protocol_Error`; pinned deterministically in
+`test_http_wire`). The client surface is the two
+`AHT.HTTP.Client.Send_Streaming_Body` overloads (sync + cancellable);
+they thread the `Source` through the same `Run_Request` /
+`Wire_Round_Trip` core as `Send`, arm the write deadline from
+`Timeout_Seconds`, buffer the *response* into `Resp.Body_B`, and (the
+cancellable one) abort an in-flight upload at both the parked write and
+between source windows. Streaming upload on the *async* surface is a
+deferred follow-up.
+
+  - `tests/bin/test_http_upload` — three cases over
+    `Send_Streaming_Body`. (1) **Fixed framing** — `Set_Content_Length`
+    + a small-chunk array source uploaded to go-httpbin `/post`; the
+    echoed JSON `data` must contain the payload. (2) **Chunked framing**
+    — no `Content-Length`, the same source driven `Transfer-Encoding:
+    chunked`, dechunked by go-httpbin (Go net/http) and echoed back.
+    Both reuse the optional go-httpbin fixture and SKIP cleanly when
+    `AHT_HTTPBIN_URL` is unset (no Go toolchain). (3) **Cancel
+    mid-upload** — a 4 MB synthetic source to an in-process non-reading
+    peer fills the socket buffer so the write parks; a sibling task
+    fires `Cancel` after 200 ms and `Send_Streaming_Body` raises
+    `Aborted_Error` in under 2 s. The self-contained cancel case needs
+    no Go and always runs.
+
 ## WebSocket conformance (Autobahn|Testsuite)
 
 A dockerized Autobahn `fuzzingserver` harness lives in

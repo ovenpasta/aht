@@ -156,6 +156,59 @@ package AHT.HTTP.Client is
    --  Streaming Send with cross-task cancel. Same Cancel_Handle
    --  semantics as the buffered overload.
 
+   procedure Send_Streaming_Body
+     (Self   : in out Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Source : in out AHT.HTTP.Request.Body_Source'Class);
+   --  Streaming *upload*: pull the request body from `Source`
+   --  (Source.Read_Chunk) and frame it on the wire without ever
+   --  buffering it — the mirror of Send_Streaming, which streams the
+   --  *download*. Framing is header-driven (see
+   --  `AHT.HTTP.Request.Write_Streaming`): a single `Content-Length`
+   --  set on `Req` (e.g. via `Request.Set_Content_Length`) selects
+   --  fixed framing of exactly that many bytes; otherwise the body is
+   --  sent `Transfer-Encoding: chunked`. A `Content-Length` under- or
+   --  over-run, a caller-set `Transfer-Encoding`, or a duplicate
+   --  `Content-Length` raises `Protocol_Error` before/while writing.
+   --
+   --  The *response* is buffered into `Resp.Body_B` exactly like the
+   --  plain `Send` — only the upload streams. Header merging, scheme
+   --  dispatch, the 1xx loop, and HEAD suppression are identical to
+   --  `Send`. The call is synchronous: it runs the whole upload and
+   --  reads the response before returning, so `Source` need only
+   --  outlive the call. `Source.Read_Chunk` runs on the caller's task
+   --  and **must not block indefinitely**: `Self.Timeout_Seconds` arms
+   --  a write deadline that bounds a stalled *transmit* (a peer that
+   --  stops reading), but it only bites once control is inside the
+   --  transport write -- it does *not* interrupt a `Read_Chunk` that is
+   --  itself blocked, so a source that can stall must enforce its own
+   --  timeout.
+   --
+   --  Same retry-safety caveat as `Send`: a `Timeout_Error` /
+   --  `Aborted_Error` can be raised mid-upload with some bytes already
+   --  on the wire, so a failed streaming upload of a non-idempotent
+   --  request is retry-unsafe.
+   --
+   --  Streaming upload on the *async* surface is not offered yet
+   --  (`Send_Async` stays buffered); it is a deferred follow-up.
+
+   procedure Send_Streaming_Body
+     (Self   : in out Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Source : in out AHT.HTTP.Request.Body_Source'Class;
+      Cancel : in out Cancel_Handle);
+   --  Streaming upload with cross-task cancel. Same `Cancel_Handle`
+   --  semantics as the other cancellable overloads: a `Cancel` from
+   --  another task aborts the in-flight upload with `Aborted_Error`.
+   --  Cancel bites at the transport (a parked write is broken via
+   --  `Abort_Pending`) and between source windows (the upload polls the
+   --  handle before each `Read_Chunk`), so a long upload or a peer that
+   --  stalls the send is interruptible, not just the response read. A
+   --  `Read_Chunk` already in progress is *not* interrupted -- cancel is
+   --  observed before the next window, not during a blocked read.
+
    function Get
      (Self : in out Client_Type;
       URL  : String) return AHT.HTTP.Response.Response_Type;
