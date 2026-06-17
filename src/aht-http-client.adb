@@ -318,6 +318,59 @@ package body AHT.HTTP.Client is
                    Cancel => Cancel.State'Access);
    end Send_Streaming;
 
+   --  Body sink that writes every delivered chunk straight to an Ada
+   --  stream. Block-copies Byte_Array -> Stream_Element_Array (the
+   --  download mirror of Stream_Source.Read_Chunk's copy;
+   --  Stream_Element'Size = Octet'Size = 8 on every supported target),
+   --  then dispatches to the stream's Write. A raising Write propagates
+   --  out through Run_Request, which closes the transport.
+   procedure Send_Streaming
+     (Self   : in out Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Target : not null access Ada.Streams.Root_Stream_Type'Class)
+   is
+      procedure Write_To_Stream (Chunk : AHT.Bytes.Byte_Array) is
+         use type Ada.Streams.Stream_Element_Offset;
+         SE : Ada.Streams.Stream_Element_Array
+                (0 .. Ada.Streams.Stream_Element_Offset (Chunk'Length) - 1);
+      begin
+         for I in 0 .. Chunk'Length - 1 loop
+            SE (Ada.Streams.Stream_Element_Offset (I)) :=
+              Ada.Streams.Stream_Element (Chunk (Chunk'First + I));
+         end loop;
+         Target.Write (SE);
+      end Write_To_Stream;
+   begin
+      Run_Request (Self, Req, Resp,
+                   Sink   => Write_To_Stream'Access,
+                   Cancel => null);
+   end Send_Streaming;
+
+   procedure Send_Streaming
+     (Self   : in out Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Target : not null access Ada.Streams.Root_Stream_Type'Class;
+      Cancel : in out Cancel_Handle)
+   is
+      procedure Write_To_Stream (Chunk : AHT.Bytes.Byte_Array) is
+         use type Ada.Streams.Stream_Element_Offset;
+         SE : Ada.Streams.Stream_Element_Array
+                (0 .. Ada.Streams.Stream_Element_Offset (Chunk'Length) - 1);
+      begin
+         for I in 0 .. Chunk'Length - 1 loop
+            SE (Ada.Streams.Stream_Element_Offset (I)) :=
+              Ada.Streams.Stream_Element (Chunk (Chunk'First + I));
+         end loop;
+         Target.Write (SE);
+      end Write_To_Stream;
+   begin
+      Run_Request (Self, Req, Resp,
+                   Sink   => Write_To_Stream'Access,
+                   Cancel => Cancel.State'Access);
+   end Send_Streaming;
+
    procedure Send_Streaming_Body
      (Self   : in out Client_Type;
       Req    : AHT.HTTP.Request.Request_Type;

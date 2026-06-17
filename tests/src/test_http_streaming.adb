@@ -11,6 +11,12 @@
 --       the sink: no slice exceeds the 4 KB window, the sink is
 --       called many times for one wire chunk, and the ramp
 --       reassembles byte-for-byte (windowed-delivery contract).
+--    2c. Download to an Ada stream — GET /chunked with the
+--       Send_Streaming (Target => ...) overload: the body lands in an
+--       in-test Root_Stream_Type byte-for-byte identical to what the
+--       Sink overload collects for the same route, and Resp.Body_B
+--       stays empty (the symmetric counterpart of the Stream_Source
+--       upload).
 --    3. Cancel during streaming — silent in-process server holds
 --       the connection; sibling task fires Cancel; Send_Streaming
 --       raises Aborted_Error and sink was never invoked.
@@ -273,6 +279,42 @@ procedure Test_HTTP_Streaming is
         & Path;
    end URL_For;
 
+   --  Write-collecting in-test Ada stream: every Write appends its
+   --  bytes to Data, so a Send_Streaming (Target => ...) download lands
+   --  here and can be compared against the Sink-collected bytes. Read is
+   --  unused (the download path only writes).
+   type Collector_Stream is new Ada.Streams.Root_Stream_Type with record
+      Data : Unbounded_String;
+   end record;
+
+   overriding procedure Read
+     (Self : in out Collector_Stream;
+      Item : out Stream_Element_Array;
+      Last : out Stream_Element_Offset);
+
+   overriding procedure Write
+     (Self : in out Collector_Stream;
+      Item : Stream_Element_Array);
+
+   overriding procedure Read
+     (Self : in out Collector_Stream;
+      Item : out Stream_Element_Array;
+      Last : out Stream_Element_Offset)
+   is
+      pragma Unreferenced (Self, Item, Last);
+   begin
+      raise Program_Error with "Collector_Stream is write-only";
+   end Read;
+
+   overriding procedure Write
+     (Self : in out Collector_Stream;
+      Item : Stream_Element_Array) is
+   begin
+      for E of Item loop
+         Append (Self.Data, Character'Val (Natural (E)));
+      end loop;
+   end Write;
+
    --  Sink helpers built around a per-case Unbounded_String + call
    --  counter. Use file-scope state for the sink-raises case (so
    --  the nested sink can flip a flag) and per-case local state
@@ -445,6 +487,63 @@ begin
          Fail ("chunked-big: one wire chunk delivered in"
                & Natural'Image (Calls)
                & " call(s) — windowing not exercised");
+      end if;
+   end;
+
+   --  Case 2c: download straight to an Ada stream (the symmetric
+   --  counterpart of the Stream_Source upload). Run /chunked twice over
+   --  the same Req: once through the Sink overload to capture the
+   --  reference bytes, once through the Target overload into an in-test
+   --  stream. The two byte streams must be identical, and the
+   --  stream-target call must leave Resp.Body_B empty (bytes went to the
+   --  stream, not the buffer). Also proves the Sink/Target overloads
+   --  resolve unambiguously on the fourth parameter.
+   declare
+      C        : AHT.HTTP.Client.Client_Type;
+      Req      : AHT.HTTP.Request.Request_Type;
+      Resp_S   : AHT.HTTP.Response.Response_Type;
+      Resp_T   : AHT.HTTP.Response.Response_Type;
+      Via_Sink : Unbounded_String;
+      Target   : aliased Collector_Stream;
+
+      procedure Collect (Chunk : AHT.Bytes.Byte_Array) is
+      begin
+         for B of Chunk loop
+            Append (Via_Sink, Character'Val (Natural (B)));
+         end loop;
+      end Collect;
+   begin
+      Req.Method := AHT.HTTP.Methods.GET;
+      Req.Target := AHT.URL.Parse ("http://127.0.0.1:8764/chunked");
+
+      begin
+         AHT.HTTP.Client.Send_Streaming
+           (C, Req, Resp_S, Sink => Collect'Access);
+         AHT.HTTP.Client.Send_Streaming
+           (C, Req, Resp_T, Target => Target'Access);
+      exception
+         when E : others =>
+            Fail ("stream-target: Send_Streaming raised "
+                  & Ada.Exceptions.Exception_Name (E) & ": "
+                  & Ada.Exceptions.Exception_Message (E)
+                  & " (is tests/server/server.py running?)");
+      end;
+
+      if Resp_T.Status /= 200 then
+         Fail ("stream-target: status =" & Resp_T.Status'Image);
+      end if;
+      if Resp_T.Body_B.Length /= 0 then
+         Fail ("stream-target: Body_B not empty after streaming to "
+               & "stream, length =" & Natural'Image (Resp_T.Body_B.Length));
+      end if;
+      if Target.Data /= Via_Sink then
+         Fail ("stream-target: stream bytes differ from sink bytes; "
+               & "stream=""" & To_String (Target.Data)
+               & """ sink=""" & To_String (Via_Sink) & """");
+      end if;
+      if To_String (Target.Data) /= "AHT rocks!" & ASCII.LF then
+         Fail ("stream-target: captured = """
+               & To_String (Target.Data) & """");
       end if;
    end;
 

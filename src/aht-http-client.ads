@@ -1,4 +1,5 @@
 with Ada.Exceptions;
+with Ada.Streams;
 with Ada.Strings.Unbounded;
 
 with AHT.Bytes;
@@ -155,6 +156,43 @@ package AHT.HTTP.Client is
       Cancel : in out Cancel_Handle);
    --  Streaming Send with cross-task cancel. Same Cancel_Handle
    --  semantics as the buffered overload.
+
+   procedure Send_Streaming
+     (Self   : in out Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Target : not null access Ada.Streams.Root_Stream_Type'Class);
+   --  Streaming download straight to an Ada stream: every response body
+   --  byte is written to `Target` as it arrives instead of being
+   --  accumulated in `Resp.Body_B` or pushed through a `Sink` callback.
+   --  The download mirror of `Send_Streaming_Body`'s `Stream_Source` --
+   --  because `Root_Stream_Type'Class` subsumes files (via
+   --  `Ada.Streams.Stream_IO.Stream`), sockets, and generators, saving a
+   --  response straight to a file/socket is a one-liner with no
+   --  hand-rolled `Sink`.
+   --
+   --  Resolves against the `Sink` overloads by the fourth parameter:
+   --  pass `Sink => ...` for the callback form, `Target => ...` for the
+   --  stream form. `Resp.Status`, `Resp.Reason`, and `Resp.Headers` are
+   --  populated as usual; `Resp.Body_B` is empty on return (the bytes
+   --  went to the stream). Chunk granularity, the 1xx loop, and HEAD
+   --  suppression are identical to the `Sink` overload.
+   --
+   --  Lifetime / framing parity with `Stream_Source`: the call is
+   --  synchronous and *borrows* `Target` -- the caller owns its
+   --  open/close lifetime, which outlives the call by construction. A
+   --  stream `Write` that raises propagates out of `Send_Streaming` and
+   --  the transport is closed on that path, exactly like a raising
+   --  `Sink`.
+
+   procedure Send_Streaming
+     (Self   : in out Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Target : not null access Ada.Streams.Root_Stream_Type'Class;
+      Cancel : in out Cancel_Handle);
+   --  Stream-target download with cross-task cancel. Same `Cancel_Handle`
+   --  semantics as the other cancellable overloads.
 
    procedure Send_Streaming_Body
      (Self   : in out Client_Type;

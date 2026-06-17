@@ -429,6 +429,42 @@ is in mid-call).
 called for 101 Switching Protocols** (post-header bytes are left
 on the wire for the WebSocket layer).
 
+#### Download straight to an Ada stream
+
+Two further `Send_Streaming` overloads write the response body to any
+Ada stream instead of pushing it through a `Sink` — the download mirror
+of the [`Stream_Source`](#ready-made-body-sources--ahthttprequestsources)
+upload, so "save this response to a file/socket" needs no hand-rolled
+callback:
+
+```ada
+procedure Send_Streaming
+  (Self   : in out Client_Type;
+   Req    : Request_Type;
+   Resp   : out Response_Type;
+   Target : not null access Ada.Streams.Root_Stream_Type'Class);
+procedure Send_Streaming
+  (Self, Req, Resp, Target, Cancel : ...);  -- + Cancel_Handle
+```
+
+```ada
+--  Download a body straight to a file, no callback, no buffering.
+F : Ada.Streams.Stream_IO.File_Type;
+Ada.Streams.Stream_IO.Create (F, Ada.Streams.Stream_IO.Out_File, Path);
+Client.Send_Streaming (C, Req, Resp, Target => Stream_IO.Stream (F));
+Ada.Streams.Stream_IO.Close (F);
+```
+
+These resolve against the `Sink` overloads by the fourth parameter —
+pass `Sink => ...` for the callback, `Target => ...` for the stream.
+Behaviour is otherwise identical to the `Sink` form: `Resp.Status` /
+`Resp.Reason` / `Resp.Headers` are populated, `Resp.Body_B` is empty
+(the bytes went to the stream), the same chunk granularity applies, and
+a stream `Write` that raises propagates out with the transport closed,
+exactly like a raising `Sink`. Like `Stream_Source`, `Target` is
+*borrowed* — the synchronous call outlives it, so the caller owns its
+open/close lifetime.
+
 ### Streaming upload — `Send_Streaming_Body`
 
 ```ada
