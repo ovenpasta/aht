@@ -116,6 +116,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self._send_fixed(404, b"not found\n", "text/plain")
 
+    def do_HEAD(self):  # noqa: N802
+        # HEAD mirrors GET /hello's headers — including the
+        # Content-Length the body *would* have — but writes no body.
+        # Lets the Ada client demonstrate that a HEAD response carries
+        # framing headers yet an empty Body_B (body framing suppressed
+        # client-side regardless of Content-Length).
+        if self.path == "/hello":
+            body = b"hello, world\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(b"not found\n")))
+            self.send_header("Connection", "close")
+            self.end_headers()
+
     def do_POST(self):  # noqa: N802
         if self.path == "/echo":
             length = int(self.headers.get("Content-Length", "0"))
