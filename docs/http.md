@@ -158,6 +158,48 @@ non-blocking write deadline / `Abort_Pending`. A `Timeout_Error` /
 `Aborted_Error` can fire after some body bytes have reached the peer, so
 a failed streaming upload is retry-unsafe for a non-idempotent request.
 
+### Ready-made body sources — `AHT.HTTP.Request.Sources`
+
+You rarely need to hand-roll a `Body_Source`. The child package
+`AHT.HTTP.Request.Sources` ships a `Stream_Source` over any Ada stream
+(`Ada.Streams.Root_Stream_Type'Class`) — which subsumes files (via
+`Ada.Streams.Stream_IO.Stream`), sockets, in-memory streams, and
+generators in one type:
+
+```ada
+type Stream_Source is new Body_Source with private;
+function Create
+  (Stream : not null access Ada.Streams.Root_Stream_Type'Class)
+   return Stream_Source;
+```
+
+```ada
+--  Stream a file straight to the wire, no buffering, no Read_Chunk.
+F : Ada.Streams.Stream_IO.File_Type;
+Ada.Streams.Stream_IO.Open (F, Ada.Streams.Stream_IO.In_File, Path);
+declare
+   Src : Request.Sources.Stream_Source :=
+           Request.Sources.Create (Ada.Streams.Stream_IO.Stream (F));
+begin
+   Req.Set_Content_Length (Byte_Count (Ada.Directories.Size (Path)));  --  fixed
+   Client.Send_Streaming_Body (C, Req, Resp, Src);
+end;
+Ada.Streams.Stream_IO.Close (F);
+```
+
+- **Borrows, never owns.** `Stream_Source` holds an access to the stream;
+  it has no finalizer and never opens or closes anything. The caller owns
+  the file/socket lifetime. This is sound because the upload is
+  synchronous — the source and the stream it points at outlive the whole
+  `Send_Streaming_Body` / `Write_Streaming` call by construction.
+- **Framing stays header-driven.** A generic stream has no length, so for
+  fixed framing set the `Content-Length` yourself
+  (`Set_Content_Length (Byte_Count (Ada.Directories.Size (Path)))` for a
+  file); omit it for chunked. The source never touches framing.
+- **In-memory bodies** don't need a source at all — use `Set_Body`
+  (buffered). `Stream_Source` is for the streaming / from-disk /
+  from-socket case.
+
 ## `AHT.HTTP.Response`
 
 ```ada

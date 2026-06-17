@@ -1,5 +1,8 @@
 with Ada.Command_Line;
+with Ada.Directories;
 with Ada.Exceptions;
+with Ada.Streams;
+with Ada.Streams.Stream_IO;
 with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Text_IO; use Ada.Text_IO;
@@ -9,6 +12,7 @@ with AHT.HTTP;
 with AHT.HTTP.Headers;
 with AHT.HTTP.Methods;
 with AHT.HTTP.Request;
+with AHT.HTTP.Request.Sources;
 with AHT.HTTP.Response;
 with AHT.Transport;
 with AHT.URL;
@@ -154,6 +158,66 @@ procedure Test_HTTP_Wire is
       Abort_Calls := Abort_Calls + 1;
       return Abort_Calls > Abort_After;
    end Abort_Flag;
+
+   --  Minimal read-only in-test Ada stream: hands out its stored bytes in
+   --  slices of at most Chunk per Read (short Last at EOF, like a socket),
+   --  so a Stream_Source wrapping it drives the multi-window pump
+   --  deterministically without needing a >64 KiB file. Write is unused.
+   type Mem_Stream is new Ada.Streams.Root_Stream_Type with record
+      Data   : AHT.Bytes.Buffer;
+      Cursor : Positive := 1;
+      Chunk  : Positive := Positive'Last;
+   end record;
+
+   overriding procedure Read
+     (Self : in out Mem_Stream;
+      Item : out Ada.Streams.Stream_Element_Array;
+      Last : out Ada.Streams.Stream_Element_Offset);
+
+   overriding procedure Write
+     (Self : in out Mem_Stream;
+      Item : Ada.Streams.Stream_Element_Array);
+
+   overriding procedure Read
+     (Self : in out Mem_Stream;
+      Item : out Ada.Streams.Stream_Element_Array;
+      Last : out Ada.Streams.Stream_Element_Offset)
+   is
+      use type Ada.Streams.Stream_Element_Offset;
+      Remaining : constant Natural := Self.Data.Length - (Self.Cursor - 1);
+      N         : Natural := Remaining;
+   begin
+      if Remaining = 0 then
+         Last := Item'First - 1;  --  EOF
+         return;
+      end if;
+      if N > Self.Chunk  then N := Self.Chunk;  end if;
+      if N > Item'Length then N := Item'Length; end if;
+      for I in 0 .. N - 1 loop
+         Item (Item'First + Ada.Streams.Stream_Element_Offset (I)) :=
+           Ada.Streams.Stream_Element (Self.Data (Self.Cursor + I));
+      end loop;
+      Self.Cursor := Self.Cursor + N;
+      Last := Item'First + Ada.Streams.Stream_Element_Offset (N) - 1;
+   end Read;
+
+   overriding procedure Write
+     (Self : in out Mem_Stream;
+      Item : Ada.Streams.Stream_Element_Array)
+   is
+      pragma Unreferenced (Self, Item);
+   begin
+      raise Program_Error with "Mem_Stream is read-only";
+   end Write;
+
+   procedure Load_Stream
+     (S : in out Mem_Stream; Str : String; Chunk : Positive := Positive'Last)
+   is
+   begin
+      S.Data.Set (Str);
+      S.Cursor := 1;
+      S.Chunk  := Chunk;
+   end Load_Stream;
 
 begin
    --  Case 1: GET — request line, caller-supplied headers, no body,
@@ -973,6 +1037,146 @@ begin
       Expect_Bad_CL ("");
       Expect_Bad_CL ("12x");
       Expect_Bad_CL ("99999999999999999999999999");
+   end;
+
+   --  Case 31: Sources.Stream_Source chunked, multi-window. A Stream_Source
+   --  over an Ada stream that yields 5 bytes per Read must frame identically
+   --  to the hand-rolled Array_Source of Case 17 — proving the library source
+   --  is a faithful delegate, no boilerplate Read_Chunk needed.
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+      Mem : aliased Mem_Stream;
+      Src : AHT.HTTP.Request.Sources.Stream_Source :=
+              AHT.HTTP.Request.Sources.Create (Mem'Access);
+   begin
+      Req.Method := AHT.HTTP.Methods.POST;
+      Req.Target := AHT.URL.Parse ("http://example.com/up");
+      Req.Headers.Set ("host", "example.com");
+      Load_Stream (Mem, "Hello world", Chunk => 5);
+
+      Req.Write_Streaming (T, Src);
+
+      declare
+         Wire : constant String := Written_To_String (T);
+         Body_Wire : constant String :=
+           ASCII.CR & ASCII.LF & ASCII.CR & ASCII.LF
+           & "5" & ASCII.CR & ASCII.LF & "Hello" & ASCII.CR & ASCII.LF
+           & "5" & ASCII.CR & ASCII.LF & " worl" & ASCII.CR & ASCII.LF
+           & "1" & ASCII.CR & ASCII.LF & "d" & ASCII.CR & ASCII.LF
+           & "0" & ASCII.CR & ASCII.LF & ASCII.CR & ASCII.LF;
+      begin
+         if not Contains (Wire, "transfer-encoding: chunked"
+                                & ASCII.CR & ASCII.LF) then
+            Fail ("stream-source-chunked: TE header missing: """ & Wire & """");
+         end if;
+         if not Contains (Wire, Body_Wire) then
+            Fail ("stream-source-chunked: framing wrong: """ & Wire & """");
+         end if;
+      end;
+   end;
+
+   --  Case 32: Sources.Stream_Source fixed framing. A single Content-Length
+   --  streams exactly N raw bytes across windows; no chunk sizes appear.
+   declare
+      T   : Transport;
+      Req : AHT.HTTP.Request.Request_Type;
+      Mem : aliased Mem_Stream;
+      Src : AHT.HTTP.Request.Sources.Stream_Source :=
+              AHT.HTTP.Request.Sources.Create (Mem'Access);
+   begin
+      Req.Method := AHT.HTTP.Methods.PUT;
+      Req.Target := AHT.URL.Parse ("http://example.com/up");
+      Req.Set_Content_Length (11);
+      Load_Stream (Mem, "Hello world", Chunk => 4);
+
+      Req.Write_Streaming (T, Src);
+
+      declare
+         Wire : constant String := Written_To_String (T);
+      begin
+         if not Contains (Wire, "content-length: 11"
+                                & ASCII.CR & ASCII.LF) then
+            Fail ("stream-source-fixed: Content-Length missing: """
+                  & Wire & """");
+         end if;
+         if Contains (Wire, "transfer-encoding") then
+            Fail ("stream-source-fixed: unexpected TE: """ & Wire & """");
+         end if;
+         if not Contains (Wire,
+            ASCII.CR & ASCII.LF & ASCII.CR & ASCII.LF & "Hello world")
+         then
+            Fail ("stream-source-fixed: raw body wrong: """ & Wire & """");
+         end if;
+      end;
+   end;
+
+   --  Case 33: Sources.Stream_Source over a real Stream_IO temp file. Write a
+   --  known body to disk, stream it back fixed-framed, and assert it lands on
+   --  the wire byte-for-byte — the file path the ex_05 upload rung exercises.
+   declare
+      Name : constant String := "/tmp/aht_test_http_wire.tmp";
+      F    : Ada.Streams.Stream_IO.File_Type;
+      T    : Transport;
+      Req  : AHT.HTTP.Request.Request_Type;
+   begin
+      Ada.Streams.Stream_IO.Create
+        (F, Ada.Streams.Stream_IO.Out_File, Name);
+      String'Write (Ada.Streams.Stream_IO.Stream (F), "Hello world");
+      Ada.Streams.Stream_IO.Close (F);
+
+      Ada.Streams.Stream_IO.Open (F, Ada.Streams.Stream_IO.In_File, Name);
+      declare
+         Src : AHT.HTTP.Request.Sources.Stream_Source :=
+                 AHT.HTTP.Request.Sources.Create
+                   (Ada.Streams.Stream_IO.Stream (F));
+      begin
+         Req.Method := AHT.HTTP.Methods.PUT;
+         Req.Target := AHT.URL.Parse ("http://example.com/up");
+         Req.Set_Content_Length
+           (AHT.HTTP.Request.Byte_Count (Ada.Directories.Size (Name)));
+         Req.Write_Streaming (T, Src);
+      end;
+      Ada.Streams.Stream_IO.Close (F);
+      Ada.Directories.Delete_File (Name);
+
+      declare
+         Wire : constant String := Written_To_String (T);
+      begin
+         if not Contains (Wire, "content-length: 11"
+                                & ASCII.CR & ASCII.LF) then
+            Fail ("stream-file: Content-Length missing: """ & Wire & """");
+         end if;
+         if not Contains (Wire,
+            ASCII.CR & ASCII.LF & ASCII.CR & ASCII.LF & "Hello world")
+         then
+            Fail ("stream-file: raw body wrong: """ & Wire & """");
+         end if;
+      end;
+   end;
+
+   --  Case 34: sticky EOF. After the underlying stream drains, Read_Chunk must
+   --  keep signalling EOF (Last < Buf'First) on every subsequent call.
+   declare
+      Mem : aliased Mem_Stream;
+      Src : AHT.HTTP.Request.Sources.Stream_Source :=
+              AHT.HTTP.Request.Sources.Create (Mem'Access);
+      Buf  : AHT.Bytes.Byte_Array (1 .. 8);
+      Last : Natural;
+   begin
+      Load_Stream (Mem, "ab");
+      Src.Read_Chunk (Buf, Last);                 --  yields "ab"
+      if Last /= Buf'First + 1 then
+         Fail ("stream-eof: first Read_Chunk Last =" & Last'Image);
+      end if;
+      Src.Read_Chunk (Buf, Last);                 --  underlying EOF; latch
+      if Last >= Buf'First then
+         Fail ("stream-eof: drain did not signal EOF; Last =" & Last'Image);
+      end if;
+      Src.Read_Chunk (Buf, Last);                 --  sticky EOF
+      if Last >= Buf'First then
+         Fail ("stream-eof: EOF not sticky; Last =" & Last'Image);
+      end if;
    end;
 
    if Failures = 0 then
