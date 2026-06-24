@@ -1,11 +1,12 @@
 #!/bin/sh
 #
-# AHT example orchestrator: builds the library + the eight example
-# programs, brings up the four Python fixtures the examples dial (HTTP on
-# 8764, WebSocket on 8765, a silent stall server on 8767 for the
-# async-cancel example, and a TLS-wrapped WebSocket echo on 8768 for the
-# wss example), runs every example main listed in examples/examples.gpr
-# in ladder order, and tears the fixtures down on exit.
+# AHT example orchestrator: builds the library + the nine example
+# programs, brings up the five Python fixtures the examples dial (HTTP on
+# 8764, WebSocket on 8765, HTTPS on 8766 for the https example, a silent
+# stall server on 8767 for the async-cancel example, and a TLS-wrapped
+# WebSocket echo on 8768 for the wss example), runs every example main
+# listed in examples/examples.gpr in ladder order, and tears the fixtures
+# down on exit.
 #
 # This is a convenience runner for reading the ladder end to end, not a
 # pass/fail gate -- but it does report (and exit non-zero on) any rung
@@ -26,11 +27,12 @@ VENV=tests/.venv
 LOG=$(mktemp -t aht-examples.XXXXXX.log)
 HTTP_PID=
 WS_PID=
+TLS_PID=
 STALL_PID=
 WSS_PID=
 
 cleanup() {
-    for pid in "$HTTP_PID" "$WS_PID" "$STALL_PID" "$WSS_PID"; do
+    for pid in "$HTTP_PID" "$WS_PID" "$TLS_PID" "$STALL_PID" "$WSS_PID"; do
         if [ -n "$pid" ]; then
             kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
@@ -54,14 +56,16 @@ fi
 "$VENV"/bin/pip install -q -r tests/server/requirements.txt
 PY="$VENV"/bin/python3
 
-echo "==> generating self-signed cert (for the wss example)"
+echo "==> generating self-signed cert (for the https + wss examples)"
 sh scripts/generate_cert.sh
 
-echo "==> starting HTTP (8764) + WS (8765) + stall (8767) + wss (8768) fixtures"
+echo "==> starting HTTP (8764) + WS (8765) + HTTPS (8766) + stall (8767) + wss (8768) fixtures"
 "$PY" tests/server/server.py        >>"$LOG" 2>&1 &
 HTTP_PID=$!
 "$PY" tests/server/server_ws.py     >>"$LOG" 2>&1 &
 WS_PID=$!
+"$PY" tests/server/server_tls.py    >>"$LOG" 2>&1 &
+TLS_PID=$!
 "$PY" tests/server/server_stall.py  >>"$LOG" 2>&1 &
 STALL_PID=$!
 "$PY" tests/server/server_ws_tls.py >>"$LOG" 2>&1 &
@@ -73,19 +77,21 @@ WSS_PID=$!
 for _ in $(seq 1 50); do
     HAS_HTTP=$(grep -c  '^READY http '  "$LOG" 2>/dev/null || true)
     HAS_WS=$(grep -c    '^READY ws '    "$LOG" 2>/dev/null || true)
+    HAS_TLS=$(grep -c   '^READY tls '   "$LOG" 2>/dev/null || true)
     HAS_STALL=$(grep -c '^READY stall ' "$LOG" 2>/dev/null || true)
     HAS_WSS=$(grep -c   '^READY wss '   "$LOG" 2>/dev/null || true)
     if [ "$HAS_HTTP" -ge 1 ] && [ "$HAS_WS" -ge 1 ] \
-       && [ "$HAS_STALL" -ge 1 ] && [ "$HAS_WSS" -ge 1 ]; then
+       && [ "$HAS_TLS" -ge 1 ] && [ "$HAS_STALL" -ge 1 ] \
+       && [ "$HAS_WSS" -ge 1 ]; then
         break
     fi
     sleep 0.1
 done
-if [ "$HAS_HTTP" -lt 1 ] || [ "$HAS_WS" -lt 1 ] \
+if [ "$HAS_HTTP" -lt 1 ] || [ "$HAS_WS" -lt 1 ] || [ "$HAS_TLS" -lt 1 ] \
    || [ "$HAS_STALL" -lt 1 ] || [ "$HAS_WSS" -lt 1 ]
 then
     echo "FATAL: fixtures did not become ready in 5s (http=$HAS_HTTP"
-    echo "ws=$HAS_WS stall=$HAS_STALL wss=$HAS_WSS); log follows:"
+    echo "ws=$HAS_WS tls=$HAS_TLS stall=$HAS_STALL wss=$HAS_WSS); log follows:"
     cat "$LOG"
     exit 2
 fi

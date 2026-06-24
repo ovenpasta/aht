@@ -36,7 +36,7 @@ bash tests/run_tests.sh
 
 ## Examples
 
-A ladder of eight self-contained programs under `examples/src/`, ordered
+A ladder of nine self-contained programs under `examples/src/`, ordered
 easy → hard, each demonstrating one capability of the client:
 
 1. `ex_01_get` — one-line `Client.Get`; print status + body text.
@@ -53,6 +53,8 @@ easy → hard, each demonstrating one capability of the client:
    / `Set_On_Error`), funnelling receiver-task callbacks through a
    protected object.
 8. `ex_08_wss_subprotocol` — `wss://` with subprotocol negotiation.
+9. `ex_09_https` — the same one-line GET over `https://`, configuring
+   the client's `Insecure` / `CA_Path` trust fields.
 
 Each takes an optional URL/host argument and otherwise defaults to the
 bundled Python fixtures. Build them all:
