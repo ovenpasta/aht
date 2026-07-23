@@ -1,13 +1,13 @@
 # mbedTLS Integration
 
-Status: fetch + build chain done; bindings curated; `AHT.Transport.TLS`
-implemented over the existing TCP transport via custom BIO callbacks,
-with a transport-level test (`tests/src/test_tls.adb`) covering verify,
-insecure, and untrusted-chain rejection.
+`AHT.Transport.TLS` sits on top of the TCP transport via custom BIO
+callbacks; the transport-level test (`tests/src/test_tls.adb`) covers
+verify, insecure, and untrusted-chain rejection.
 
-The library targets **mbedTLS v2.28.9** (LTS). The version is pinned
-for reproducibility; upgrading requires rerunning the binding
-regeneration and curating any diffs.
+The library targets **mbedTLS v2.28.9**, the last LTS line that still
+supports older Windows versions. Other mbedTLS versions and other TLS
+backends are planned. Changing the version requires rerunning the
+binding regeneration and curating any diffs.
 
 ## Fetch & build
 

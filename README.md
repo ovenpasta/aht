@@ -77,23 +77,21 @@ bash examples/run_examples.sh
 
 ## Documentation
 
-- [`docs/plan.md`](docs/plan.md) — the approved implementation plan.
-  Authoritative design spec; update it alongside the code when design
-  drifts.
-- [`docs/progress.md`](docs/progress.md) — current status: tasks done,
-  what's next, which tests pass.
-- Subsystem references (one file per subsystem):
-  - [`docs/url.md`](docs/url.md) — URL parsing + percent/form encoding.
-  - [`docs/log.md`](docs/log.md) — cross-cutting log facade
-    (level × subsystem filter, user-installed sink).
-  - [`docs/http.md`](docs/http.md) — HTTP methods, status, headers, IO
-    helpers, client.
-  - [`docs/transport.md`](docs/transport.md) — `Transport_Type`
-    abstraction, TCP, TLS.
-  - [`docs/mbedtls.md`](docs/mbedtls.md) — how mbedTLS v2.28.9 is
-    fetched, built, and bound.
-  - [`docs/websocket.md`](docs/websocket.md) — frame codec, concurrency
-    model, client API.
+One reference file per subsystem:
+
+- [`docs/url.md`](docs/url.md) — URL parsing + percent/form encoding.
+- [`docs/bytes_buffer.md`](docs/bytes_buffer.md) — `AHT.Bytes.Buffer`,
+  the array-backed byte buffer used for bodies and payloads.
+- [`docs/log.md`](docs/log.md) — cross-cutting log facade
+  (level × subsystem filter, user-installed sink).
+- [`docs/http.md`](docs/http.md) — HTTP methods, status, headers, IO
+  helpers, client.
+- [`docs/transport.md`](docs/transport.md) — `Transport_Type`
+  abstraction, TCP, TLS.
+- [`docs/mbedtls.md`](docs/mbedtls.md) — how mbedTLS v2.28.9 is
+  fetched, built, and bound.
+- [`docs/websocket.md`](docs/websocket.md) — frame codec, concurrency
+  model, client API.
 
 ## Conventions
 

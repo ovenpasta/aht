@@ -2,16 +2,16 @@
 
 Packages under `AHT.HTTP`:
 
-| Unit | Status |
-|---|---|
-| `AHT.HTTP` (root exceptions) | implemented |
-| `AHT.HTTP.Methods` | implemented |
-| `AHT.HTTP.Status` | implemented |
-| `AHT.HTTP.Headers` | implemented |
-| `AHT.HTTP.Request` | implemented (buffered + streaming wire write) |
-| `AHT.HTTP.Response` | implemented (wire read) |
-| `AHT.HTTP.IO` | implemented (chunked decoder has streaming + buffered overloads) |
-| `AHT.HTTP.Client` | implemented (HTTP + HTTPS, sync + streaming + async, with cancel) |
+- `AHT.HTTP` — root package: the common exceptions.
+- `AHT.HTTP.Methods` — the method enumeration.
+- `AHT.HTTP.Status` — status codes and classification.
+- `AHT.HTTP.Headers` — case-insensitive header map.
+- `AHT.HTTP.Request` — request record, buffered + streaming wire write.
+- `AHT.HTTP.Response` — response record, wire read.
+- `AHT.HTTP.IO` — line/body readers; chunked decoder with streaming +
+  buffered overloads.
+- `AHT.HTTP.Client` — the client: HTTP + HTTPS, sync + streaming +
+  async, with cancel.
 
 Common exceptions (in `AHT.HTTP`): `HTTP_Error`, `Protocol_Error`,
 `Handshake_Error`.
@@ -530,9 +530,8 @@ Same retry-safety caveat as `Send`: a `Timeout_Error` /
 on the wire, so a failed streaming upload of a non-idempotent
 request is retry-unsafe.
 
-Streaming upload on the **async** surface is not offered yet
-(`Send_Async` stays buffered); it is a deferred follow-up on top
-of this same `Body_Source` interface.
+Streaming upload is not offered on the **async** surface
+(`Send_Async` stays buffered).
 
 ### Cancellation — `Cancel_Handle`
 

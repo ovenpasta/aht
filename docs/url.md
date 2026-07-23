@@ -1,7 +1,6 @@
 # URL & URL Encoding
 
 Packages: `AHT.URL`, `AHT.URL.Encoding`.
-Status: **implemented** and unit-tested.
 
 ## `AHT.URL`
 

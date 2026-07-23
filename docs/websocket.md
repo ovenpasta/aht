@@ -2,11 +2,9 @@
 
 Packages under `AHT.Websocket`:
 
-| Unit | Status |
-|---|---|
-| `AHT.Websocket` (shared types) | implemented |
-| `AHT.Websocket.Frames` | implemented |
-| `AHT.Websocket.Client` | implemented (`ws://` and `wss://`) |
+- `AHT.Websocket` — shared types.
+- `AHT.Websocket.Frames` — the frame codec.
+- `AHT.Websocket.Client` — the client, `ws://` and `wss://`.
 
 Common exception: `AHT.Websocket.Handshake_Error` — raised by
 `Client.Connect` when the HTTP upgrade does not yield `101 Switching
@@ -364,8 +362,7 @@ the one that emits our Close frame.
 
 ## Tests
 
-The WebSocket layer is covered by four test mains; see
-[`progress.md`](progress.md) for the authoritative per-case catalog.
+The WebSocket layer is covered by four test mains:
 
 | Test | Scope | Fixture |
 |---|---|---|

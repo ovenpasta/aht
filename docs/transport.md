@@ -2,11 +2,10 @@
 
 Packages:
 
-| Unit | Status |
-|---|---|
-| `AHT.Transport` (abstract) | spec implemented |
-| `AHT.Transport.TCP` | implemented |
-| `AHT.Transport.TLS` | implemented (transport level; `https://`/`wss://` client wiring pending) |
+- `AHT.Transport` — the abstract transport interface.
+- `AHT.Transport.TCP` — plain TCP, used for `http://` / `ws://`.
+- `AHT.Transport.TLS` — TLS over the TCP transport, selected by the
+  clients for `https://` / `wss://`.
 
 ## Abstraction
 
@@ -71,7 +70,7 @@ aware callers and their reads block indefinitely.
 TLS adds `AHT.Transport.TLS.TLS_Error` for mbedTLS-specific failures
 (invalid cert chain, handshake failure, bad record, …).
 
-## `AHT.Transport.TCP` — implemented
+## `AHT.Transport.TCP`
 
 Thin wrapper over `GNAT.Sockets`. `Connect (Host, Port)`:
 
@@ -180,7 +179,7 @@ client socket.
    proves the deadline is a wall-clock budget from the `Set_`
    call, not a fresh allowance per `Read`.
 
-## `AHT.Transport.TLS` — implemented
+## `AHT.Transport.TLS`
 
 mbedTLS does the crypto; the bytes still travel over a real
 `AHT.Transport.TCP` instance held *inside* the `TLS_Transport`. There
