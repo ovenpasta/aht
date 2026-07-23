@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: alire-project/setup-alire@v4
+
+      - name: Build library (fetches and compiles mbedTLS)
+        run: alr build
+
+      - name: Build tests
+        run: alr exec -- gprbuild -P tests/tests.gpr
+
+      - name: Run pure unit tests
+        run: |
+          ./tests/bin/debug/test_url
+          ./tests/bin/debug/test_url_encoding
+          ./tests/bin/debug/test_headers
+          ./tests/bin/debug/test_bytes_buffer
+          ./tests/bin/debug/test_log
+          ./tests/bin/debug/test_ws_frames
+
+      - name: Build examples
+        run: alr exec -- gprbuild -P examples/examples.gpr
+
+      - name: Run integration suite
+        run: bash tests/run_tests.sh

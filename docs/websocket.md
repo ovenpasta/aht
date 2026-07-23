@@ -17,18 +17,17 @@ header is missing or wrong.
 
 ```ada
 type Opcode is
-  (Continuation, Text, Binary,
-   Reserved_3, Reserved_4, Reserved_5, Reserved_6, Reserved_7,
-   Close, Ping, Pong,
-   Reserved_B, Reserved_C, Reserved_D, Reserved_E, Reserved_F);
-for Opcode use
-  (Continuation => 16#0#, Text => 16#1#, Binary => 16#2#,
-   Reserved_3 => 16#3#, Reserved_4 => 16#4#, Reserved_5 => 16#5#,
-   Reserved_6 => 16#6#, Reserved_7 => 16#7#,
-   Close => 16#8#, Ping => 16#9#, Pong => 16#A#,
-   Reserved_B => 16#B#, Reserved_C => 16#C#, Reserved_D => 16#D#,
-   Reserved_E => 16#E#, Reserved_F => 16#F#);
+  (Continuation,  -- 0x0
+   Text,          -- 0x1
+   Binary,        -- 0x2
+   Close_Op,      -- 0x8
+   Ping_Op,       -- 0x9
+   Pong_Op);      -- 0xA
 ```
+
+Only the six opcodes RFC 6455 defines exist in the enumeration (with a
+representation clause pinning the wire values); a frame carrying any
+reserved opcode fails decoding with `Protocol_Error`.
 
 ### Message kind (application view)
 
@@ -52,7 +51,8 @@ subtype Any_Close_Code is Natural
 
 subtype Valid_Close_Code is Any_Close_Code
   with Dynamic_Predicate =>
-            Valid_Close_Code /= 1005  -- "no status received"
+            Valid_Close_Code /= 1004  -- reserved, no defined meaning
+    and then Valid_Close_Code /= 1005  -- "no status received"
     and then Valid_Close_Code /= 1006  -- "abnormal closure"
     and then Valid_Close_Code /= 1015; -- "TLS handshake failure"
 ```
@@ -134,7 +134,7 @@ These checks live in the codec and raise
 
 - Reserved opcodes (RFC §5.2 reserved ranges 0x3..0x7 and
   0xB..0xF) are rejected on Decode.
-- `RSV1`/`RSV2`/`RSV3` set without negotiated extension — v1
+- `RSV1`/`RSV2`/`RSV3` set without negotiated extension — the client
   negotiates none, so any RSV bit is an error.
 - Control frame (`Close`/`Ping`/`Pong`) with `FIN = 0` or
   payload > 125 bytes (RFC §5.5). Enforced by both Encode (so

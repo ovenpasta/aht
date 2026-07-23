@@ -14,7 +14,7 @@
 --      moment, and watch Await surface Aborted_Error instead of
 --      hanging.
 --
---  Run:  ./examples/bin/ex_04_async_cancel [URL] [STALL_URL]
+--  Run:  ./examples/bin/<mode>/ex_04_async_cancel [URL] [STALL_URL]
 --  URL defaults to the fixture's /hello; STALL_URL defaults to the
 --  stall fixture on :8767. Cancel takes effect on the response read,
 --  so the stall target must accept the connection first.

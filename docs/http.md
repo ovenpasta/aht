@@ -96,7 +96,7 @@ or `Authorization`: routing and policy headers stay the caller's job
 §3.3.3 calls out as a request-smuggling hazard, each raising
 `Protocol_Error` before any wire byte is written:
 
-- **`Transfer-Encoding` from the caller is rejected.** v1's buffered
+- **`Transfer-Encoding` from the caller is rejected.** The buffered
   `Write` transcribes `Body_B` verbatim, so a TE-chunked header over
   raw bytes is malformed wire; the chunked encoder is `Write_Streaming`'s
   job and it owns that header. Use `Write_Streaming` (without a
@@ -238,7 +238,7 @@ header lines until a blank line, then picks body framing:
 3. otherwise → read until the peer closes (for
    `Connection: close` responses).
 
-Only `chunked` is understood in v1 — any other
+Only `chunked` is understood — any other
 `Transfer-Encoding` (gzip, compress, chunked+gzip, …) raises
 `Protocol_Error` rather than hand back decoded bytes for a codec
 we don't have. A `Status` outside `100..599`, a missing colon on
@@ -279,7 +279,7 @@ reader forever.
   case-insensitive; `chunk-ext` after a `;` is ignored), reads the
   chunk-data with `Read_N`, then consumes the mandatory bare CRLF.
   The zero-size chunk terminates the body; a trailer section
-  follows (read and discarded — trailers are not surfaced in v1)
+  follows (read and discarded — trailers are not surfaced)
   until a bare CRLF ends the message. Raises `Protocol_Error` on
   non-hex size, size overflow past `Natural'Last`, or chunk-data
   not followed by bare CRLF.
@@ -304,7 +304,7 @@ function  Get  (Self, URL) return Response_Type;
 - **Synchronous, one request per call.** Each `Send` owns a fresh
   transport for the duration of the call, so multiple tasks can share
   one `Client_Type` without extra synchronization. `Connection: close`
-  in v1 — no keep-alive, no HTTP/2.
+  on every request — no keep-alive, no HTTP/2.
 
 - **Scheme dispatch** on `Req.Target.Scheme`:
   - `http://` → `AHT.Transport.TCP`.
@@ -578,7 +578,7 @@ Caveats:
 - **Single-use.** Once `Cancel` has been called, every subsequent
   `Send` with this handle aborts immediately. Declare a fresh
   handle per cancellable operation.
-- **No connect cancellation in v1.** `Abort_Pending` is a Read-
+- **No connect cancellation.** `Abort_Pending` is a Read-
   side hook; `Cancel` can't interrupt a `Connect` in flight. A
   hung connect is bounded by `Timeout_Seconds` (the TCP-connect
   and TLS-handshake budgets, see the per-phase breakdown above),
@@ -642,6 +642,6 @@ Lifecycle:
   scope exit, so `Cancel` + `Await` if you might want to abandon
   before the request finishes.
 
-Streaming async (`Send_Streaming_Async`) is **not** in v1. If
+Streaming async (`Send_Streaming_Async`) is not offered. If
 you want streaming + async, spawn your own task that calls
 `Send_Streaming` directly.

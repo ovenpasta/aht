@@ -6,7 +6,7 @@
 --  needs no configuration for plain HTTP. `Resp.Body_Text` renders the
 --  body bytes as a String to print.
 --
---  Run:  ./examples/bin/ex_01_get [URL]
+--  Run:  ./examples/bin/<mode>/ex_01_get [URL]
 --  Default URL is the bundled fixture's /hello route; pass any http://
 --  or https:// URL to point it elsewhere.
 

@@ -12,7 +12,7 @@
 --      headers. The client suppresses body framing for HEAD, so the
 --      response advertises a Content-Length while Body_B stays empty.
 --
---  Run:  ./examples/bin/ex_02_request [HOST]
+--  Run:  ./examples/bin/<mode>/ex_02_request [HOST]
 --  HOST defaults to the bundled fixture's origin; pass e.g.
 --  http://127.0.0.1:8764 to retarget. Paths (/echo, /hello) are
 --  appended for you.

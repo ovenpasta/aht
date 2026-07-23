@@ -33,8 +33,8 @@ function  Synchronized_Sink (Inner : Sink_Callback) return Sink_Callback;
   `stderr` on its own. The app installs a sink; the app owns
   routing (stderr, file, syslog, journald, …).
 - **Level × subsystem filter.** Every call site is tagged with a
-  short subsystem string (`"tcp"`, `"tls"`, `"http.io"`,
-  `"http.client"`, `"ws.frames"`, `"ws.client"`). There is one
+  short subsystem string (currently `"tcp"` and `"http.io"`; the
+  tag namespace is open — any string works). There is one
   global default minimum level; a per-subsystem override table
   wins on matching subsystem only. Use this to turn one subsystem
   up to `Debug` without making everything noisy.

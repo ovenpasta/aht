@@ -17,7 +17,7 @@
 --      so the download lands on disk with no sink to write yourself --
 --      the download mirror of ex_05's Stream_Source upload.
 --
---  Run:  ./examples/bin/ex_03_streaming [URL]
+--  Run:  ./examples/bin/<mode>/ex_03_streaming [URL]
 --  URL defaults to the fixture's /chunked-big; pass any URL to a large
 --  body to retarget.
 

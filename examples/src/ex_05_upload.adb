@@ -16,7 +16,7 @@
 --  trip while the body was never held in a buffer. This is the upload
 --  mirror of ex_03's stream-Target download.
 --
---  Run:  ./examples/bin/ex_05_upload [URL]
+--  Run:  ./examples/bin/<mode>/ex_05_upload [URL]
 --  URL defaults to the fixture's /echo; point it at e.g. a go-httpbin
 --  /post to try it elsewhere (drop Set_Content_Length there for a
 --  chunked upload).

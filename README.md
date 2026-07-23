@@ -6,15 +6,95 @@ layer, with TLS via mbedTLS v2.28.9.
 
 Every Ada unit lives under the `AHT.*` namespace.
 
+## Features
+
+- **HTTP/1.1 client** — `GET`/`POST`/`PUT`/`DELETE`/`HEAD`/`PATCH`/
+  `OPTIONS`, chunked transfer decoding, streaming downloads (push
+  callback or straight to an `Ada.Streams` stream), streaming uploads
+  (fixed-length or chunked, O(1) memory), async requests with
+  cross-task cancellation.
+- **WebSocket client** — `ws://` and `wss://`, text + binary,
+  fragmentation reassembly, auto ping/pong, clean close handshake,
+  blocking `Receive` or push callbacks; exercised against the
+  Autobahn|Testsuite conformance harness.
+- **TLS** — `https://` and `wss://` via mbedTLS, with certificate
+  verification (`CA_Path`) or opt-in `Insecure` mode.
+- **Contracts** — public APIs carry Ada 2012/2022 contracts (subtype
+  predicates, `Type_Invariant`, `Pre`/`Post`).
+
+Not (yet) offered: HTTP/2, connection keep-alive (each request runs
+`Connection: close`), redirect following, response compression
+(`Transfer-Encoding` other than `chunked` is rejected), trailer
+surfacing, streaming + async combined.
+
+## Quick start
+
+```ada
+with Ada.Text_IO;      use Ada.Text_IO;
+with AHT.HTTP.Client;
+with AHT.HTTP.Response;
+
+procedure Hello is
+   Client : AHT.HTTP.Client.Client_Type;
+   Resp   : AHT.HTTP.Response.Response_Type;
+begin
+   Resp := AHT.HTTP.Client.Get (Client, "https://example.com/");
+   Put_Line (Resp.Status'Image);
+   Put_Line (Resp.Body_Text);
+end Hello;
+```
+
+And the WebSocket lifecycle:
+
+```ada
+with Ada.Text_IO; use Ada.Text_IO;
+with AHT.Bytes;
+with AHT.Websocket.Client;
+
+procedure Echo is
+   use AHT.Websocket;
+   WS  : Client.Client_Type;
+   Msg : Client.Message_Type;
+begin
+   Client.Connect (WS, "wss://echo.example.net/");
+   Client.Send_Text (WS, "hello");
+   Client.Receive (WS, Msg, Timeout => 5.0);
+   Put_Line (AHT.Bytes.To_String (Msg.Payload));
+   Client.Close (WS);
+end Echo;
+```
+
+## Using it from your project
+
+The crate is built with [Alire](https://alire.ada.dev). Until it is in
+the community index, pin it by path or git URL from your own crate:
+
+```sh
+alr with aht --use=/path/to/aht        # local checkout
+alr with aht --use=https://github.com/USER/aht.git
+```
+
+## Requirements
+
+- GNAT with Ada 2022 support, via [Alire](https://alire.ada.dev)
+  (`alr`).
+- POSIX platform (Linux, macOS): the bundled mbedTLS build uses
+  pthreads. Native Windows is not supported yet.
+- First build only: network access plus `curl`, `tar`, `make`, and a C
+  compiler — `scripts/fetch_mbedtls.sh` downloads and compiles mbedTLS
+  v2.28.9 (checksum-verified) into `third_party/`.
+- Integration tests and examples additionally need `python3` (the
+  fixture server; its venv installs `websockets`) and `openssl` (test
+  certificates).
+
 ## Build
 
 ```sh
 alr build
 ```
 
-On the first build this triggers `scripts/fetch_mbedtls.sh` to fetch and
-compile mbedTLS v2.28.9 locally into `third_party/`. The produced
-library is `lib/libaht.a`.
+The produced library is `lib/<mode>/libaht.a` (default mode `debug`;
+set `BUILD_MODE=release` for the optimized build).
 
 ## Run the unit tests
 
@@ -22,13 +102,14 @@ The URL, encoding, and headers tests are pure — no server needed:
 
 ```sh
 alr exec -- gprbuild -P tests/tests.gpr
-./tests/bin/test_url
-./tests/bin/test_url_encoding
-./tests/bin/test_headers
+./tests/bin/debug/test_url
+./tests/bin/debug/test_url_encoding
+./tests/bin/debug/test_headers
 ```
 
 Integration tests (HTTP and WebSocket, plain and TLS) require the
-Python test server:
+Python test server; the script builds everything, boots the fixtures,
+and runs the whole suite:
 
 ```sh
 bash tests/run_tests.sh
@@ -44,7 +125,8 @@ easy → hard, each demonstrating one capability of the client:
 3. `ex_03_streaming` — stream a download two ways: a push `Sink`
    callback, then straight to an `Ada.Streams` stream (a temp file).
 4. `ex_04_async_cancel` — `Send_Async` / `Await`, plus cancelling a
-   second request against the stall fixture (`Aborted_Error`).
+   second request against the stall fixture — a test-server route that
+   accepts the request and then never responds (`Aborted_Error`).
 5. `ex_05_upload` — stream a file body from disk with
    `Sources.Stream_Source` (no hand-rolled `Read_Chunk`).
 6. `ex_06_ws_echo` — minimal WebSocket lifecycle: `Connect`, `Send_Text`,
@@ -57,7 +139,7 @@ easy → hard, each demonstrating one capability of the client:
    the client's `Insecure` / `CA_Path` trust fields.
 
 Each takes an optional URL/host argument and otherwise defaults to the
-bundled Python fixtures. Build them all:
+local Python fixture server from `tests/`. Build them all:
 
 ```sh
 alr exec -- gprbuild -P examples/examples.gpr
@@ -105,4 +187,4 @@ One reference file per subsystem:
 
 ## License
 
-Apache 2.0.
+Apache 2.0 — see [LICENSE](LICENSE).
