@@ -26,6 +26,8 @@ package AHT.Mbedtls.SSL is
    ERR_WANT_WRITE        : constant Interfaces.C.int := -16#6880#;
    ERR_TIMEOUT           : constant Interfaces.C.int := -16#6800#;
    ERR_PEER_CLOSE_NOTIFY : constant Interfaces.C.int := -16#7880#;
+   ERR_CONN_EOF          : constant Interfaces.C.int := -16#7280#;
+   --  What a recv callback returning 0 (end of stream) surfaces as.
    ERR_NET_RECV_FAILED   : constant Interfaces.C.int := -16#004C#;
    ERR_NET_SEND_FAILED   : constant Interfaces.C.int := -16#004E#;
 

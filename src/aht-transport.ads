@@ -40,6 +40,11 @@ package AHT.Transport is
    --  Last is the index of the last valid byte (0 if nothing was read,
    --  which signals a clean peer close). May raise `Timeout_Error` or
    --  `Aborted_Error` on implementations that support the hooks below.
+   --
+   --  Concurrency contract (all implementations): a transport supports
+   --  at most ONE task in Read and ONE task in Write concurrently — the
+   --  receiver-task-plus-sender shape the WebSocket client uses. Two
+   --  concurrent readers, or two concurrent writers, are not supported.
 
    procedure Close (Self : in out Transport_Type) is abstract;
 

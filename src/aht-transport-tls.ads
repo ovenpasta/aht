@@ -1,16 +1,15 @@
 with AHT.Bytes;
 with AHT.URL;
 
-private with System;
-private with AHT.Transport.TCP;
+private with Ada.Real_Time;
 
---  TLS transport: mbedTLS does the crypto, layered over the existing
---  GNAT.Sockets TCP transport via custom BIO callbacks
---  (mbedtls_ssl_set_bio). Because the byte I/O still goes through
---  AHT.Transport.TCP, HTTPS/WSS inherit its DNS multi-candidate
---  fallback, compound read/write deadlines, and Abort_Pending for free
---  — Set_Read_Deadline, Set_Write_Deadline and Abort_Pending below just
---  forward to it.
+--  TLS transport, layered over the TCP transport so HTTPS/WSS inherit
+--  its DNS multi-candidate fallback, compound read/write deadlines and
+--  Abort_Pending. This spec is backend-neutral: two interchangeable
+--  bodies implement it, selected at build time by the AHT_TLS_BACKEND
+--  gpr external (see docs/tls.md):
+--    * openssl — system OpenSSL 3 (libssl/libcrypto).
+--    * mbedtls — vendored mbedTLS 2.28, fetched and built on demand.
 package AHT.Transport.TLS is
 
    type TLS_Transport is new Transport_Type with private;
@@ -26,36 +25,45 @@ package AHT.Transport.TLS is
       CA_Path            : String  := "";
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last);
-   --  TCP-connect to Host:Port, then run the TLS handshake with SNI =
-   --  Host. Insecure => peer certificate is not verified (authmode
-   --  NONE); otherwise the chain is verified against CA_Path (a PEM
-   --  bundle file or a directory of certs) and a verification failure
-   --  raises TLS_Error. With CA_Path = "" and not Insecure, only the
-   --  platform-default trust applies (none is configured here), so the
-   --  handshake will reject — pass a CA bundle or set Insecure.
+   --  TCP-connect to Host:Port, then run the TLS handshake. For a DNS
+   --  name the handshake sends SNI = Host and verifies the peer
+   --  certificate against Host; for an IP-literal Host the certificate
+   --  is checked against its IP SANs (no SNI). Insecure => the peer
+   --  certificate is not verified; otherwise a verification failure
+   --  raises TLS_Error.
+   --
+   --  CA_Path names the trust anchors: a PEM bundle file or a directory
+   --  of certs. With CA_Path = "" the backends differ:
+   --    * openssl verifies against the platform's default trust store,
+   --      so public https:// endpoints work out of the box;
+   --    * mbedtls configures no default trust, so the handshake rejects
+   --      — pass a CA bundle or set Insecure.
+   --  (A CA *directory* is also backend-specific: openssl requires
+   --  c_rehash-style hashed names, mbedtls loads every file. Prefer a
+   --  bundle file for portability.)
    --
    --  Connect_Timeout is forwarded to the underlying TCP connect as its
    --  total budget across resolved candidates (see
    --  AHT.Transport.TCP.Connect); exhaustion raises Timeout_Error.
    --  Duration'Last leaves the TCP connect unbounded.
    --
-   --  Handshake_Deadline bounds the **TLS handshake only**: it is armed
-   --  as a read deadline on the underlying TCP transport just for the
-   --  handshake exchange, so a peer that stalls mid-handshake raises
-   --  Timeout_Error instead of blocking forever. It does **not** bound
-   --  DNS resolution or the TCP connect (those run before the deadline
-   --  is armed). The deadline is cleared once the handshake completes,
-   --  so post-handshake Read deadlines remain entirely the caller's to
-   --  set via Set_Read_Deadline. Duration'Last (the default) leaves the
-   --  handshake unbounded.
+   --  Handshake_Deadline bounds the **TLS handshake only**: a peer that
+   --  stalls mid-handshake raises Timeout_Error instead of blocking
+   --  forever. It does **not** bound DNS resolution or the TCP connect
+   --  (those run before it is armed). Deadlines installed earlier via
+   --  Set_Read_Deadline / Set_Write_Deadline do not apply to the
+   --  handshake either — they govern subsequent Read/Write calls and
+   --  are installed on the connection only after the handshake
+   --  succeeds. Duration'Last (the default) leaves the handshake
+   --  unbounded.
    --
-   --  Like the underlying TCP transport, a TLS transport is **single-use**:
-   --  Connect rejects an object that still owns a connection — live or
-   --  poisoned by a fatal Write (the inner TCP still owns its fd, so the
-   --  delegated TCP.Connect raises before any mbedTLS state is touched). The
-   --  contexts are deliberately not freed/reinitialized in place, since a
-   --  WSS receiver task may still be inside TLS.Read. Close the object and
-   --  use a fresh transport to reconnect.
+   --  A TLS transport is **single-use after success**: once a Connect
+   --  has completed, further Connect calls raise TLS_Error — even after
+   --  a fatal Write poisoned the session (close the object and use a
+   --  fresh transport to reconnect). A **failed** Connect, however —
+   --  TCP failure, handshake timeout, certificate rejection — releases
+   --  everything it allocated and leaves the object ready for another
+   --  Connect attempt.
 
    overriding procedure Write
      (Self : in out TLS_Transport;
@@ -65,23 +73,32 @@ package AHT.Transport.TLS is
      (Self : in out TLS_Transport;
       Data : out AHT.Bytes.Byte_Array;
       Last : out Natural);
+   --  Concurrency contract (both backends): a TLS transport supports at
+   --  most ONE task in Read and ONE task in Write concurrently — the
+   --  WSS receiver-task-plus-sender shape. Two concurrent readers or
+   --  two concurrent writers are not supported (the same restriction
+   --  the TCP transport's single-waiter selectors impose).
 
    overriding procedure Close (Self : in out TLS_Transport);
-   --  Single-threaded lifecycle reclaim: best-effort close_notify, then
-   --  closes the inner TCP transport and frees the mbedTLS contexts
-   --  (SSL/config/CA/RNG/entropy). Idempotent.
+   --  Single-threaded lifecycle reclaim: best-effort close_notify (
+   --  skipped when the session died of a fatal error), then closes the
+   --  inner TCP transport and unconditionally frees the backend
+   --  contexts. Idempotent.
    --
-   --  Precondition (caller's responsibility, not enforceable here): no other
-   --  task may be inside `Read`/`Write` on this transport when `Close` runs.
-   --  Freeing the mbedTLS contexts while a receiver is still unwinding
-   --  through `Read`/the BIO callbacks would be a use-after-free, so the
-   --  caller must quiesce all read/write tasks first — exactly as
-   --  `Websocket.Client.Close` does by waiting on the receiver task
-   --  (`Wait_Closed`) before closing the transport. For the concurrent
-   --  fatal-write case the inner TCP is `Poison`ed (reader-safe), deferring
-   --  this reclaim until the reader has exited.
+   --  Precondition (caller's responsibility, not enforceable here): no
+   --  other task may be inside Read/Write — or call Is_Connected —
+   --  on this transport while Close runs. Freeing the backend contexts
+   --  under a live reader would be a use-after-free, so the caller must
+   --  quiesce all read/write tasks first — exactly as
+   --  Websocket.Client.Close does by waiting on the receiver task
+   --  (Wait_Closed) before closing the transport. For the concurrent
+   --  fatal-write case the inner TCP is Poison'ed (reader-safe),
+   --  deferring this reclaim until the reader has exited.
 
    overriding function Is_Connected (Self : TLS_Transport) return Boolean;
+   --  True after a successful Connect until Close — except that a
+   --  session poisoned by a fatal Read/Write reports False (via a
+   --  task-safe latch, so a reader may query it while a writer fails).
 
    overriding procedure Set_Read_Deadline
      (Self     : in out TLS_Transport;
@@ -90,39 +107,46 @@ package AHT.Transport.TLS is
    overriding procedure Set_Write_Deadline
      (Self     : in out TLS_Transport;
       Deadline : Duration);
-   --  Forwards to the underlying TCP transport's write deadline so a
-   --  stalled HTTPS/WSS upload (Send_CB -> TCP.Write) is bounded the
-   --  same way plain HTTP is. Without this override a dispatching
-   --  Set_Write_Deadline would fall through to the base null procedure
-   --  and the TLS write deadline would never be armed.
+   --  Compound budgets measured from the call, per the base contract.
+   --  Both are mirrored here (as absolute times computed once) and
+   --  forwarded to the inner TCP transport; the mirrors let the
+   --  backends bound every internal wait — including waits performed on
+   --  behalf of the *other* direction's protocol traffic — by the
+   --  deadline of the operation that performs them. Callable before
+   --  Connect: the deadline then applies to Read/Write on the future
+   --  connection (not to the handshake).
 
    overriding procedure Abort_Pending (Self : in out TLS_Transport);
+   --  Unblocks a Read/Write in progress with Aborted_Error. No-op when
+   --  the transport has no connection state.
 
 private
 
-   --  Which Ada exception a BIO callback swallowed, if any. Set by the
-   --  send/recv callbacks (Ada exceptions must not cross the C frame),
-   --  read back by Connect/Read/Write to re-raise the right exception
-   --  after mbedTLS surfaces the corresponding negative return code.
-   type BIO_Error_Kind is
-     (BIO_None, BIO_Timeout, BIO_Aborted, BIO_Transport);
-
-   --  Passed to mbedtls_ssl_set_bio as the opaque p_bio. The callbacks
-   --  recover it from the void* ctx by address overlay.
-   type BIO_Context is record
-      TCP        : access AHT.Transport.TCP.TCP_Transport;
-      Last_Error : BIO_Error_Kind := BIO_None;
-   end record;
+   --  All backend-specific state (crypto contexts, the inner TCP
+   --  transport, synchronization) lives behind this deferred-to-body
+   --  ("Taft") type, so the two backend bodies can complete it
+   --  differently while sharing this spec verbatim.
+   type Backend_State;
+   type Backend_State_Access is access Backend_State;
 
    type TLS_Transport is new Transport_Type with record
-      TCP       : aliased AHT.Transport.TCP.TCP_Transport;
-      BIO       : aliased BIO_Context;
-      SSL       : System.Address := System.Null_Address;  --  ssl_context*
-      Conf      : System.Address := System.Null_Address;  --  ssl_config*
-      CTR_DRBG  : System.Address := System.Null_Address;
-      Entropy   : System.Address := System.Null_Address;
-      CA_Cert   : System.Address := System.Null_Address;  --  x509_crt*
-      Connected : Boolean := False;
+      State              : Backend_State_Access := null;
+      Used               : Boolean := False;
+      --  Latched by a SUCCESSFUL handshake only, so a failed Connect
+      --  leaves the object retryable while a completed session makes
+      --  the transport single-use.
+      Connected          : Boolean := False;
+      --  Lifecycle-owned: written only by Connect/Close under their
+      --  single-threaded preconditions. Fatal mid-session errors latch
+      --  a protected flag inside Backend_State instead (RM 9.10).
+      Has_Read_Deadline  : Boolean := False;
+      Read_Deadline      : Ada.Real_Time.Time := Ada.Real_Time.Time_First;
+      Has_Write_Deadline : Boolean := False;
+      Write_Deadline     : Ada.Real_Time.Time := Ada.Real_Time.Time_First;
+      --  Absolute deadline mirrors, computed ONCE in the setters (the
+      --  budget is measured from the setter call; recomputing later
+      --  would silently refresh it). Out here rather than in
+      --  Backend_State because the setters must work with State = null.
    end record;
 
 end AHT.Transport.TLS;

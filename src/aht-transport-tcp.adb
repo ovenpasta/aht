@@ -319,9 +319,14 @@ package body AHT.Transport.TCP is
       end if;
    end Connect;
 
-   overriding procedure Write
-     (Self : in out TCP_Transport;
-      Data : AHT.Bytes.Byte_Array)
+   --  Common Write implementation: the deadline is a parameter so the
+   --  overriding Write can pass the compound Set_Write_Deadline state
+   --  and the deadline-explicit overload can pass its own bound.
+   procedure Write_Bounded
+     (Self         : in out TCP_Transport;
+      Data         : AHT.Bytes.Byte_Array;
+      Has_Deadline : Boolean;
+      Deadline_At  : Ada.Real_Time.Time)
    is
       --  Send in bounded windows. A Data'Length-sized Stream_Element_Array
       --  would be a dynamically-sized *primary*-stack object that overflows
@@ -365,10 +370,10 @@ package body AHT.Transport.TCP is
                declare
                   Timeout : Duration := Duration'Last;
                begin
-                  if Self.Has_Write_Deadline then
+                  if Has_Deadline then
                      declare
                         Remaining : constant Time_Span :=
-                          Self.Write_Deadline_At - Clock;
+                          Deadline_At - Clock;
                      begin
                         if Remaining <= Time_Span_Zero then
                            Log.Debug ("write deadline expired (pre-park)");
@@ -459,12 +464,32 @@ package body AHT.Transport.TCP is
             Poison (Self);
          end if;
          raise;
+   end Write_Bounded;
+
+   overriding procedure Write
+     (Self : in out TCP_Transport;
+      Data : AHT.Bytes.Byte_Array) is
+   begin
+      Write_Bounded
+        (Self, Data, Self.Has_Write_Deadline, Self.Write_Deadline_At);
    end Write;
 
-   overriding procedure Read
-     (Self : in out TCP_Transport;
-      Data : out AHT.Bytes.Byte_Array;
-      Last : out Natural)
+   procedure Write
+     (Self     : in out TCP_Transport;
+      Data     : AHT.Bytes.Byte_Array;
+      Deadline : Ada.Real_Time.Time) is
+   begin
+      Write_Bounded (Self, Data, True, Deadline);
+   end Write;
+
+   --  Common Read implementation, deadline-parameterized like
+   --  Write_Bounded above.
+   procedure Read_Bounded
+     (Self         : in out TCP_Transport;
+      Data         : out AHT.Bytes.Byte_Array;
+      Last         : out Natural;
+      Has_Deadline : Boolean;
+      Deadline_At  : Ada.Real_Time.Time)
    is
       Buffer   : Stream_Element_Array (1 .. Stream_Element_Offset (Data'Length));
       Got_Last : Stream_Element_Offset;
@@ -488,10 +513,10 @@ package body AHT.Transport.TCP is
          --  Resolve the compound deadline. Subtracting the stored
          --  absolute instant from now gives *remaining* budget; if it's
          --  gone (or just about to go), fail without even parking.
-         if Self.Has_Deadline then
+         if Has_Deadline then
             declare
                Remaining : constant Time_Span :=
-                 Self.Deadline_At - Clock;
+                 Deadline_At - Clock;
             begin
                if Remaining <= Time_Span_Zero then
                   Log.Debug ("read deadline expired (pre-park)");
@@ -558,6 +583,23 @@ package body AHT.Transport.TCP is
       when E : Socket_Error =>
          raise Transport_Error with
            "TCP read failed: " & Ada.Exceptions.Exception_Message (E);
+   end Read_Bounded;
+
+   overriding procedure Read
+     (Self : in out TCP_Transport;
+      Data : out AHT.Bytes.Byte_Array;
+      Last : out Natural) is
+   begin
+      Read_Bounded (Self, Data, Last, Self.Has_Deadline, Self.Deadline_At);
+   end Read;
+
+   procedure Read
+     (Self     : in out TCP_Transport;
+      Data     : out AHT.Bytes.Byte_Array;
+      Last     : out Natural;
+      Deadline : Ada.Real_Time.Time) is
+   begin
+      Read_Bounded (Self, Data, Last, True, Deadline);
    end Read;
 
    overriding procedure Close (Self : in out TCP_Transport) is

@@ -17,11 +17,14 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-# Build profile (debug|release). Exported so the gpr external("BUILD_MODE")
-# picks it up and the per-mode Exec_Dir (examples/bin/$BUILD_MODE) resolves
-# to the binaries we just built.
+# Build profile (debug|release) and TLS backend. Exported so the gpr
+# externals pick them up and the per-variant Exec_Dir
+# (examples/bin/$BUILD_MODE-$AHT_TLS_BACKEND) resolves to the binaries
+# we just built. Keep the backend default in lockstep with aht.gpr's.
 BUILD_MODE=${BUILD_MODE:-debug}
 export BUILD_MODE
+AHT_TLS_BACKEND=${AHT_TLS_BACKEND:-openssl}
+export AHT_TLS_BACKEND
 
 VENV=tests/.venv
 LOG=$(mktemp -t aht-examples.XXXXXX.log)
@@ -109,7 +112,7 @@ fi
 FAILED=0
 TOTAL=0
 for name in $NAMES; do
-    bin="examples/bin/$BUILD_MODE/$name"
+    bin="examples/bin/$BUILD_MODE-$AHT_TLS_BACKEND/$name"
     TOTAL=$((TOTAL + 1))
     echo "----- $name -----"
     if [ ! -x "$bin" ]; then

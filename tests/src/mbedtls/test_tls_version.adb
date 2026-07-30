@@ -1,4 +1,5 @@
---  Smoke test for the mbedTLS bind/link chain. By calling
+--  Smoke test for the mbedTLS bind/link chain (the mbedtls source of
+--  the backend-neutral test_tls_version main). By calling
 --  AHT.Mbedtls.Version.Full_Version_String we exercise:
 --    * the Linker_Options pragmas in AHT.Mbedtls finding
 --      libmbedtls / libmbedx509 / libmbedcrypto in
@@ -7,20 +8,19 @@
 --    * the char_array <-> Ada String round-trip.
 --
 --  If this passes, the rest of the binding surface (ssl_*,
---  ctr_drbg_*, entropy_*, x509_*) can land in subsequent commits
---  with confidence that the build wiring is correct.
+--  ctr_drbg_*, entropy_*, x509_*) is wired correctly.
 
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
 
 with AHT.Mbedtls.Version;
 
-procedure Test_Mbedtls_Version is
+procedure Test_TLS_Version is
    Failures : Natural := 0;
 
    procedure Fail (Msg : String) is
    begin
-      Put_Line ("test_mbedtls_version: FAIL — " & Msg);
+      Put_Line ("test_tls_version: FAIL — " & Msg);
       Failures := Failures + 1;
    end Fail;
 
@@ -42,11 +42,11 @@ begin
    end if;
 
    if Failures = 0 then
-      Put_Line ("test_mbedtls_version: OK");
+      Put_Line ("test_tls_version: OK (mbedtls backend)");
       Ada.Command_Line.Set_Exit_Status (0);
    else
-      Put_Line ("test_mbedtls_version:" & Failures'Image
+      Put_Line ("test_tls_version:" & Failures'Image
                 & " failure(s)");
       Ada.Command_Line.Set_Exit_Status (1);
    end if;
-end Test_Mbedtls_Version;
+end Test_TLS_Version;

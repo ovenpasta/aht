@@ -21,6 +21,15 @@
 
 set -eu
 
+# Only the mbedtls TLS backend needs the vendored library; under any
+# other AHT_TLS_BACKEND this pre-build action is a no-op. Keep this
+# default in lockstep with the AHT_TLS_BACKEND default in aht.gpr.
+# (The env var is the supported selection route precisely because it
+# reaches this action; a -X/gpr-set-externals-only selection does not.)
+if [ "${AHT_TLS_BACKEND:-openssl}" != "mbedtls" ]; then
+    exit 0
+fi
+
 VERSION=2.28.9
 SHA256=e4dbcf86a4fb31506482888560f02b161e0ecfb82fee0643abcfc86abee5817e
 URL=https://github.com/Mbed-TLS/mbedtls/archive/refs/tags/v${VERSION}.tar.gz

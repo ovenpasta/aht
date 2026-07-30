@@ -2,7 +2,7 @@
 
 An Ada 2022 library providing a synchronous HTTP/1.1 client and a
 concurrent WebSocket (RFC 6455) client on top of a shared transport
-layer, with TLS via mbedTLS v2.28.9.
+layer, with TLS via OpenSSL 3 (default) or mbedTLS.
 
 Every Ada unit lives under the `AHT.*` namespace.
 
@@ -17,8 +17,11 @@ Every Ada unit lives under the `AHT.*` namespace.
   fragmentation reassembly, auto ping/pong, clean close handshake,
   blocking `Receive` or push callbacks; exercised against the
   Autobahn|Testsuite conformance harness.
-- **TLS** — `https://` and `wss://` via mbedTLS, with certificate
-  verification (`CA_Path`) or opt-in `Insecure` mode.
+- **TLS** — `https://` and `wss://`, with certificate verification
+  against the system trust store or a caller CA bundle (`CA_Path`),
+  or opt-in `Insecure` mode. Two build-time backends: system
+  OpenSSL 3 (default, TLS 1.3) or vendored mbedTLS 2.28
+  (`AHT_TLS_BACKEND=mbedtls`) — see [`docs/tls.md`](docs/tls.md).
 - **Contracts** — public APIs carry Ada 2012/2022 contracts (subtype
   predicates, `Type_Invariant`, `Pre`/`Post`).
 
@@ -78,11 +81,15 @@ alr with aht --use=https://github.com/USER/aht.git
 
 - GNAT with Ada 2022 support, via [Alire](https://alire.ada.dev)
   (`alr`).
-- POSIX platform (Linux, macOS): the bundled mbedTLS build uses
-  pthreads. Native Windows is not supported yet.
-- First build only: network access plus `curl`, `tar`, `make`, and a C
-  compiler — `scripts/fetch_mbedtls.sh` downloads and compiles mbedTLS
-  v2.28.9 (checksum-verified) into `third_party/`.
+- POSIX platform (Linux, macOS). Native Windows is not supported yet.
+- System OpenSSL 3 development files (`libssl-dev` on Debian/Ubuntu;
+  `brew install openssl@3` on macOS with
+  `AHT_OPENSSL_DIR=$(brew --prefix openssl@3)`) — the default TLS
+  backend links against them.
+- Only for the optional mbedTLS backend (`AHT_TLS_BACKEND=mbedtls`):
+  network access plus `curl`, `tar`, `make`, and a C compiler on the
+  first build — `scripts/fetch_mbedtls.sh` downloads and compiles
+  mbedTLS v2.28.9 (checksum-verified) into `third_party/`.
 - Integration tests and examples additionally need `python3` (the
   fixture server; its venv installs `websockets`) and `openssl` (test
   certificates).
@@ -93,8 +100,9 @@ alr with aht --use=https://github.com/USER/aht.git
 alr build
 ```
 
-The produced library is `lib/<mode>/libaht.a` (default mode `debug`;
-set `BUILD_MODE=release` for the optimized build).
+The produced library is `lib/<mode>-<backend>/libaht.a` (default
+`debug-openssl`; set `BUILD_MODE=release` for the optimized build —
+the TLS backend dimension is described in `docs/tls.md`).
 
 ## Run the unit tests
 
@@ -102,9 +110,9 @@ The URL, encoding, and headers tests are pure — no server needed:
 
 ```sh
 alr exec -- gprbuild -P tests/tests.gpr
-./tests/bin/debug/test_url
-./tests/bin/debug/test_url_encoding
-./tests/bin/debug/test_headers
+./tests/bin/debug-openssl/test_url
+./tests/bin/debug-openssl/test_url_encoding
+./tests/bin/debug-openssl/test_headers
 ```
 
 Integration tests (HTTP and WebSocket, plain and TLS) require the
@@ -145,10 +153,11 @@ local Python fixture server from `tests/`. Build them all:
 alr exec -- gprbuild -P examples/examples.gpr
 ```
 
-Run one (binaries land under `examples/bin/<mode>/`, default `debug`):
+Run one (binaries land under `examples/bin/<mode>-<backend>/`,
+default `debug-openssl`):
 
 ```sh
-./examples/bin/debug/ex_01_get http://127.0.0.1:8764/hello
+./examples/bin/debug-openssl/ex_01_get http://127.0.0.1:8764/hello
 ```
 
 Or build, boot the fixtures, and run the whole ladder in one command:
@@ -170,8 +179,10 @@ One reference file per subsystem:
   helpers, client.
 - [`docs/transport.md`](docs/transport.md) — `Transport_Type`
   abstraction, TCP, TLS.
+- [`docs/tls.md`](docs/tls.md) — TLS backend selection (OpenSSL /
+  mbedTLS), per-backend semantics, the OpenSSL engine design.
 - [`docs/mbedtls.md`](docs/mbedtls.md) — how mbedTLS v2.28.9 is
-  fetched, built, and bound.
+  fetched, built, and bound (the mbedtls backend).
 - [`docs/websocket.md`](docs/websocket.md) — frame codec, concurrency
   model, client API.
 
@@ -181,7 +192,7 @@ One reference file per subsystem:
 - **Contracts**: public APIs use Ada 2012/2022 contracts (subtype
   predicates, `Type_Invariant`, `Pre`/`Post`) wherever they meaningfully
   constrain state. Prefer contracts over explanatory comments.
-- **C bindings** (currently mbedTLS) are **generated** via
+- **C bindings** (OpenSSL, mbedTLS) are **generated** via
   `gcc -fdump-ada-spec` in a scratch directory and curated into
   `src/` — never hand-written.
 

@@ -1,13 +1,22 @@
 #!/bin/sh
 #
-# AHT test orchestrator: builds the library + test binaries, brings
-# up the six Python fixtures (HTTP on 8764, WebSocket on 8765, HTTPS
-# on 8766, a silent stall server on 8767 for the TLS handshake-timeout
-# test, a TLS-wrapped WebSocket echo on 8768, and a deaf-TLS server on
-# 8769 that handshakes then never reads for the TLS write-poison test),
-# optionally brings up go-httpbin on 8770 when a Go toolchain is
-# available (see tests/httpbin/get_httpbin.sh), runs every test main
-# listed in tests/tests.gpr, and tears the fixtures down on exit.
+# AHT test orchestrator: builds the library + test binaries, brings up
+# the Python fixtures, runs every test main listed in tests/tests.gpr,
+# and tears the fixtures down on exit.
+#
+# Fixtures, by port:
+#   8764  HTTP
+#   8765  WebSocket echo
+#   8766  HTTPS
+#   8767  stall — accepts, then silence (handshake-timeout test)
+#   8768  wss echo
+#   8769  deaf TLS — handshakes, never reads (write-poison test)
+#   8771  abrupt close — no close_notify (truncation policy)
+#   8773  corrupted record (integrity failure)
+#   8774  invalid handshake record / 8775 dribbled header
+#   8776  mid-session corruption under concurrency
+#   8770  go-httpbin, optional — only when a Go toolchain can build it
+#         (see tests/httpbin/get_httpbin.sh); test_httpbin SKIPs otherwise.
 #
 # Self-contained tests (test_url, test_url_encoding, test_headers,
 # test_log, test_tcp, test_http_io, test_http_wire, test_http_client,
@@ -24,6 +33,13 @@ cd "$(dirname "$0")/.."
 BUILD_MODE=${BUILD_MODE:-debug}
 export BUILD_MODE
 
+# TLS backend (openssl|mbedtls). Exported so the gpr
+# `external("AHT_TLS_BACKEND")` AND the Alire pre-build action
+# (scripts/fetch_mbedtls.sh gates on it) both see the same choice.
+# Keep the default in lockstep with aht.gpr's.
+AHT_TLS_BACKEND=${AHT_TLS_BACKEND:-openssl}
+export AHT_TLS_BACKEND
+
 VENV=tests/.venv
 LOG=$(mktemp -t aht-server.XXXXXX.log)
 HTTP_PID=
@@ -32,6 +48,10 @@ TLS_PID=
 STALL_PID=
 WSS_PID=
 TLSDEAF_PID=
+TLSABRUPT_PID=
+TLSCORRUPT_PID=
+TLSBADHS_PID=
+TLSCONC_PID=
 HTTPBIN_PID=
 
 cleanup() {
@@ -58,6 +78,22 @@ cleanup() {
     if [ -n "$TLSDEAF_PID" ]; then
         kill "$TLSDEAF_PID" 2>/dev/null || true
         wait "$TLSDEAF_PID" 2>/dev/null || true
+    fi
+    if [ -n "$TLSABRUPT_PID" ]; then
+        kill "$TLSABRUPT_PID" 2>/dev/null || true
+        wait "$TLSABRUPT_PID" 2>/dev/null || true
+    fi
+    if [ -n "$TLSCORRUPT_PID" ]; then
+        kill "$TLSCORRUPT_PID" 2>/dev/null || true
+        wait "$TLSCORRUPT_PID" 2>/dev/null || true
+    fi
+    if [ -n "$TLSBADHS_PID" ]; then
+        kill "$TLSBADHS_PID" 2>/dev/null || true
+        wait "$TLSBADHS_PID" 2>/dev/null || true
+    fi
+    if [ -n "$TLSCONC_PID" ]; then
+        kill "$TLSCONC_PID" 2>/dev/null || true
+        wait "$TLSCONC_PID" 2>/dev/null || true
     fi
     if [ -n "$HTTPBIN_PID" ]; then
         kill "$HTTPBIN_PID" 2>/dev/null || true
@@ -86,7 +122,7 @@ PY="$VENV"/bin/python3
 echo "==> generating self-signed test cert"
 sh scripts/generate_cert.sh
 
-echo "==> starting HTTP (8764) + WS (8765) + TLS (8766) + stall (8767) + wss (8768) + tlsdeaf (8769) fixtures"
+echo "==> starting HTTP (8764) + WS (8765) + TLS (8766) + stall (8767) + wss (8768) + tlsdeaf (8769) + tlsabrupt (8771) + tlscorrupt (8773) + tlsbadhandshake (8774+8775) + tlsconcurrent (8776) fixtures"
 "$PY" tests/server/server.py          >>"$LOG" 2>&1 &
 HTTP_PID=$!
 "$PY" tests/server/server_ws.py       >>"$LOG" 2>&1 &
@@ -99,6 +135,14 @@ STALL_PID=$!
 WSS_PID=$!
 "$PY" tests/server/server_tls_deaf.py >>"$LOG" 2>&1 &
 TLSDEAF_PID=$!
+"$PY" tests/server/server_tls_abrupt.py >>"$LOG" 2>&1 &
+TLSABRUPT_PID=$!
+"$PY" tests/server/server_tls_corrupt.py >>"$LOG" 2>&1 &
+TLSCORRUPT_PID=$!
+"$PY" tests/server/server_tls_badhandshake.py >>"$LOG" 2>&1 &
+TLSBADHS_PID=$!
+"$PY" tests/server/server_tls_concurrent.py >>"$LOG" 2>&1 &
+TLSCONC_PID=$!
 
 # Wait for every fixture's READY line (printed once it is listening).
 # 5 s should be plenty; bail out loudly if any never appears so a
@@ -110,9 +154,15 @@ for _ in $(seq 1 50); do
     HAS_STALL=$(grep -c   '^READY stall '   "$LOG" 2>/dev/null || true)
     HAS_WSS=$(grep -c     '^READY wss '     "$LOG" 2>/dev/null || true)
     HAS_TLSDEAF=$(grep -c '^READY tlsdeaf ' "$LOG" 2>/dev/null || true)
+    HAS_TLSABRUPT=$(grep -c '^READY tlsabrupt ' "$LOG" 2>/dev/null || true)
+    HAS_TLSCORRUPT=$(grep -c '^READY tlscorrupt ' "$LOG" 2>/dev/null || true)
+    HAS_TLSBADHS=$(grep -c '^READY tlsbadhandshake ' "$LOG" 2>/dev/null || true)
+    HAS_TLSCONC=$(grep -c '^READY tlsconcurrent ' "$LOG" 2>/dev/null || true)
     if [ "$HAS_HTTP" -ge 1 ] && [ "$HAS_WS" -ge 1 ] \
        && [ "$HAS_TLS" -ge 1 ] && [ "$HAS_STALL" -ge 1 ] \
-       && [ "$HAS_WSS" -ge 1 ] && [ "$HAS_TLSDEAF" -ge 1 ]; then
+       && [ "$HAS_WSS" -ge 1 ] && [ "$HAS_TLSDEAF" -ge 1 ] \
+       && [ "$HAS_TLSABRUPT" -ge 1 ] && [ "$HAS_TLSCORRUPT" -ge 1 ] \
+       && [ "$HAS_TLSBADHS" -ge 1 ] && [ "$HAS_TLSCONC" -ge 1 ]; then
         break
     fi
     sleep 0.1
@@ -123,13 +173,21 @@ HAS_TLS=$(grep -c     '^READY tls '     "$LOG" 2>/dev/null || echo 0)
 HAS_STALL=$(grep -c   '^READY stall '   "$LOG" 2>/dev/null || echo 0)
 HAS_WSS=$(grep -c     '^READY wss '     "$LOG" 2>/dev/null || echo 0)
 HAS_TLSDEAF=$(grep -c '^READY tlsdeaf ' "$LOG" 2>/dev/null || echo 0)
+HAS_TLSABRUPT=$(grep -c '^READY tlsabrupt ' "$LOG" 2>/dev/null || echo 0)
+HAS_TLSCORRUPT=$(grep -c '^READY tlscorrupt ' "$LOG" 2>/dev/null || echo 0)
+HAS_TLSBADHS=$(grep -c '^READY tlsbadhandshake ' "$LOG" 2>/dev/null || echo 0)
+HAS_TLSCONC=$(grep -c '^READY tlsconcurrent ' "$LOG" 2>/dev/null || echo 0)
 if [ "$HAS_HTTP" -lt 1 ] || [ "$HAS_WS" -lt 1 ] \
    || [ "$HAS_TLS" -lt 1 ] || [ "$HAS_STALL" -lt 1 ] \
-   || [ "$HAS_WSS" -lt 1 ] || [ "$HAS_TLSDEAF" -lt 1 ]
+   || [ "$HAS_WSS" -lt 1 ] || [ "$HAS_TLSDEAF" -lt 1 ] \
+   || [ "$HAS_TLSABRUPT" -lt 1 ] || [ "$HAS_TLSCORRUPT" -lt 1 ] \
+   || [ "$HAS_TLSBADHS" -lt 1 ] || [ "$HAS_TLSCONC" -lt 1 ]
 then
     echo "FATAL: fixtures did not become ready in 5s (http=$HAS_HTTP "
     echo "ws=$HAS_WS tls=$HAS_TLS stall=$HAS_STALL wss=$HAS_WSS"
-    echo "tlsdeaf=$HAS_TLSDEAF); log follows:"
+    echo "tlsdeaf=$HAS_TLSDEAF tlsabrupt=$HAS_TLSABRUPT"
+    echo "tlscorrupt=$HAS_TLSCORRUPT tlsbadhs=$HAS_TLSBADHS"
+    echo "tlsconc=$HAS_TLSCONC); log follows:"
     cat "$LOG"
     exit 2
 fi
@@ -178,7 +236,7 @@ fi
 FAILED=0
 TOTAL=0
 for name in $NAMES; do
-    bin="tests/bin/$BUILD_MODE/$name"
+    bin="tests/bin/$BUILD_MODE-$AHT_TLS_BACKEND/$name"
     TOTAL=$((TOTAL + 1))
     if [ ! -x "$bin" ]; then
         echo "  MISSING $name (not built)"

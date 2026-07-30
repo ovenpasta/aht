@@ -181,22 +181,22 @@ begin
          end;
       end if;
 
-      --  Phase 2 (Codex slice-1 F-E / F-F, TLS counterpart): a TLS transport
-      --  is single-use. The poisoned object (Drop_Connection flipped
-      --  Connected False but left the inner TCP poisoned and the mbedTLS
-      --  contexts live) must NOT be reconnected in place — freeing/reusing
-      --  the SSL/config/CA/RNG objects while a WSS receiver could still be
-      --  inside TLS.Read would be a use-after-free. So an in-place reconnect
-      --  must be rejected (the inner TCP still owns its fd → TCP.Connect
-      --  raises before any TLS state is touched); the caller has to Close and
-      --  use a fresh transport.
+      --  Phase 2: a TLS transport is single-use after success. The
+      --  poisoned object (Drop_Connection latched Fatal but left the
+      --  inner TCP poisoned and the crypto contexts live) must NOT be
+      --  reconnected in place — freeing/reusing the backend state while
+      --  a WSS receiver could still be inside TLS.Read would be a
+      --  use-after-free. The Used latch (set by the earlier successful
+      --  handshake) rejects the attempt with TLS_Error before any
+      --  backend state is touched; the caller has to Close and use a
+      --  fresh transport.
       begin
          T.Connect (Host, 8766, Insecure => True, Handshake_Deadline => 2.0);
          Fail ("reconnect: in-place Connect on a poisoned TLS transport "
                & "succeeded (must reject; transport is single-use)");
       exception
-         when AHT.Transport.Transport_Error =>
-            null;  --  expected: inner TCP "still owns a connection"
+         when AHT.Transport.TLS.TLS_Error =>
+            null;  --  expected: Used latch rejects a second Connect
          when E : others =>
             Fail ("reconnect: in-place Connect raised unexpected "
                   & Ada.Exceptions.Exception_Name (E) & " — "

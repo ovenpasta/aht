@@ -1,9 +1,9 @@
+with Ada.Real_Time;
 with Ada.Strings.Unbounded;
 
 with AHT.Bytes;
 with AHT.URL;
 
-private with Ada.Real_Time;
 private with GNAT.Sockets;
 
 package AHT.Transport.TCP is
@@ -70,6 +70,28 @@ package AHT.Transport.TCP is
      (Self : in out TCP_Transport;
       Data : out AHT.Bytes.Byte_Array;
       Last : out Natural);
+   --  Concurrency contract: at most ONE task in Read and ONE task in
+   --  Write concurrently (the receiver-task-plus-sender shape). Each
+   --  direction parks on its own single-waiter selector, so a second
+   --  concurrent reader (or writer) is not supported.
+
+   procedure Read
+     (Self     : in out TCP_Transport;
+      Data     : out AHT.Bytes.Byte_Array;
+      Last     : out Natural;
+      Deadline : Ada.Real_Time.Time);
+
+   procedure Write
+     (Self     : in out TCP_Transport;
+      Data     : AHT.Bytes.Byte_Array;
+      Deadline : Ada.Real_Time.Time);
+   --  Deadline-explicit overloads for callers that must bound ONE
+   --  operation by an absolute instant, independent of the compound
+   --  deadlines installed via Set_*_Deadline (which are ignored for
+   --  that call). Semantics are otherwise identical, including
+   --  Abort_Pending and the write-poison rules. Used by the TLS
+   --  backends, e.g. to bound a network wait performed on behalf of
+   --  the other direction's operation by THAT operation's deadline.
 
    overriding procedure Close (Self : in out TCP_Transport);
    --  Single-threaded lifecycle reclaim: closes the socket and both
@@ -134,9 +156,9 @@ private
       --  Selector_Open.
       Selector_Open      : Boolean := False;
       Has_Deadline       : Boolean := False;
-      Deadline_At        : Ada.Real_Time.Time;
+      Deadline_At        : Ada.Real_Time.Time := Ada.Real_Time.Time_First;
       Has_Write_Deadline : Boolean := False;
-      Write_Deadline_At  : Ada.Real_Time.Time;
+      Write_Deadline_At  : Ada.Real_Time.Time := Ada.Real_Time.Time_First;
       Connected          : Boolean := False;
       Used               : Boolean := False;
       --  Latched True at the first fully-successful Connect and never

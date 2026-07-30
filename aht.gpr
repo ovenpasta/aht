@@ -4,18 +4,45 @@ library project Aht is
    for Library_Kind use "static";
 
    for Languages   use ("Ada", "C");
-   for Source_Dirs use ("src", "csrc");
 
    type Build_Mode_Kind is ("debug", "release");
    Build_Mode : Build_Mode_Kind := external ("BUILD_MODE", "debug");
 
-   --  Output dirs are per-mode so debug and release artifacts never
-   --  clobber each other (a release build used to overwrite the debug
+   --  TLS backend selection. Set via the AHT_TLS_BACKEND environment
+   --  variable (or -XAHT_TLS_BACKEND=...): the env-var route is the
+   --  supported one, because it also reaches the Alire pre-build action
+   --  (scripts/fetch_mbedtls.sh gates itself on it — keep that script's
+   --  default in lockstep with this one). Prefixed name on purpose:
+   --  gprbuild externals share one namespace across the whole build
+   --  closure, and an unqualified TLS_BACKEND could collide with
+   --  another crate's.
+   type TLS_Backend_Kind is ("openssl", "mbedtls");
+   TLS_Backend : TLS_Backend_Kind := external ("AHT_TLS_BACKEND", "openssl");
+
+   --  Where the system OpenSSL 3 lives. /usr is right for Linux;
+   --  macOS needs the Homebrew prefix (Apple ships no OpenSSL headers):
+   --  AHT_OPENSSL_DIR=$(brew --prefix openssl@3)
+   Openssl_Dir := external ("AHT_OPENSSL_DIR", "/usr");
+
+   --  Exactly one backend's sources compile: the shared spec
+   --  src/aht-transport-tls.ads has one body per backend directory,
+   --  alongside that backend's bindings and C glue.
+   case TLS_Backend is
+      when "mbedtls" =>
+         for Source_Dirs use ("src", "src/tls/mbedtls", "csrc/mbedtls");
+      when "openssl" =>
+         for Source_Dirs use ("src", "src/tls/openssl", "csrc/openssl");
+   end case;
+
+   --  Output dirs are per-mode AND per-backend so no combination ever
+   --  clobbers another (a release build used to overwrite the debug
    --  .o/.ali/libaht.a in a shared dir, forcing a full rebuild on the
-   --  next debug run). Consumers reach the library through this project,
-   --  so the suffixed Library_Dir resolves automatically.
-   for Object_Dir  use "obj/" & Build_Mode;
-   for Library_Dir use "lib/" & Build_Mode;
+   --  next debug run; backend switches would do the same). Consumers
+   --  reach the library through this project, so the suffixed
+   --  Library_Dir resolves automatically.
+   Variant := Build_Mode & "-" & TLS_Backend;
+   for Object_Dir  use "obj/" & Variant;
+   for Library_Dir use "lib/" & Variant;
 
    --  Absolute paths: gprbuild runs the compilers from the object dir, so
    --  a project-relative path would not resolve. Aht'Project_Dir is the
@@ -39,17 +66,24 @@ library project Aht is
                "-gnat2022");
       end case;
 
-      --  The C glue (csrc/aht_mbedtls_glue.c) needs the mbedTLS headers,
-      --  AND it must see the exact same config macros the library was
-      --  compiled with — MBEDTLS_THREADING_C adds a mutex member to
-      --  several context structs, so a glue translation unit that omits
-      --  it computes a smaller sizeof, under-allocates in *_new, and
-      --  mbedtls_*_init then writes past the block (heap corruption).
-      --  Keep these defines in lockstep with the CFLAGS in
-      --  scripts/fetch_mbedtls.sh.
-      for Default_Switches ("C") use
-        ("-O2", "-I" & Mbedtls_Inc_Dir,
-         "-DMBEDTLS_THREADING_C", "-DMBEDTLS_THREADING_PTHREAD");
+      case TLS_Backend is
+         when "mbedtls" =>
+            --  The C glue (csrc/mbedtls/aht_mbedtls_glue.c) needs the
+            --  mbedTLS headers, AND it must see the exact same config
+            --  macros the library was compiled with —
+            --  MBEDTLS_THREADING_C adds a mutex member to several
+            --  context structs, so a glue translation unit that omits
+            --  it computes a smaller sizeof, under-allocates in *_new,
+            --  and mbedtls_*_init then writes past the block (heap
+            --  corruption). Keep these defines in lockstep with the
+            --  CFLAGS in scripts/fetch_mbedtls.sh.
+            for Default_Switches ("C") use
+              ("-O2", "-I" & Mbedtls_Inc_Dir,
+               "-DMBEDTLS_THREADING_C", "-DMBEDTLS_THREADING_PTHREAD");
+         when "openssl" =>
+            for Default_Switches ("C") use
+              ("-O2", "-I" & Openssl_Dir & "/include");
+      end case;
    end Compiler;
 
    package Binder is
@@ -57,13 +91,18 @@ library project Aht is
    end Binder;
 
    package Linker is
-      --  mbedTLS static libraries are produced by scripts/fetch_mbedtls.sh.
-      --  They are consumed by AHT.Transport.TLS via a `pragma Linker_Options`
-      --  directive, so listing them here is not strictly required — but
-      --  keeping the directory on the library search path lets link-time
-      --  errors surface at the project level rather than from inside the
-      --  binding unit.
-      for Linker_Options use ("-L" & Mbedtls_Lib_Dir);
+      --  The backend libraries themselves are pulled in by `pragma
+      --  Linker_Options` in the backend's root binding package
+      --  (aht-mbedtls.ads / aht-openssl.ads), so they only join the
+      --  link when a binary's closure actually uses TLS. Keeping the
+      --  search path here lets link-time errors surface at the project
+      --  level rather than from inside the binding unit.
+      case TLS_Backend is
+         when "mbedtls" =>
+            for Linker_Options use ("-L" & Mbedtls_Lib_Dir);
+         when "openssl" =>
+            for Linker_Options use ("-L" & Openssl_Dir & "/lib");
+      end case;
    end Linker;
 
 end Aht;

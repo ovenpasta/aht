@@ -1,0 +1,165 @@
+# TLS Backends
+
+`AHT.Transport.TLS` is one spec with two interchangeable bodies. The
+backend is chosen at build time and exactly one backend's sources and
+libraries are compiled/linked:
+
+- **openssl** (default) — the system OpenSSL 3 (`libssl`/`libcrypto`),
+  TLS 1.2/1.3. Bindings: `AHT.Openssl.*` under `src/tls/openssl/`.
+- **mbedtls** — vendored mbedTLS 2.28 (TLS 1.2), downloaded and
+  compiled on first build by `scripts/fetch_mbedtls.sh`. Bindings:
+  `AHT.Mbedtls.*` under `src/tls/mbedtls/`; see
+  [`mbedtls.md`](mbedtls.md).
+
+## Selecting a backend
+
+```sh
+alr build                                   # openssl (default)
+AHT_TLS_BACKEND=mbedtls alr build           # mbedtls
+```
+
+`AHT_TLS_BACKEND` is a gpr external read from the environment (or
+`-XAHT_TLS_BACKEND=...`). **The environment variable is the supported
+route**: it also reaches the Alire pre-build action, which is how
+`scripts/fetch_mbedtls.sh` knows whether to fetch — a consumer that
+selects mbedtls only through `[gpr-set-externals]` must additionally
+export the variable (or run the fetch script once by hand), because
+gpr externals do not reach action environments.
+
+Every build combination gets its own output tree
+(`obj/<mode>-<backend>`, `lib/<mode>-<backend>`, test/example `bin/`
+dirs likewise), so switching never clobbers artifacts.
+
+`AHT_OPENSSL_DIR` (default `/usr`) points at the OpenSSL installation
+prefix. Linux distributions with `libssl-dev` need nothing; macOS
+ships no OpenSSL headers, so:
+
+```sh
+brew install openssl@3
+export AHT_OPENSSL_DIR=$(brew --prefix openssl@3)
+```
+
+The openssl backend requires OpenSSL **3** — the bindings import
+3.0-only symbols (link-time failure on LibreSSL/1.1) and `Connect`
+double-checks `OPENSSL_version_major >= 3` at runtime.
+
+## Behavioral differences
+
+The public contract (`aht-transport-tls.ads`) is shared; two policies
+deliberately differ per backend:
+
+| | openssl | mbedtls |
+|---|---|---|
+| `CA_Path = ""`, verifying | platform trust store (`SSL_CTX_set_default_verify_paths`; honours `SSL_CERT_FILE`/`SSL_CERT_DIR`) — public `https://` endpoints work out of the box | no default trust — the handshake rejects; pass a CA bundle or set `Insecure` |
+| CA **directory** semantics | c_rehash hashed-name lookup | loads every file in the directory |
+| IP-literal host, verifying | verified against the cert's IP SANs (`X509_VERIFY_PARAM_set1_ip_asc`), no SNI sent | rejected — mbedTLS 2.28 matches dNSName SANs/CN only |
+| Abrupt TCP EOF (no close_notify) | **`TLS_Error`** — truncation must fail, because HTTP supports EOF-framed bodies and a silent truncation would be a data-integrity hole (`SSL_OP_IGNORE_UNEXPECTED_EOF` is never set) | clean EOF (`Last = 0`) — long-standing backend behavior, pinned by test_tls_truncation |
+| Protocol versions | TLS 1.2 minimum, TLS 1.3 active; renegotiation disabled | TLS 1.2 (mbedTLS 2.28 maximum) |
+
+Both backends: DNS-name hosts get SNI + hostname verification;
+`Insecure => True` skips certificate verification entirely (SNI still
+sent for DNS names); a failed `Connect` leaves the object retryable
+while a successful session makes it single-use.
+
+## The openssl engine (memory BIOs)
+
+OpenSSL 3 does not permit two tasks inside `SSL_read`/`SSL_write` on
+one `SSL*` — TLS 1.3 KeyUpdates and session tickets processed inside a
+read mutate connection-shared state — but the WebSocket client runs a
+receiver task in `Read` concurrently with senders in `Write`. The
+engine therefore never lets OpenSSL touch the socket:
+
+- `SSL_set_bio` installs two `BIO_s_mem` BIOs (RBIO inbound ciphertext,
+  WBIO outbound). Every `SSL_*` call is **non-blocking** and runs
+  under `SSL_Lock` with a fixed discipline: `ERR_clear_error` → one
+  call → `SSL_get_error` immediately → capture the error queue on a
+  fatal result (latching `Engine_Dead` before the lock is released —
+  OpenSSL forbids further I/O after `SSL_ERROR_SSL`/`SSL_ERROR_SYSCALL`)
+  → sample WBIO's pending count → release.
+- **Drain (wire output)**: under `Drain_Lock` (strict order: Drain
+  outer, SSL inner), WBIO ciphertext is extracted and written to the
+  TCP transport; extraction under the drain lock keeps wire order. A
+  drain failure is fail-closed: ciphertext may be half-sent, so the
+  engine dies and the session is poisoned.
+- **Feed (wire input)**: a protected coordinator arbitrates the single
+  `TCP.Read` via an atomic feeder claim; the non-owner parks on a
+  single-waiter armed latch (claim-failure and arming are one
+  protected action — no lost wakeups) and is woken by feed, feeder
+  release, EOF, fatal, or abort, then re-evaluates and retries. Sound
+  because the transport contract allows at most one reader + one
+  writer task. `SSL_write → WANT_READ` (a post-handshake message
+  mid-stream) self-feeds when the claim is free, else waits — bounded
+  by the WRITE deadline either way.
+- **Deadlines**: both `Set_*_Deadline` budgets are mirrored as
+  absolute instants computed once at the setter call; every blocking
+  step — lock seize (timed entry call), latch wait, feed `TCP.Read`,
+  drain `TCP.Write` (deadline-explicit TCP overloads) — is bounded by
+  the deadline of the operation performing it, and re-checks a modular
+  abort epoch bumped by `Abort_Pending` (which wakes both selector
+  waiters and the latch waiter; non-sticky by epoch snapshot).
+- **EOF**: RBIO starts "empty is retryable" (`BIO_set_mem_eof_return
+  -1`, → WANT_READ) and flips to hard EOF (0) when `TCP.Read` reports
+  the stream ended, so the next engine call classifies it: a real
+  close_notify reads as clean EOF (`ZERO_RETURN` → `Last = 0`),
+  anything else is the truncation `TLS_Error`.
+- **Close** never skips cleanup: `SSL_shutdown` (its own result
+  protocol — a 0 return means close_notify queued and `SSL_get_error`
+  must NOT be consulted; skipped entirely after fatal errors) and
+  `TCP.Close` run in separate best-effort blocks, then the frees
+  (`SSL_free` reclaims both BIOs, then `SSL_CTX_free`) run
+  unconditionally.
+
+The coordinator and locks live in `AHT.TLS_Sync` (shared by both
+engines), and `test_tls_keyupdate` drives them white-box on either
+backend via `TLS_Sync_Cases` (claim/arm atomicity,
+abort-wakes-parked-waiter, deadline-expiry-while-parked,
+wake-then-claim) — plus, on openssl, an end-to-end `openssl s_server`
+KeyUpdate exchange including a phase with a writer task running
+concurrently with the reader across rekeys. The CLI for that
+test is trusted only at `${AHT_OPENSSL_DIR:-/usr}/bin/openssl` and
+only if `version` reports OpenSSL 3 — a bare `openssl` on PATH may be
+LibreSSL.
+
+## The mbedtls engine
+
+The mbedtls backend is built the same way, and for the same reason.
+An `mbedtls_ssl_context` is **not** safe for two tasks at once:
+`MBEDTLS_THREADING_PTHREAD` protects the library's shared internals
+(the RNG and friends), not one session's state, and `mbedtls_ssl_read`
+may itself write (alerts). Since the WebSocket client runs a receiver
+task in `Read` while senders call `Write`, a blocking-BIO design would
+put two tasks inside one context.
+
+So the BIO callbacks never touch the socket either: they move bytes to
+and from two in-memory queues (`Engine_IO`), making every
+`mbedtls_ssl_*` call return promptly — `MBEDTLS_ERR_SSL_WANT_READ`
+when the inbound queue is dry — with the same Phase A / drain / feed
+structure, the same `SSL_Lock` + `Drain_Lock` ordering, the same
+`AHT.TLS_Sync` coordinator, and the same per-operation deadline and
+abort-epoch bounds as above. Network exceptions propagate natively
+from the engine's own `TCP.Read`/`TCP.Write` calls, so nothing has to
+smuggle an Ada exception across a C frame any more.
+
+Two differences from the openssl engine, both from mbedTLS semantics:
+the peer's stream simply ending (`MBEDTLS_ERR_SSL_CONN_EOF`, what a
+recv callback returning 0 becomes) is treated as a clean EOF rather
+than a truncation error, and there is no KeyUpdate to handle because
+TLS 1.2 has none. See [`transport.md`](transport.md) for the
+handshake walkthrough and [`mbedtls.md`](mbedtls.md) for the
+fetch/build/binding pipeline.
+
+## Bindings
+
+Both binding trees are generated with `gcc -fdump-ada-spec` and
+hand-curated — never hand-written:
+
+- `scripts/regen_openssl_bindings.sh` (against
+  `$AHT_OPENSSL_DIR/include`),
+- `scripts/regen_mbedtls_bindings.sh` (against the vendored tree).
+
+C glue exists only where unavoidable: mbedTLS needs allocation glue
+because its context structs have config-dependent sizes
+(`csrc/mbedtls/`); OpenSSL handles are already opaque pointers, so its
+glue (`csrc/openssl/`) only wraps the few macro-defined entry points
+(SNI, min-proto, `BIO_set_mem_eof_return`) so their ctrl numbers come
+from the installed headers.

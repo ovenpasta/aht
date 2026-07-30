@@ -1,24 +1,25 @@
 name = "aht"
-description = "Ada HTTP/WebSocket client with TLS via mbedTLS"
+description = "Ada HTTP/WebSocket client with TLS (OpenSSL or mbedTLS)"
 version = "0.1.0-dev"
 
 long-description = """
 An Ada 2022 library providing a synchronous HTTP/1.1 client and a
 concurrent WebSocket (RFC 6455) client on top of a shared transport
-layer, with TLS via mbedTLS. Public APIs carry Ada contracts; the
-WebSocket client is exercised against the Autobahn|Testsuite
-conformance harness.
+layer. Public APIs carry Ada contracts; the WebSocket client is
+exercised against the Autobahn|Testsuite conformance harness.
 
-Currently POSIX-only (Linux, macOS): the bundled mbedTLS build uses
-pthreads. The first build downloads and compiles mbedTLS locally into
-third_party/ (needs network, curl, tar, make, and a C compiler).
+TLS backends are selected at build time via the AHT_TLS_BACKEND
+environment variable: the default links against the system OpenSSL 3
+(libssl-dev / brew openssl@3); the alternative vendors mbedTLS 2.28,
+downloaded and compiled on first build (needs network, curl, tar,
+make, and a C compiler). Currently POSIX-only (Linux, macOS).
 """
 
 authors = ["Aldo Nicolas Bruno"]
 maintainers = ["ovenpasta@pizzahack.eu"]
 maintainers-logins = ["ovenpasta"]
 licenses = "Apache-2.0"
-tags = ["http", "https", "websocket", "tls", "mbedtls", "client"]
+tags = ["http", "https", "websocket", "tls", "openssl", "mbedtls", "client"]
 
 project-files = ["aht.gpr"]
 
@@ -28,6 +29,7 @@ windows = false
 
 [gpr-externals]
 BUILD_MODE = ["debug", "release"]
+AHT_TLS_BACKEND = ["openssl", "mbedtls"]
 
 [build-switches]
 "*".ada_version = "Ada2022"

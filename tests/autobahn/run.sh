@@ -54,11 +54,13 @@ set -eu
 cd "$(dirname "$0")"
 HERE=$(pwd)
 
-# Build profile (debug|release) the testee was built under; selects the
-# per-mode Exec_Dir (bin/$BUILD_MODE). Defaults to debug, matching the
+# Build profile (debug|release) and TLS backend the testee was built
+# under; together they select the per-variant Exec_Dir
+# (bin/$BUILD_MODE-$AHT_TLS_BACKEND). Defaults match the
 # `alr exec -- gprbuild -P tests/autobahn/autobahn.gpr` build hint above.
 BUILD_MODE=${BUILD_MODE:-debug}
-BIN="bin/$BUILD_MODE/aht_autobahn"
+AHT_TLS_BACKEND=${AHT_TLS_BACKEND:-openssl}
+BIN="bin/$BUILD_MODE-$AHT_TLS_BACKEND/aht_autobahn"
 
 URL=${AUTOBAHN_URL:-ws://127.0.0.1:9001}
 AGENT=${AUTOBAHN_AGENT:-AHT}

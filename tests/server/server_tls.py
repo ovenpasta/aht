@@ -37,6 +37,19 @@ class Server(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+    def shutdown_request(self, request):
+        # Send TLS close_notify before the TCP close. http.server's
+        # default teardown does a bare socket shutdown, which the AHT
+        # OpenSSL backend (correctly) treats as truncation; unwrap()
+        # runs the SSL shutdown handshake so clients see a clean EOF.
+        # Bounded and best-effort: the client may already be gone.
+        try:
+            request.settimeout(2.0)
+            request = request.unwrap()
+        except (OSError, ValueError):
+            pass
+        super().shutdown_request(request)
+
 
 def main() -> int:
     if not (os.path.exists(CERT) and os.path.exists(KEY)):

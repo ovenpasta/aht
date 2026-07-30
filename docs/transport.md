@@ -181,14 +181,25 @@ client socket.
 
 ## `AHT.Transport.TLS`
 
-mbedTLS does the crypto; the bytes still travel over a real
-`AHT.Transport.TCP` instance held *inside* the `TLS_Transport`. There
-is no second socket stack and `mbedtls_net_*` is **not** used — see
-[`mbedtls.md`](mbedtls.md) for the opaque-context / custom-BIO
-rationale. The upshot: `https://` and `wss://` inherit the TCP
-transport's DNS multi-candidate fallback, compound read deadline, and
-`Abort_Pending` unchanged, because `Set_Read_Deadline` and
-`Abort_Pending` on the TLS transport just forward to the inner TCP one.
+One backend-neutral spec, two bodies selected at build time by the
+`AHT_TLS_BACKEND` gpr external — **openssl** (default, system OpenSSL
+3) or **mbedtls** (vendored 2.28). Backend selection, the deliberate
+per-backend policy differences (trust-store default, abrupt-EOF
+handling, IP-SAN verification) and the OpenSSL memory-BIO engine are
+documented in [`tls.md`](tls.md); this section covers the shared
+contract and the mbedtls walkthrough.
+
+Shared shape: the bytes always travel over a real
+`AHT.Transport.TCP` instance held *inside* the backend state (freshly
+allocated per `Connect` attempt, so a FAILED `Connect` releases it
+and the object stays retryable; a successful session latches the
+transport single-use). There is no second socket stack, so `https://`
+and `wss://` inherit the TCP transport's DNS multi-candidate
+fallback, deadlines and `Abort_Pending`. Like every transport, a TLS
+transport supports at most ONE concurrent reader task and ONE
+concurrent writer task.
+
+### mbedTLS backend walkthrough
 
 `Connect (Host, Port, Insecure, CA_Path)` lifecycle:
 
@@ -212,38 +223,51 @@ transport's DNS multi-candidate fallback, compound read deadline, and
    `TLS_Error`. With `CA_Path = ""` **no** trust anchors are configured
    here (there is no `/etc/ssl/certs` fallback), so unless `Insecure`
    is set the handshake will reject the peer — callers must pass a CA
-   bundle or opt into `Insecure`.
+   bundle or opt into `Insecure`. (The openssl backend differs: it
+   falls back to the platform trust store — see `tls.md`.)
 7. `mbedtls_ssl_setup`, then `mbedtls_ssl_set_hostname (Host)` for SNI
    *and* cert-name verification.
-8. `mbedtls_ssl_set_bio` wires the send/recv callbacks (blocking; no
-   recv-timeout callback — the deadline lives in the TCP transport).
-9. Loop `mbedtls_ssl_handshake`, re-entering on
-   `WANT_READ` / `WANT_WRITE`, failing on any other negative code.
-10. `Read` / `Write` delegate to `mbedtls_ssl_read` / `_write`,
-    re-entering on `WANT_READ` / `WANT_WRITE`; a clean close
-    (`PEER_CLOSE_NOTIFY`, or the BIO recv reporting EOF) maps to
-    `Last := 0`, matching the abstract contract.
-11. `Close` is best-effort `mbedtls_ssl_close_notify`, then
-    `TCP.Close`, then frees every context. Idempotent; a failed
-    `Connect` has already freed and closed, so a follow-up `Close` is a
-    no-op.
+8. `mbedtls_ssl_set_bio` wires the send/recv callbacks. They are
+   **memory-only**: they move bytes to and from two in-process queues
+   rather than the socket, so no `mbedtls_ssl_*` call ever blocks (an
+   empty inbound queue yields `WANT_READ`). No recv-timeout callback
+   is installed — deadlines live on the engine's own TCP calls.
+9. Loop `mbedtls_ssl_handshake`, pushing whatever it queued to the
+   wire and pulling what it asks for, all bounded by
+   `Handshake_Deadline`; any other negative code fails.
+10. `Read` / `Write` run the engine loop: one `mbedtls_ssl_read` /
+    `_write` under the engine lock, drain the outbound queue to the
+    socket, feed the inbound queue on `WANT_READ` (see
+    [`tls.md`](tls.md) for the locking and coordinator design). A
+    clean close (`PEER_CLOSE_NOTIFY`, or the peer's stream ending as
+    `CONN_EOF`) maps to `Last := 0`, matching the abstract contract.
+11. `Close` is best-effort `mbedtls_ssl_close_notify` plus a final
+    drain (skipped for a session that died fatally), then `TCP.Close`,
+    then unconditionally frees every context. Idempotent; a failed
+    `Connect` has already freed and closed, so a follow-up `Close` is
+    a no-op.
 
-**Exceptions never cross the C frame.** The BIO send/recv callbacks
-call into the inner TCP transport, which may raise `Timeout_Error`
-(deadline), `Aborted_Error` (`Abort_Pending`), or `Transport_Error`.
-Each callback catches it, records the kind in the BIO context, and
-returns a negative `MBEDTLS_ERR_NET_{SEND,RECV}_FAILED`; the Ada side
-inspects that record after the mbedTLS call returns and re-raises the
-matching exception, so a deadline or cancel during a TLS read surfaces
-as the *same* `Timeout_Error` / `Aborted_Error` a plain TCP read would
-raise. mbedTLS-internal failures (bad cert chain, handshake failure,
-bad record) surface as `TLS_Error` with the `mbedtls_strerror` message.
+**Network errors keep their identity.** Because the socket I/O
+happens in Ada — in the engine's own `TCP.Read`/`TCP.Write` calls, not
+inside a BIO callback — `Timeout_Error` (deadline), `Aborted_Error`
+(`Abort_Pending`) and `Transport_Error` propagate natively, so a
+deadline or cancel during a TLS read surfaces as the *same* exception
+a plain TCP read would raise. Nothing has to smuggle an Ada exception
+across a C frame. mbedTLS-internal failures (bad cert chain, handshake
+failure, bad record) surface as `TLS_Error` with the
+`mbedtls_strerror` message.
 
-Concurrency: each transport instance owns its own mbedTLS state, so
-two tasks using separate `TLS_Transport` objects do not interfere.
-mbedTLS itself is compiled with `MBEDTLS_THREADING_C +
-MBEDTLS_THREADING_PTHREAD` so its internal shared structures are safe
-under parallel use.
+Concurrency: each transport instance owns its own state, so tasks
+using separate `TLS_Transport` objects never interfere. On ONE
+instance the contract is one reader + one writer task (the WSS
+receiver-plus-sender shape), and **both** backends meet it the same
+way — by serializing every library call under an engine lock and
+doing all waiting outside it, never by letting two tasks into one
+session object. `MBEDTLS_THREADING_C + MBEDTLS_THREADING_PTHREAD` is
+still enabled, but it protects mbedTLS's *shared* internals (the RNG
+and friends), not a single `mbedtls_ssl_context` — which is precisely
+why the engine, not the library's threading support, is what makes
+the reader/writer pair safe. See [`tls.md`](tls.md).
 
 Covered by `tests/bin/test_tls` (transport level): against the HTTPS
 fixture `tests/server/server_tls.py` it verifies a good chain

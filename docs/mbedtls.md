@@ -1,15 +1,20 @@
 # mbedTLS Integration
 
-`AHT.Transport.TLS` sits on top of the TCP transport via custom BIO
-callbacks; the transport-level test (`tests/src/test_tls.adb`) covers
-verify, insecure, and untrusted-chain rejection.
+This is the **mbedtls TLS backend** (`AHT_TLS_BACKEND=mbedtls`; the
+default backend is the system OpenSSL 3 — see [`tls.md`](tls.md) for
+backend selection and the per-backend behavioral differences).
 
-The library targets **mbedTLS v2.28.9**, the last LTS line that still
-supports older Windows versions. Note that the 2.28 series reached
-end-of-life in late 2024 and no longer receives security patches;
-newer mbedTLS versions and other TLS backends are planned. Changing
-the version requires rerunning the binding regeneration and curating
-any diffs.
+`AHT.Transport.TLS`'s mbedtls body sits on top of the TCP transport
+via custom BIO callbacks; the transport-level test
+(`tests/src/test_tls.adb`) covers verify, insecure, and
+untrusted-chain rejection.
+
+This backend targets **mbedTLS v2.28.9**, the last LTS line that
+still supports older Windows versions. Note that the 2.28 series
+reached end-of-life in late 2024 and no longer receives security
+patches — which is why the default backend is the system OpenSSL 3;
+newer mbedTLS versions may follow. Changing the version requires
+rerunning the binding regeneration and curating any diffs.
 
 ## Fetch & build
 
