@@ -208,25 +208,34 @@ private
       entry Start (Owner : Client_Access);
    end Receiver_Task;
 
+   --  Everything belonging to ONE connection, grouped so the
+   --  lifetime of a connection is expressible independently of the
+   --  client that owns it. Still an inline component today, so the
+   --  client remains single-use and nothing about ownership has
+   --  changed yet; making this per-generation and heap-owned is the
+   --  next step (see docs/reconnect.md).
+   --
+   --  ws:// runs on the plain TCP transport, wss:// on the TLS
+   --  transport (TLS over the same TCP machinery via custom BIO).
+   --  Connect dials exactly one per scheme and points `Active` at it,
+   --  and everything downstream (receiver, senders, Close) goes
+   --  through `Active` polymorphically. `Active` stays null until a
+   --  successful dial, so a never-Connect'd Client never dereferences
+   --  it.
+   type Session_Type is limited record
+      Plain             : aliased AHT.Transport.TCP.TCP_Transport;
+      Secure            : aliased AHT.Transport.TLS.TLS_Transport;
+      Active            : AHT.Transport.Transport_Access := null;
+      State             : aliased State_PO;
+      Inbox             : aliased Inbox_PO;
+      Guard             : aliased Send_Guard;
+      Selected_Protocol : Ada.Strings.Unbounded.Unbounded_String;
+   end record;
+
    type Client_Type is tagged limited record
-      --  ws:// runs on the plain TCP transport, wss:// on the TLS
-      --  transport (TLS over the same TCP machinery via custom BIO).
-      --  Both are inline (not heap) so the Client owns its transport
-      --  for its full lifetime with no finalization bookkeeping;
-      --  Connect dials exactly one per scheme and points `Active` at
-      --  it, and everything downstream (receiver, senders, Close)
-      --  goes through `Active` polymorphically. `Active` stays null
-      --  until a successful dial, so a never-Connect'd Client never
-      --  dereferences it.
-      Plain              : aliased AHT.Transport.TCP.TCP_Transport;
-      Secure             : aliased AHT.Transport.TLS.TLS_Transport;
-      Active             : AHT.Transport.Transport_Access := null;
-      State              : aliased State_PO;
-      Inbox              : aliased Inbox_PO;
-      Guard              : aliased Send_Guard;
+      Sess               : aliased Session_Type;
       Receiver           : Receiver_Task;
       Open               : Boolean := False;
-      Selected_Protocol  : Ada.Strings.Unbounded.Unbounded_String;
       On_Message         : On_Message_Callback := null;
       On_Close           : On_Close_Callback   := null;
       On_Error           : On_Error_Callback   := null;

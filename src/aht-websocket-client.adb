@@ -473,7 +473,7 @@ package body AHT.Websocket.Client is
          Chunk : AHT.Bytes.Byte_Array (1 .. 4_096);
          Last  : Natural;
       begin
-         Conn.Active.Read (Chunk, Last);
+         Conn.Sess.Active.Read (Chunk, Last);
          if Last = 0 then
             --  Peer closed without a Close frame. Surface as a
             --  connection-closed event; users in Receive wake and
@@ -492,14 +492,14 @@ package body AHT.Websocket.Client is
       is
          Should_Send : Boolean;
       begin
-         Conn.State.Try_Mark_Local_Close (Should_Send);
+         Conn.Sess.State.Try_Mark_Local_Close (Should_Send);
          if not Should_Send then
             return;
          end if;
-         Conn.Guard.Acquire;
+         Conn.Sess.Guard.Acquire;
          begin
             Send_Frame
-              (Conn.Active.all, Conn.Guard,
+              (Conn.Sess.Active.all, Conn.Sess.Guard,
                Op      => AHT.Websocket.Close_Op,
                FIN     => True,
                Payload => Build_Close_Payload (Code, ""));
@@ -509,31 +509,31 @@ package body AHT.Websocket.Client is
                --  transport down, etc.), we still want to release
                --  the guard and exit cleanly. Latch anyway: the
                --  connection is finished, no data frame may follow.
-               Conn.Guard.Mark_Close_Sent;
-               Conn.Guard.Release;
+               Conn.Sess.Guard.Mark_Close_Sent;
+               Conn.Sess.Guard.Release;
                return;
          end;
          --  Latch under the guard so a Send_* racing this echo sees
          --  Close_Frame_Sent and raises instead of writing behind it.
-         Conn.Guard.Mark_Close_Sent;
-         Conn.Guard.Release;
+         Conn.Sess.Guard.Mark_Close_Sent;
+         Conn.Sess.Guard.Release;
       end Maybe_Send_Close_Echo;
 
       procedure Send_Pong (Payload : AHT.Bytes.Byte_Array) is
       begin
-         Conn.Guard.Acquire;
+         Conn.Sess.Guard.Acquire;
          begin
             Send_Frame
-              (Conn.Active.all, Conn.Guard,
+              (Conn.Sess.Active.all, Conn.Sess.Guard,
                Op      => AHT.Websocket.Pong_Op,
                FIN     => True,
                Payload => Payload);
          exception
             when others =>
-               Conn.Guard.Release;
+               Conn.Sess.Guard.Release;
                return;
          end;
-         Conn.Guard.Release;
+         Conn.Sess.Guard.Release;
       end Send_Pong;
 
       procedure Deliver
@@ -551,7 +551,7 @@ package body AHT.Websocket.Client is
             Fire_On_Error
               ("Receiver: invalid UTF-8 in text message "
                & "(RFC 6455 §8.1) — failing connection with 1007");
-            Conn.State.Set (Closed);
+            Conn.Sess.State.Set (Closed);
             Stop_Loop := True;
             return;
          end if;
@@ -562,7 +562,7 @@ package body AHT.Websocket.Client is
          begin
             --  Inbox first so a pull-mode Receive doesn't starve if
             --  the push callback runs slow.
-            Conn.Inbox.Push (Msg);
+            Conn.Sess.Inbox.Push (Msg);
             Fire_On_Message (Msg);
          end;
       end Deliver;
@@ -586,7 +586,7 @@ package body AHT.Websocket.Client is
                Fire_On_Error
                  ("Receiver: peer sent a reserved Close code "
                   & "(RFC 6455 §7.4.1) — failing connection with 1002");
-               Conn.State.Set (Closed);
+               Conn.Sess.State.Set (Closed);
                Stop_Loop := True;
                return;
             when AHT.Websocket.Frames.Bad_Reason =>
@@ -594,7 +594,7 @@ package body AHT.Websocket.Client is
                Fire_On_Error
                  ("Receiver: invalid UTF-8 in Close reason "
                   & "(RFC 6455 §8.1) — failing connection with 1007");
-               Conn.State.Set (Closed);
+               Conn.Sess.State.Set (Closed);
                Stop_Loop := True;
                return;
             when AHT.Websocket.Frames.Accept_Close =>
@@ -624,7 +624,7 @@ package body AHT.Websocket.Client is
 
          Maybe_Send_Close_Echo;
          Fire_On_Close (Info, To_String (Reason));
-         Conn.State.Set (Closed);
+         Conn.Sess.State.Set (Closed);
          Stop_Loop := True;
       end Handle_Close_Frame;
 
@@ -744,8 +744,8 @@ package body AHT.Websocket.Client is
       end loop Main_Loop;
 
       Free (Buf.Data);
-      Conn.State.Set (Closed);
-      Conn.Inbox.Mark_Closed;
+      Conn.Sess.State.Set (Closed);
+      Conn.Sess.Inbox.Mark_Closed;
    end Receiver_Task;
 
    ---------------------------------------------------------------
@@ -790,11 +790,11 @@ package body AHT.Websocket.Client is
       --  gets a clear lifecycle error before we dial. A
       --  *failed* Connect leaves State = Connecting, so retries
       --  on a fresh URL still work.
-      if Self.State.Get /= Connecting then
+      if Self.Sess.State.Get /= Connecting then
          raise AHT.Websocket.Handshake_Error
            with "Websocket.Client.Connect: Client_Type has "
              & "already been Connect'd (state = "
-             & State_Kind'Image (Self.State.Get)
+             & State_Kind'Image (Self.Sess.State.Get)
              & "); declare a fresh Client per connection";
       end if;
 
@@ -836,25 +836,25 @@ package body AHT.Websocket.Client is
          case Parsed.Scheme is
             when AHT.URL.WSS =>
                AHT.Transport.TLS.Connect
-                 (Self.Secure,
+                 (Self.Sess.Secure,
                   Host     => To_String (Parsed.Host),
                   Port     => Parsed.Port,
                   Insecure => Insecure,
                   CA_Path  => CA_Path);
-               Self.Active := Self.Secure'Unchecked_Access;
+               Self.Sess.Active := Self.Sess.Secure'Unchecked_Access;
             when others =>
                --  WS (HTTP/HTTPS already rejected above).
                AHT.Transport.TCP.Connect
-                 (Self.Plain,
+                 (Self.Sess.Plain,
                   Host => To_String (Parsed.Host),
                   Port => Parsed.Port);
-               Self.Active := Self.Plain'Unchecked_Access;
+               Self.Sess.Active := Self.Sess.Plain'Unchecked_Access;
          end case;
 
          begin
-            AHT.HTTP.Request.Write (Req, Self.Active.all);
+            AHT.HTTP.Request.Write (Req, Self.Sess.Active.all);
             AHT.HTTP.Response.Read
-              (Resp, Self.Active.all,
+              (Resp, Self.Sess.Active.all,
                Method => AHT.HTTP.Methods.GET);
 
             if Resp.Status /= 101 then
@@ -926,12 +926,12 @@ package body AHT.Websocket.Client is
                   end if;
                end if;
 
-               Self.Selected_Protocol := To_Unbounded_String (Got);
+               Self.Sess.Selected_Protocol := To_Unbounded_String (Got);
             end;
 
             --  Handshake good — flip the state machine, hand the
             --  open transport to the receiver task, mark Open.
-            Self.State.Set (Open);
+            Self.Sess.State.Set (Open);
             Self.Open := True;
             --  'Unchecked_Access is safe by the same argument as
             --  Async_Handle: the Receiver task is itself a
@@ -941,10 +941,10 @@ package body AHT.Websocket.Client is
             Self.Receiver.Start (Owner => Self'Unchecked_Access);
          exception
             when AHT.Websocket.Handshake_Error =>
-               Self.Active.Close;
+               Self.Sess.Active.Close;
                raise;
             when E : others =>
-               Self.Active.Close;
+               Self.Sess.Active.Close;
                raise AHT.Websocket.Handshake_Error
                  with "Websocket.Client.Connect: "
                    & Ada.Exceptions.Exception_Name (E) & ": "
@@ -970,78 +970,78 @@ package body AHT.Websocket.Client is
    end Connect;
 
    function Is_Open (Self : Client_Type) return Boolean is
-     (Self.Open and then Self.State.Get = Open);
+     (Self.Open and then Self.Sess.State.Get = Open);
 
    function Selected_Subprotocol (Self : Client_Type) return String is
-     (To_String (Self.Selected_Protocol));
+     (To_String (Self.Sess.Selected_Protocol));
 
    procedure Send_Text
      (Self : in out Client_Type;
       Text : String) is
    begin
-      Self.Guard.Acquire;
+      Self.Sess.Guard.Acquire;
       begin
-         if not Is_Open (Self) or else Self.Guard.Close_Frame_Sent then
+         if not Is_Open (Self) or else Self.Sess.Guard.Close_Frame_Sent then
             raise AHT.Websocket.Closed_Error with
               "Send_Text: connection is not open";
          end if;
          Send_Frame
-           (Self.Active.all, Self.Guard,
+           (Self.Sess.Active.all, Self.Sess.Guard,
             Op      => AHT.Websocket.Text,
             FIN     => True,
             Payload => AHT.Bytes.From_String (Text));
       exception
          when others =>
-            Self.Guard.Release;
+            Self.Sess.Guard.Release;
             raise;
       end;
-      Self.Guard.Release;
+      Self.Sess.Guard.Release;
    end Send_Text;
 
    procedure Send_Binary
      (Self : in out Client_Type;
       Data : AHT.Bytes.Byte_Array) is
    begin
-      Self.Guard.Acquire;
+      Self.Sess.Guard.Acquire;
       begin
-         if not Is_Open (Self) or else Self.Guard.Close_Frame_Sent then
+         if not Is_Open (Self) or else Self.Sess.Guard.Close_Frame_Sent then
             raise AHT.Websocket.Closed_Error with
               "Send_Binary: connection is not open";
          end if;
          Send_Frame
-           (Self.Active.all, Self.Guard,
+           (Self.Sess.Active.all, Self.Sess.Guard,
             Op      => AHT.Websocket.Binary,
             FIN     => True,
             Payload => Data);
       exception
          when others =>
-            Self.Guard.Release;
+            Self.Sess.Guard.Release;
             raise;
       end;
-      Self.Guard.Release;
+      Self.Sess.Guard.Release;
    end Send_Binary;
 
    procedure Send_Ping
      (Self    : in out Client_Type;
       Payload : AHT.Bytes.Byte_Array := []) is
    begin
-      Self.Guard.Acquire;
+      Self.Sess.Guard.Acquire;
       begin
-         if not Is_Open (Self) or else Self.Guard.Close_Frame_Sent then
+         if not Is_Open (Self) or else Self.Sess.Guard.Close_Frame_Sent then
             raise AHT.Websocket.Closed_Error with
               "Send_Ping: connection is not open";
          end if;
          Send_Frame
-           (Self.Active.all, Self.Guard,
+           (Self.Sess.Active.all, Self.Sess.Guard,
             Op      => AHT.Websocket.Ping_Op,
             FIN     => True,
             Payload => Payload);
       exception
          when others =>
-            Self.Guard.Release;
+            Self.Sess.Guard.Release;
             raise;
       end;
-      Self.Guard.Release;
+      Self.Sess.Guard.Release;
    end Send_Ping;
 
    procedure Close
@@ -1053,16 +1053,16 @@ package body AHT.Websocket.Client is
       Should_Send    : Boolean;
       Already_Closed : Boolean;
    begin
-      if Self.State.Get = Connecting then
+      if Self.Sess.State.Get = Connecting then
          --  Never handshook; nothing to do.
          return;
       end if;
 
-      if Self.State.Get not in Open | Closing then
+      if Self.Sess.State.Get not in Open | Closing then
          --  Already Closed (receiver wound up first). Just make
          --  sure the transport is down.
-         if Self.Active.Is_Connected then
-            Self.Active.Close;
+         if Self.Sess.Active.Is_Connected then
+            Self.Sess.Active.Close;
          end if;
          Self.Open := False;
          return;
@@ -1072,12 +1072,12 @@ package body AHT.Websocket.Client is
       --  then wait for the receiver to see the peer's echo before
       --  tearing the TCP transport down. Abort_Pending guarantees
       --  Wait_Closed doesn't hang forever if the peer goes silent.
-      Self.State.Try_Mark_Local_Close (Should_Send);
+      Self.Sess.State.Try_Mark_Local_Close (Should_Send);
       if Should_Send then
-         Self.Guard.Acquire;
+         Self.Sess.Guard.Acquire;
          begin
             Send_Frame
-              (Self.Active.all, Self.Guard,
+              (Self.Sess.Active.all, Self.Sess.Guard,
                Op      => AHT.Websocket.Close_Op,
                FIN     => True,
                Payload => Build_Close_Payload (Code, Reason));
@@ -1090,8 +1090,8 @@ package body AHT.Websocket.Client is
          --  Latch under the guard before releasing: a Send_* blocked
          --  on Acquire will now observe Close_Frame_Sent and raise
          --  rather than writing a data frame after our Close.
-         Self.Guard.Mark_Close_Sent;
-         Self.Guard.Release;
+         Self.Sess.Guard.Mark_Close_Sent;
+         Self.Sess.Guard.Release;
       end if;
 
       --  Move to Closing, but never clobber a Closed the receiver may
@@ -1101,10 +1101,10 @@ package body AHT.Websocket.Client is
       --  no receiver left to ever re-publish Closed, so an
       --  unconditional Set (Closing) here would make Wait_Closed hang
       --  forever -- detect it and tear down directly instead.
-      Self.State.Begin_Closing (Already_Closed);
+      Self.Sess.State.Begin_Closing (Already_Closed);
       if Already_Closed then
          Self.Open := False;
-         Self.Active.Close;
+         Self.Sess.Active.Close;
          return;
       end if;
 
@@ -1114,15 +1114,15 @@ package body AHT.Websocket.Client is
       --  effectively disables the bound; 0.0 fires the abort
       --  path immediately without waiting at all.
       select
-         Self.State.Wait_Closed;
+         Self.Sess.State.Wait_Closed;
       or
          delay Timeout;
-         Self.Active.Abort_Pending;
-         Self.State.Wait_Closed;
+         Self.Sess.Active.Abort_Pending;
+         Self.Sess.State.Wait_Closed;
       end select;
 
       Self.Open := False;
-      Self.Active.Close;
+      Self.Sess.Active.Close;
    end Close;
 
    procedure Receive
@@ -1131,7 +1131,7 @@ package body AHT.Websocket.Client is
       Timeout : Duration := Duration'Last) is
    begin
       select
-         Self.Inbox.Receive (Msg);
+         Self.Sess.Inbox.Receive (Msg);
       or
          delay Timeout;
          Msg := (Kind => Binary_Message, Payload => <>);
