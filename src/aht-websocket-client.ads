@@ -293,21 +293,19 @@ private
       --  or the client is stranded in Connecting. The attempt was by
       --  definition unpublished, so the client returns to Idle and
       --  the caller may retry.
-      procedure Abandon_Connect;
+      --
+      --  Takes the attempt's reserved generation and does nothing
+      --  unless that attempt is still the one in flight. Without that
+      --  check a slow cleanup could release an admission belonging to
+      --  a LATER Connect: once repeated connects exist, an early
+      --  generation can be published, reclaimed and replaced before
+      --  its connecting frame finalizes.
+      procedure Abandon_Connect (Gen : Positive);
       --  Called from INSIDE the Start rendezvous, so publication is
       --  atomic with the receiver taking ownership: a receiver that
       --  hits instant EOF cannot begin reclaiming a session the
       --  controller has not yet published.
       procedure Publish (S : Session_Access);
-      --  True once the admitted attempt has handed its session to the
-      --  receiver. This is the record of the ownership transfer, and
-      --  it has to be a protected flag rather than a local one: the
-      --  connecting task's cleanup must be able to tell which side of
-      --  the rendezvous it is on. A local "transferred" variable set
-      --  after Start returns leaves a window in which an abort would
-      --  make the cleanup free a session the receiver already owns.
-      --  Publish either ran or it did not, and this answers which.
-      function  Attempt_Handed_Off return Boolean;
 
       --  Borrowing. The owner never borrows; this is exclusively how
       --  a task that does NOT own the session gets to touch it.
@@ -367,7 +365,6 @@ private
       Published_Gen : Natural := 0;
       Done          : Boolean := True;    --  no generation in flight
       Forced        : Boolean := False;
-      Handed_Off    : Boolean := False;   --  of the admitted attempt
       CBs           : Callbacks;
       Proto         : Ada.Strings.Unbounded.Unbounded_String;
    end Lifecycle_Controller;
@@ -392,7 +389,13 @@ private
    --  forbids anonymous access on entry parameters, and both are
    --  named access types.
    task type Receiver_Task is
-      entry Start (Owner : Client_Access; Sess : Session_Access);
+      --  Sess is in out: the receiver clears the caller's pointer
+      --  from inside the rendezvous, which is how the connecting task
+      --  learns the handoff happened. Waiting for an accepted entry
+      --  call to complete is abort-deferred (RM 9.8), so that write
+      --  cannot be lost to an abort of the caller and its cleanup can
+      --  never free a session this task has taken over.
+      entry Start (Owner : Client_Access; Sess : in out Session_Access);
    end Receiver_Task;
 
    type Client_Type is tagged limited record

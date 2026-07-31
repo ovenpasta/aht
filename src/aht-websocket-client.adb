@@ -333,20 +333,24 @@ package body AHT.Websocket.Client is
             Result := Wrong_State;
             return;
          end if;
-         Next_Gen   := Next_Gen + 1;
-         Gen        := Next_Gen;
-         St         := Connecting;
-         Handed_Off := False;
-         Result     := Admitted;
+         Next_Gen := Next_Gen + 1;
+         Gen      := Next_Gen;
+         St       := Connecting;
+         Result   := Admitted;
       end Begin_Connect;
 
-      procedure Abandon_Connect is
+      procedure Abandon_Connect (Gen : Positive) is
       begin
-         --  Only an unpublished attempt reaches here, so the client
-         --  goes back to where admission found it and stays
-         --  retryable.
-         St   := Idle;
-         Done := True;
+         --  Only the attempt that is actually in flight may release
+         --  admission: a later Connect may already have been admitted
+         --  by the time an earlier attempt's cleanup runs, and
+         --  Next_Gen is what tells them apart.
+         if St = Connecting and then Next_Gen = Gen then
+            --  Unpublished by definition, so the client goes back to
+            --  where admission found it and stays retryable.
+            St   := Idle;
+            Done := True;
+         end if;
       end Abandon_Connect;
 
       procedure Publish (S : Session_Access) is
@@ -357,11 +361,8 @@ package body AHT.Websocket.Client is
          Admitting     := True;
          Forced        := False;
          Done          := False;
-         Handed_Off    := True;
          St            := Open;
       end Publish;
-
-      function Attempt_Handed_Off return Boolean is (Handed_Off);
 
       procedure Acquire (S : out Session_Access; OK : out Boolean) is
       begin
@@ -498,18 +499,30 @@ package body AHT.Websocket.Client is
    end Finalize;
 
    --  Owns an admitted, still-UNPUBLISHED connection attempt. Every
-   --  exit that did not hand the session to the receiver — a raise,
-   --  or an abort of the connecting task — drops the transport, frees
+   --  exit that did not hand the session to the receiver -- a raise,
+   --  or an abort of the connecting task -- drops the transport, frees
    --  the session and releases admission, so the client is never
    --  stranded in Connecting with a leaked transport.
    --
-   --  The handoff is read back from the controller rather than from a
-   --  local flag, because a local one could only be set *after* the
-   --  Start rendezvous returned: an abort landing in that window
-   --  would make this Finalize free a session the receiver already
-   --  owns. Publish runs inside the rendezvous, in a protected action
-   --  that either completed or did not.
-   type Attempt_Owner (Ctl : access Lifecycle_Controller) is
+   --  A null Sess means the handoff happened: the receiver clears the
+   --  caller's pointer from INSIDE the Start rendezvous. Waiting for
+   --  an accepted entry call to complete is abort-deferred (RM 9.8),
+   --  so that write lands before any abort of this task takes effect.
+   --  A flag set after Start returned would leave a window in which an
+   --  abort made this Finalize free a session the receiver now owns --
+   --  trading a leak for a double free. A flag in the CONTROLLER would
+   --  be no better once repeated Connects exist: it is not specific to
+   --  an attempt, so a later admission could reset it under an earlier
+   --  attempt's cleanup.
+   --
+   --  Gen is that attempt-specific identity, and admission release
+   --  needs it for the same reason: by the time an early generation's
+   --  frame finalizes, its session may already have been published,
+   --  reclaimed AND a fresh Connect admitted, and this cleanup must
+   --  not release an admission belonging to that newer attempt.
+   type Attempt_Owner
+     (Ctl : access Lifecycle_Controller;
+      Gen : Positive) is
      new Ada.Finalization.Limited_Controlled with record
         Sess : Session_Access := null;
      end record;
@@ -518,13 +531,8 @@ package body AHT.Websocket.Client is
 
    overriding procedure Finalize (A : in out Attempt_Owner) is
    begin
-      if A.Ctl.Attempt_Handed_Off then
-         --  The receiver owns it now and will reclaim it.
-         A.Sess := null;
-         return;
-      end if;
-
       if A.Sess /= null then
+         --  Never handed over, so it is still ours to dispose of.
          begin
             Active (A.Sess).Close;
          exception
@@ -536,14 +544,15 @@ package body AHT.Websocket.Client is
             when others => A.Sess := null;
          end;
       end if;
-      A.Ctl.Abandon_Connect;
+      --  A no-op unless THIS attempt is the one still in flight.
+      A.Ctl.Abandon_Connect (A.Gen);
    end Finalize;
 
-   --  Holds the teardown borrow for whoever wins it. Taking the
-   --  borrow in Initialize and returning it in Finalize is what makes
-   --  the win survive an abort of the closing task: a manual release
-   --  skipped that way would leave the borrow count above zero and
-   --  the receiver waiting on it forever.
+   --  Holds the teardown borrow for whoever wins it. Taking the borrow
+   --  in Initialize and returning it in Finalize is what makes the win
+   --  survive an abort of the closing task: a manual release skipped
+   --  that way would leave the borrow count above zero and the
+   --  receiver waiting on it forever.
    type Teardown_Pin (Ctl : access Lifecycle_Controller) is
      new Ada.Finalization.Limited_Controlled with record
         Sess   : Session_Access  := null;
@@ -560,13 +569,37 @@ package body AHT.Websocket.Client is
       P.Held := P.Result = Won_Teardown;
    end Initialize;
 
+   --  Winning the teardown makes this task the ONLY one that can wake
+   --  the receiver: admission is already stopped, so no later Close
+   --  will win and every one of them joins and waits. Leaving without
+   --  waking it -- because the close handshake raised, or because this
+   --  task was aborted mid-handshake -- would park the receiver in
+   --  Read forever and hang every joiner behind it. So the wake gates
+   --  live here, ahead of the release, where no exit path can skip
+   --  them; they are idempotent with the receiver's own reclamation.
    overriding procedure Finalize (P : in out Teardown_Pin) is
    begin
-      if P.Held then
-         P.Held := False;
-         P.Sess := null;
-         P.Ctl.Release;
+      if not P.Held then
+         return;
       end if;
+      P.Held := False;
+
+      if P.Sess /= null then
+         begin
+            P.Sess.State.Set (Closed);
+            P.Sess.Inbox.Mark_Closed;
+         exception
+            when others => null;
+         end;
+         begin
+            Active (P.Sess).Abort_Pending;
+         exception
+            when others => null;
+         end;
+      end if;
+
+      P.Sess := null;
+      P.Ctl.Release;
    end Finalize;
 
    ---------------------------------------------------------------
@@ -1108,7 +1141,9 @@ package body AHT.Websocket.Client is
    begin
       loop
          select
-            accept Start (Owner : Client_Access; Sess : Session_Access) do
+            accept Start
+              (Owner : Client_Access; Sess : in out Session_Access)
+            do
                Conn     := Owner;
                Cur_Sess := Sess;
                --  Publishing inside the rendezvous makes it atomic
@@ -1116,6 +1151,12 @@ package body AHT.Websocket.Client is
                --  instant EOF cannot start reclaiming a session the
                --  controller has not published yet.
                Conn.Ctl.Publish (Sess);
+               --  Take the pointer away from the caller, still inside
+               --  the rendezvous. That is what tells its cleanup the
+               --  session is no longer its to free, and being inside
+               --  an accepted entry call makes the write immune to an
+               --  abort of the caller (RM 9.8).
+               Sess := null;
             end Start;
          or
             terminate;
@@ -1175,7 +1216,8 @@ package body AHT.Websocket.Client is
       --  the attempt owns the session outright: nothing else can
       --  reach it, and its cleanup runs on every exit.
       declare
-         Attempt : Attempt_Owner (Self.Ctl'Unchecked_Access);
+         Attempt : Attempt_Owner
+           (Self.Ctl'Unchecked_Access, Positive (Gen));
 
          Key_Bytes : AHT.Bytes.Byte_Array (1 .. 16);
          Req       : AHT.HTTP.Request.Request_Type;
@@ -1556,6 +1598,9 @@ package body AHT.Websocket.Client is
                S.State.Wait_Closed;
             or
                delay Timeout;
+               --  The bound fired; kick the receiver out now rather
+               --  than waiting for the pin's Finalize to do it, so a
+               --  silent peer costs exactly Timeout.
                begin
                   Active (S).Abort_Pending;
                exception
@@ -1563,20 +1608,11 @@ package body AHT.Websocket.Client is
                end;
             end select;
          end if;
-
-         --  Hand off to the receiver: perform its wake-up gates
-         --  ourselves so a borrower parked on this session is released
-         --  now rather than after a transport deadline. All three are
-         --  idempotent with the reclamation sequence.
-         S.State.Set (Closed);
-         S.Inbox.Mark_Closed;
-         begin
-            Active (S).Abort_Pending;
-         exception
-            when others => null;
-         end;
       exception
          when others =>
+            --  Best effort, and safe to swallow precisely because the
+            --  wake gates are NOT here: they run from the pin's
+            --  Finalize, which no exit path can skip.
             null;
       end Close_Handshake;
 
