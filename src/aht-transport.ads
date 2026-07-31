@@ -106,15 +106,22 @@ package AHT.Transport is
    --      `T`) are used on one task only — no concurrent reader exists at
    --      scope exit.
    --    * For a higher-level owner that runs a *separate* receiver task
-   --      against the transport (Websocket.Client), that task is a
-   --      **component** of the owner (`Receiver : Receiver_Task`), so Ada
-   --      awaits its termination before finalizing the owner's transport
-   --      components (RM 9.3 / 7.6.1): the receiver has provably left
-   --      Read before this Finalize can run. The owner's own `Close`
-   --      additionally joins the receiver (`Wait_Closed`) before closing
-   --      the transport, so the explicit path is quiesced too.
-   --  A bare `access`-held transport with a detached task reading it would
-   --  break this precondition — but no such ownership exists here, and the
-   --  task-on-an-`access`-transport shape is not offered by the API.
+   --      against the transport (Websocket.Client), the transport lives
+   --      inside a heap-allocated per-connection session that the
+   --      receiver itself owns, and the receiver is the only thing that
+   --      deallocates it. Before it does, it has left `Read` (that is
+   --      what ended the connection), stopped handing out borrows,
+   --      waited for the outstanding ones to reach zero — so no other
+   --      task is inside the transport either — and called `Close`
+   --      explicitly. This Finalize therefore runs on a transport that
+   --      is already quiesced and already closed, and only has to be
+   --      idempotent. The quiescence comes from that borrow protocol,
+   --      not from the transport being a sibling component of the task.
+   --  A bare `access`-held transport with a *detached* task reading it
+   --  would break the precondition. The WebSocket receiver is not
+   --  detached: it is a component of the client, so RM 9.3 still bounds
+   --  its lifetime by the client's, and the session it owns cannot
+   --  outlive it. That shape — a task on an `access` transport with no
+   --  such protocol — is not offered by the API.
 
 end AHT.Transport;

@@ -299,6 +299,15 @@ private
       --  hits instant EOF cannot begin reclaiming a session the
       --  controller has not yet published.
       procedure Publish (S : Session_Access);
+      --  True once the admitted attempt has handed its session to the
+      --  receiver. This is the record of the ownership transfer, and
+      --  it has to be a protected flag rather than a local one: the
+      --  connecting task's cleanup must be able to tell which side of
+      --  the rendezvous it is on. A local "transferred" variable set
+      --  after Start returns leaves a window in which an abort would
+      --  make the cleanup free a session the receiver already owns.
+      --  Publish either ran or it did not, and this answers which.
+      function  Attempt_Handed_Off return Boolean;
 
       --  Borrowing. The owner never borrows; this is exclusively how
       --  a task that does NOT own the session gets to touch it.
@@ -358,6 +367,7 @@ private
       Published_Gen : Natural := 0;
       Done          : Boolean := True;    --  no generation in flight
       Forced        : Boolean := False;
+      Handed_Off    : Boolean := False;   --  of the admitted attempt
       CBs           : Callbacks;
       Proto         : Ada.Strings.Unbounded.Unbounded_String;
    end Lifecycle_Controller;

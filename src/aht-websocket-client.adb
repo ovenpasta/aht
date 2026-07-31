@@ -333,10 +333,11 @@ package body AHT.Websocket.Client is
             Result := Wrong_State;
             return;
          end if;
-         Next_Gen := Next_Gen + 1;
-         Gen      := Next_Gen;
-         St       := Connecting;
-         Result   := Admitted;
+         Next_Gen   := Next_Gen + 1;
+         Gen        := Next_Gen;
+         St         := Connecting;
+         Handed_Off := False;
+         Result     := Admitted;
       end Begin_Connect;
 
       procedure Abandon_Connect is
@@ -356,8 +357,11 @@ package body AHT.Websocket.Client is
          Admitting     := True;
          Forced        := False;
          Done          := False;
+         Handed_Off    := True;
          St            := Open;
       end Publish;
+
+      function Attempt_Handed_Off return Boolean is (Handed_Off);
 
       procedure Acquire (S : out Session_Access; OK : out Boolean) is
       begin
@@ -490,6 +494,78 @@ package body AHT.Websocket.Client is
          L.Held := False;
          L.Sess := null;
          L.Ctl.Release;
+      end if;
+   end Finalize;
+
+   --  Owns an admitted, still-UNPUBLISHED connection attempt. Every
+   --  exit that did not hand the session to the receiver — a raise,
+   --  or an abort of the connecting task — drops the transport, frees
+   --  the session and releases admission, so the client is never
+   --  stranded in Connecting with a leaked transport.
+   --
+   --  The handoff is read back from the controller rather than from a
+   --  local flag, because a local one could only be set *after* the
+   --  Start rendezvous returned: an abort landing in that window
+   --  would make this Finalize free a session the receiver already
+   --  owns. Publish runs inside the rendezvous, in a protected action
+   --  that either completed or did not.
+   type Attempt_Owner (Ctl : access Lifecycle_Controller) is
+     new Ada.Finalization.Limited_Controlled with record
+        Sess : Session_Access := null;
+     end record;
+
+   overriding procedure Finalize (A : in out Attempt_Owner);
+
+   overriding procedure Finalize (A : in out Attempt_Owner) is
+   begin
+      if A.Ctl.Attempt_Handed_Off then
+         --  The receiver owns it now and will reclaim it.
+         A.Sess := null;
+         return;
+      end if;
+
+      if A.Sess /= null then
+         begin
+            Active (A.Sess).Close;
+         exception
+            when others => null;
+         end;
+         begin
+            Free (A.Sess);
+         exception
+            when others => A.Sess := null;
+         end;
+      end if;
+      A.Ctl.Abandon_Connect;
+   end Finalize;
+
+   --  Holds the teardown borrow for whoever wins it. Taking the
+   --  borrow in Initialize and returning it in Finalize is what makes
+   --  the win survive an abort of the closing task: a manual release
+   --  skipped that way would leave the borrow count above zero and
+   --  the receiver waiting on it forever.
+   type Teardown_Pin (Ctl : access Lifecycle_Controller) is
+     new Ada.Finalization.Limited_Controlled with record
+        Sess   : Session_Access  := null;
+        Result : Teardown_Result := No_Session;
+        Held   : Boolean         := False;
+     end record;
+
+   overriding procedure Initialize (P : in out Teardown_Pin);
+   overriding procedure Finalize   (P : in out Teardown_Pin);
+
+   overriding procedure Initialize (P : in out Teardown_Pin) is
+   begin
+      P.Ctl.Begin_Teardown (P.Sess, P.Result, By_Caller => True);
+      P.Held := P.Result = Won_Teardown;
+   end Initialize;
+
+   overriding procedure Finalize (P : in out Teardown_Pin) is
+   begin
+      if P.Held then
+         P.Held := False;
+         P.Sess := null;
+         P.Ctl.Release;
       end if;
    end Finalize;
 
@@ -1072,33 +1148,10 @@ package body AHT.Websocket.Client is
       Insecure      : Boolean := False;
       CA_Path       : String := "")
    is
-      Parsed    : constant AHT.URL.URL_Type := AHT.URL.Parse (URL);
-      Key_Bytes : AHT.Bytes.Byte_Array (1 .. 16);
-
-      Req  : AHT.HTTP.Request.Request_Type;
-      Resp : AHT.HTTP.Response.Response_Type;
+      Parsed : constant AHT.URL.URL_Type := AHT.URL.Parse (URL);
 
       Gen : Natural;
       Adm : Admission_Result;
-
-      --  The session under construction. It is UNPUBLISHED and owned
-      --  exclusively by this task until the Start rendezvous hands it
-      --  over; every failure before that point is ours to clean up.
-      S : Session_Access := null;
-
-      procedure Add_Extra (Name, Value : String) is
-      begin
-         if Name = "host"
-           or else Name = "upgrade"
-           or else Name = "connection"
-           or else Name = "sec-websocket-version"
-           or else Name = "sec-websocket-key"
-         then
-            return;
-         end if;
-         Req.Headers.Append (Name, Value);
-      end Add_Extra;
-
    begin
       --  Admission. One protected action decides whether an attempt
       --  may start and reserves this attempt's generation number. A
@@ -1117,6 +1170,29 @@ package body AHT.Websocket.Client is
              & "); declare a fresh Client per connection";
       end if;
 
+      --  Declared only once admission has succeeded, so a refused
+      --  Connect cannot release an admission it never took. From here
+      --  the attempt owns the session outright: nothing else can
+      --  reach it, and its cleanup runs on every exit.
+      declare
+         Attempt : Attempt_Owner (Self.Ctl'Unchecked_Access);
+
+         Key_Bytes : AHT.Bytes.Byte_Array (1 .. 16);
+         Req       : AHT.HTTP.Request.Request_Type;
+         Resp      : AHT.HTTP.Response.Response_Type;
+
+         procedure Add_Extra (Name, Value : String) is
+         begin
+            if Name = "host"
+              or else Name = "upgrade"
+              or else Name = "connection"
+              or else Name = "sec-websocket-version"
+              or else Name = "sec-websocket-key"
+            then
+               return;
+            end if;
+            Req.Headers.Append (Name, Value);
+         end Add_Extra;
       begin
          case Parsed.Scheme is
             when AHT.URL.WS | AHT.URL.WSS =>
@@ -1151,32 +1227,32 @@ package body AHT.Websocket.Client is
             --  needs. Scheme is already narrowed to WS | WSS above.
             case Parsed.Scheme is
                when AHT.URL.WSS =>
-                  S := new Session_Type (Kind => Secure_Transport);
+                  Attempt.Sess := new Session_Type (Kind => Secure_Transport);
                when others =>
                   --  WS (HTTP/HTTPS already rejected above).
-                  S := new Session_Type (Kind => Plain_Transport);
+                  Attempt.Sess := new Session_Type (Kind => Plain_Transport);
             end case;
-            S.Generation := Positive (Gen);
+            Attempt.Sess.Generation := Positive (Gen);
 
-            case S.Kind is
+            case Attempt.Sess.Kind is
                when Secure_Transport =>
                   AHT.Transport.TLS.Connect
-                    (S.Secure,
+                    (Attempt.Sess.Secure,
                      Host     => To_String (Parsed.Host),
                      Port     => Parsed.Port,
                      Insecure => Insecure,
                      CA_Path  => CA_Path);
                when Plain_Transport =>
                   AHT.Transport.TCP.Connect
-                    (S.Plain,
+                    (Attempt.Sess.Plain,
                      Host => To_String (Parsed.Host),
                      Port => Parsed.Port);
             end case;
 
             begin
-               AHT.HTTP.Request.Write (Req, Active (S).all);
+               AHT.HTTP.Request.Write (Req, Active (Attempt.Sess).all);
                AHT.HTTP.Response.Read
-                 (Resp, Active (S).all,
+                 (Resp, Active (Attempt.Sess).all,
                   Method => AHT.HTTP.Methods.GET);
 
                if Resp.Status /= 101 then
@@ -1248,28 +1324,31 @@ package body AHT.Websocket.Client is
                      end if;
                   end if;
 
-                  S.Selected_Protocol := To_Unbounded_String (Got);
+                  Attempt.Sess.Selected_Protocol := To_Unbounded_String (Got);
                end;
 
                --  Handshake good — flip the connection's own state
                --  machine and hand the session to the receiver. The
                --  controller publishes it inside the rendezvous, so
                --  ownership transfer and visibility are one step.
-               S.State.Set (Open);
+               Attempt.Sess.State.Set (Open);
                --  'Unchecked_Access is safe by the same argument as
                --  Async_Handle: the Receiver task is itself a
                --  component of Self, so the parent master waits for
                --  the task before finalizing the other components
                --  (RM 9.3). The Client_Access never outlives Self.
+               --
+               --  Publish runs inside this rendezvous, so by the time
+               --  Start returns the transfer is already recorded in
+               --  the controller and Attempt's cleanup stands down.
                Self.Receiver.Start
-                 (Owner => Self'Unchecked_Access, Sess => S);
-               --  Ownership transferred; the receiver frees it now.
-               S := null;
+                 (Owner => Self'Unchecked_Access,
+                  Sess  => Attempt.Sess);
             exception
                when AHT.Websocket.Handshake_Error =>
-                  --  The transport teardown and the free happen in
-                  --  the one handler below, so no failure path can
-                  --  skip them.
+                  --  The transport teardown, the free and the
+                  --  admission release all happen in Attempt's
+                  --  Finalize, so no exit path can skip them.
                   raise;
                when E : others =>
                   raise AHT.Websocket.Handshake_Error
@@ -1278,21 +1357,6 @@ package body AHT.Websocket.Client is
                       & Ada.Exceptions.Exception_Message (E);
             end;
          end;
-      exception
-         when others =>
-            --  Nothing was published, so the session is still ours:
-            --  drop the transport and the allocation, then release
-            --  admission so the client is immediately reusable.
-            if S /= null then
-               begin
-                  Active (S).Close;
-               exception
-                  when others => null;
-               end;
-               Free (S);
-            end if;
-            Self.Ctl.Abandon_Connect;
-            raise;
       end;
    end Connect;
 
@@ -1330,7 +1394,19 @@ package body AHT.Websocket.Client is
       end if;
       L.Sess.Guard.Acquire;
       begin
-         if L.Sess.Guard.Close_Frame_Sent then
+         --  Re-check under the guard, not just at borrow time.
+         --  We may have queued here for a long time behind
+         --  another writer, and teardown may have started --
+         --  and fired its one-shot Abort_Pending -- while we
+         --  waited. Starting a write now would park with
+         --  nothing left to cancel it, and the reclaimer would
+         --  wait on our borrow forever. This is the sender-side
+         --  form of the rule the receiver echo paths follow.
+         --  Close_Frame_Sent alone does not cover it: a
+         --  peer-initiated teardown never latches it.
+         if not L.Ctl.Is_Open
+           or else L.Sess.Guard.Close_Frame_Sent
+         then
             raise AHT.Websocket.Closed_Error with
               "Send_Text: connection is not open";
          end if;
@@ -1359,7 +1435,19 @@ package body AHT.Websocket.Client is
       end if;
       L.Sess.Guard.Acquire;
       begin
-         if L.Sess.Guard.Close_Frame_Sent then
+         --  Re-check under the guard, not just at borrow time.
+         --  We may have queued here for a long time behind
+         --  another writer, and teardown may have started --
+         --  and fired its one-shot Abort_Pending -- while we
+         --  waited. Starting a write now would park with
+         --  nothing left to cancel it, and the reclaimer would
+         --  wait on our borrow forever. This is the sender-side
+         --  form of the rule the receiver echo paths follow.
+         --  Close_Frame_Sent alone does not cover it: a
+         --  peer-initiated teardown never latches it.
+         if not L.Ctl.Is_Open
+           or else L.Sess.Guard.Close_Frame_Sent
+         then
             raise AHT.Websocket.Closed_Error with
               "Send_Binary: connection is not open";
          end if;
@@ -1388,7 +1476,19 @@ package body AHT.Websocket.Client is
       end if;
       L.Sess.Guard.Acquire;
       begin
-         if L.Sess.Guard.Close_Frame_Sent then
+         --  Re-check under the guard, not just at borrow time.
+         --  We may have queued here for a long time behind
+         --  another writer, and teardown may have started --
+         --  and fired its one-shot Abort_Pending -- while we
+         --  waited. Starting a write now would park with
+         --  nothing left to cancel it, and the reclaimer would
+         --  wait on our borrow forever. This is the sender-side
+         --  form of the rule the receiver echo paths follow.
+         --  Close_Frame_Sent alone does not cover it: a
+         --  peer-initiated teardown never latches it.
+         if not L.Ctl.Is_Open
+           or else L.Sess.Guard.Close_Frame_Sent
+         then
             raise AHT.Websocket.Closed_Error with
               "Send_Ping: connection is not open";
          end if;
@@ -1411,34 +1511,13 @@ package body AHT.Websocket.Client is
       Reason  : String := "";
       Timeout : Duration := 5.0)
    is
-      S      : Session_Access;
-      Result : Teardown_Result;
-
-      Should_Send    : Boolean;
-      Already_Closed : Boolean;
-   begin
-      Self.Ctl.Begin_Teardown (S, Result, By_Caller => True);
-
-      case Result is
-         when No_Session =>
-            --  Never connected, or the receiver already finished
-            --  reclaiming — including closing the transport.
-            return;
-
-         when Join_Teardown =>
-            --  Someone else is driving it, possibly already past the
-            --  point where the session may be touched. Just wait for
-            --  the same completion.
-            Self.Ctl.Wait_Generation_Done;
-            return;
-
-         when Won_Teardown =>
-            null;
-      end case;
-
-      --  We hold the borrow that pins S, so it cannot be freed under
-      --  us. Everything here is best effort: whatever happens, the
-      --  borrow must come back or the receiver never reclaims.
+      --  Runs only for the caller that won the teardown, on the
+      --  session its borrow pins, so S cannot be freed under it.
+      --  Everything here is best effort -- the borrow has to come
+      --  back whatever happens, or the receiver never reclaims.
+      procedure Close_Handshake (S : Session_Access) is
+         Should_Send    : Boolean;
+         Already_Closed : Boolean;
       begin
          --  RFC 6455 §1.4 close: send our Close (if we haven't yet),
          --  then wait for the receiver to see the peer's echo.
@@ -1499,11 +1578,36 @@ package body AHT.Websocket.Client is
       exception
          when others =>
             null;
-      end;
+      end Close_Handshake;
 
-      --  Give the borrow back BEFORE waiting, or the receiver's
-      --  borrow drain and this wait deadlock on each other.
-      Self.Ctl.Release;
+   begin
+      --  The pin takes the teardown borrow on declaration and gives it
+      --  back on scope exit, so no exit -- not a raise, not an abort of
+      --  this task mid-handshake -- can leave the borrow count above
+      --  zero with the receiver waiting on it.
+      declare
+         Pin : Teardown_Pin (Self.Ctl'Unchecked_Access);
+      begin
+         case Pin.Result is
+            when No_Session =>
+               --  Never connected, or the receiver already finished
+               --  reclaiming -- including closing the transport.
+               return;
+
+            when Join_Teardown =>
+               --  Someone else is driving it, possibly already past the
+               --  point where the session may be touched. Fall through
+               --  to the shared wait without touching anything.
+               null;
+
+            when Won_Teardown =>
+               Close_Handshake (Pin.Sess);
+         end case;
+      end;
+      --  Out of the pin's scope, so the borrow is back and the
+      --  receiver's drain can pass. Waiting inside it would deadlock
+      --  the two against each other.
+
       --  Synchronous with respect to receiver exit and callbacks: the
       --  transport is closed and the session freed by the time this
       --  returns.
