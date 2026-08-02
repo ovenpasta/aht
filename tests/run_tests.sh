@@ -241,17 +241,13 @@ fi
 # has already reported a stuck task still cannot exit. This is the
 # backstop for that.
 #
-# `timeout` is coreutils; stock macOS has neither it nor gtimeout, and
-# there the suite runs uncapped rather than not at all.
+# Enforced by tests/run_one.py rather than timeout(1): coreutils is
+# absent on the macOS runner, so there the cap would not exist at all,
+# and GNU timeout without -k only sends SIGTERM. The wrapper escalates
+# to SIGKILL and signals the child's whole process group. Python is
+# already required here — every fixture is one.
 TEST_TIMEOUT=${TEST_TIMEOUT:-300}
-if command -v timeout >/dev/null 2>&1; then
-    CAP="timeout $TEST_TIMEOUT"
-elif command -v gtimeout >/dev/null 2>&1; then
-    CAP="gtimeout $TEST_TIMEOUT"
-else
-    CAP=
-    echo "  (no timeout(1); tests run without a per-test cap)"
-fi
+CAP="$PY tests/run_one.py $TEST_TIMEOUT"
 
 FAILED=0
 TOTAL=0
