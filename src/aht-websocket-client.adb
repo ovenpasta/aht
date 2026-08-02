@@ -17,6 +17,8 @@ with AHT.Websocket.UTF8;
 
 package body AHT.Websocket.Client is
 
+   package Guards renames AHT.Websocket.Send_Guards;
+
    ---------------------------------------------------------------
    --  Local helpers
    ---------------------------------------------------------------
@@ -142,11 +144,11 @@ package body AHT.Websocket.Client is
    end Host_Header;
 
    procedure Fill_Random (B : out AHT.Bytes.Byte_Array) is
-      Gen : Random_Bytes.Generator;
+      Gen : Guards.Random_Bytes.Generator;
    begin
-      Random_Bytes.Reset (Gen);
+      Guards.Random_Bytes.Reset (Gen);
       for I in B'Range loop
-         B (I) := Random_Bytes.Random (Gen);
+         B (I) := Guards.Random_Bytes.Random (Gen);
       end loop;
    end Fill_Random;
 
@@ -173,7 +175,7 @@ package body AHT.Websocket.Client is
    --  can't block other tasks' Acquires.
    procedure Send_Frame
      (Transport : in out AHT.Transport.Transport_Type'Class;
-      Guard     : in out Send_Guard;
+      Guard     : in out Guards.Send_Guard;
       Op        : AHT.Websocket.Opcode;
       FIN       : Boolean;
       Payload   : AHT.Bytes.Byte_Array)
@@ -253,43 +255,6 @@ package body AHT.Websocket.Client is
       function Local_Close_Sent return Boolean is (Local_Closed);
 
    end State_PO;
-
-   protected body Send_Guard is
-
-      entry Acquire (Owner : System.Address) when not Busy is
-      begin
-         Busy    := True;
-         Held_By := Owner;
-      end Acquire;
-
-      procedure Release_If_Owner (Owner : System.Address) is
-         use type System.Address;
-      begin
-         if Busy and then Held_By = Owner then
-            Busy    := False;
-            Held_By := System.Null_Address;
-         end if;
-      end Release_If_Owner;
-
-      procedure Mark_Close_Sent is
-      begin
-         Close_Sent := True;
-      end Mark_Close_Sent;
-
-      function Close_Frame_Sent return Boolean is (Close_Sent);
-
-      procedure Random_Mask (Mask : out AHT.Bytes.Byte_Array) is
-      begin
-         if not Seeded then
-            Random_Bytes.Reset (Gen);
-            Seeded := True;
-         end if;
-         for I in Mask'Range loop
-            Mask (I) := Random_Bytes.Random (Gen);
-         end loop;
-      end Random_Mask;
-
-   end Send_Guard;
 
    protected body Inbox_PO is
 
@@ -505,52 +470,6 @@ package body AHT.Websocket.Client is
          L.Sess := null;
          L.Ctl.Release;
       end if;
-   end Finalize;
-
-   --  Holds Send_Guard for the duration of one frame write. The guard
-   --  is a plain busy latch, so a task aborted between taking it and
-   --  giving it back would leave it latched with nobody able to clear
-   --  it: every other sender and the receiver's own echo paths would
-   --  block on it forever, and reclamation would never drain.
-   --
-   --  Two things make the pairing abort-proof, and both are needed:
-   --
-   --    * Finalize is abort-deferred (RM 9.8), so the release always
-   --      runs. But Take is NOT Initialize -- Initialize is
-   --      abort-deferred too, and blocking inside it makes the caller
-   --      UNABORTABLE for as long as the guard is contended, so a
-   --      Close under an asynchronous select would hang instead of
-   --      being cancelled whenever another writer were stuck.
-   --      Measured on GNAT, not assumed: an ATC cannot interrupt a
-   --      queued entry call made from Initialize, though it
-   --      interrupts the same call made directly.
-   --    * Ownership is recorded by Acquire, inside the protected
-   --      action. A token that set a local "I hold it" flag after
-   --      Acquire returned would still leak: a pending abort takes
-   --      effect at the END of the protected action, before the
-   --      assignment, and Finalize would then decline to release a
-   --      latch it really does hold. Also measured.
-   --
-   --  So Finalize releases unconditionally-but-conditionally: it
-   --  always calls Release_If_Owner, which matches only if this
-   --  token's acquisition actually completed.
-   type Guard_Token (G : access Send_Guard) is
-     new Ada.Finalization.Limited_Controlled with null record;
-
-   --  Class-wide so it is not a primitive of a body-local tagged type,
-   --  which would only ever be called statically anyway.
-   procedure Take (T : in out Guard_Token'Class);
-
-   overriding procedure Finalize (T : in out Guard_Token);
-
-   procedure Take (T : in out Guard_Token'Class) is
-   begin
-      T.G.Acquire (T'Address);
-   end Take;
-
-   overriding procedure Finalize (T : in out Guard_Token) is
-   begin
-      T.G.Release_If_Owner (T'Address);
    end Finalize;
 
    --  Owns an admitted, still-UNPUBLISHED connection attempt. Every
@@ -882,9 +801,9 @@ package body AHT.Websocket.Client is
            (Code : AHT.Websocket.Valid_Close_Code := 1000)
          is
             Should_Send : Boolean;
-            Token       : Guard_Token (S.Guard'Unchecked_Access);
+            Token       : Guards.Guard_Token (S.Guard'Unchecked_Access);
          begin
-            Take (Token);
+            Token.Take;
             --  A forced teardown may already have fired Abort_Pending,
             --  which wakes only the waiters that existed at the time.
             --  Starting a write now would park with nothing left to
@@ -920,9 +839,9 @@ package body AHT.Websocket.Client is
          end Maybe_Send_Close_Echo;
 
          procedure Send_Pong (Payload : AHT.Bytes.Byte_Array) is
-            Token : Guard_Token (S.Guard'Unchecked_Access);
+            Token : Guards.Guard_Token (S.Guard'Unchecked_Access);
          begin
-            Take (Token);
+            Token.Take;
             --  Same forced-teardown gate as the Close echo above.
             if Conn.Ctl.Draining_Forced then
                return;
@@ -1486,9 +1405,9 @@ package body AHT.Websocket.Client is
            "Send_Text: connection is not open";
       end if;
       declare
-         Token : Guard_Token (L.Sess.Guard'Unchecked_Access);
+         Token : Guards.Guard_Token (L.Sess.Guard'Unchecked_Access);
       begin
-         Take (Token);
+         Token.Take;
          --  Re-check under the guard, not just at borrow time.
          --  We may have queued here for a long time behind
          --  another writer, and teardown may have started --
@@ -1524,9 +1443,9 @@ package body AHT.Websocket.Client is
            "Send_Binary: connection is not open";
       end if;
       declare
-         Token : Guard_Token (L.Sess.Guard'Unchecked_Access);
+         Token : Guards.Guard_Token (L.Sess.Guard'Unchecked_Access);
       begin
-         Take (Token);
+         Token.Take;
          --  Re-check under the guard, not just at borrow time.
          --  We may have queued here for a long time behind
          --  another writer, and teardown may have started --
@@ -1562,9 +1481,9 @@ package body AHT.Websocket.Client is
            "Send_Ping: connection is not open";
       end if;
       declare
-         Token : Guard_Token (L.Sess.Guard'Unchecked_Access);
+         Token : Guards.Guard_Token (L.Sess.Guard'Unchecked_Access);
       begin
-         Take (Token);
+         Token.Take;
          --  Re-check under the guard, not just at borrow time.
          --  We may have queued here for a long time behind
          --  another writer, and teardown may have started --
@@ -1610,9 +1529,9 @@ package body AHT.Websocket.Client is
          S.State.Try_Mark_Local_Close (Should_Send);
          if Should_Send then
             declare
-               Token : Guard_Token (S.Guard'Unchecked_Access);
+               Token : Guards.Guard_Token (S.Guard'Unchecked_Access);
             begin
-               Take (Token);
+               Token.Take;
                begin
                   Send_Frame
                     (Active (S).all, S.Guard,

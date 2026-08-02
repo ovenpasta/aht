@@ -7,7 +7,7 @@
 --  where hand-written cleanup fails and controlled finalization has
 --  to carry the invariant instead.
 --
---  Five cases, in the order they run. How firmly each lands on the
+--  Four cases, in the order they run. How firmly each lands on the
 --  state it means to test differs, so that is stated per case rather
 --  than claimed uniformly.
 --
@@ -48,14 +48,10 @@
 --       one parked in Write provably holding the guard, one still on
 --       its entry queue, covering the holder and cancellation paths.
 --
---    5. Pin the ownership-recording property that guard depends on,
---       against a latch of the same shape. Case 4 cannot reach it:
---       the interval between an acquisition completing and the
---       acquirer noting it is a couple of instructions, and by the
---       time this task can see the guard change hands the victim is
---       long past it. Here the release and the abort are adjacent in
---       one task, so the victim is made runnable and then aborted
---       before it is ever scheduled.
+--  The guard's own ownership protocol is exercised separately, by
+--  test_ws_send_guard: those cases leave a latch permanently held if
+--  they fail, which shows up here as a hang, so they must not sit
+--  behind a case that can hang first and hide them.
 --
 --  Every fixture outlasts the assertions that depend on it, so a
 --  failure can only mean the client did the wrong thing, never that
@@ -66,7 +62,6 @@ with Ada.Calendar; use Ada.Calendar;
 with Ada.Characters.Handling;
 with Ada.Command_Line;
 with Ada.Exceptions;
-with Ada.Finalization;
 with Ada.Streams; use Ada.Streams;
 with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
@@ -74,8 +69,6 @@ with Ada.Text_IO; use Ada.Text_IO;
 with GNAT.Sockets; use GNAT.Sockets;
 
 with GNAT.SHA1;
-
-with System;
 
 with AHT.Bytes;
 with AHT.Transport;
@@ -776,114 +769,10 @@ begin
       Server.Wait_Done;
    end;
 
-   --  Case 5: the ownership-recording property the guard depends on.
-   --
-   --  Send_Guard is released by a scope guard's Finalize, so the two
-   --  have to agree on whether this caller actually holds the latch.
-   --  The obvious way -- the caller setting a flag once Acquire
-   --  returns -- does not survive an abort: a pending abort takes
-   --  effect at the END of the acquiring protected action, before
-   --  that assignment, and the release then declines to free a latch
-   --  it really holds. Recording ownership INSIDE the protected
-   --  action leaves no such interval.
-   --
-   --  That interval is a couple of instructions wide, so it cannot be
-   --  reached through Send_* or Close: by the time this task can
-   --  observe the guard changing hands, the victim is long past it.
-   --  What makes it reachable here is that the release and the abort
-   --  are adjacent in ONE task, so the victim is made runnable and
-   --  then aborted before it is ever scheduled. So this pins the
-   --  property against a latch of the same shape rather than against
-   --  the client's own -- which is the difference between a hazard
-   --  that is understood and one that is merely believed absent.
-   declare
-      use type System.Address;
-
-      Rounds : constant := 50;
-      Leaked : Natural := 0;
-
-      protected Latch is
-         entry     Acquire (Owner : System.Address);
-         procedure Release_If_Owner (Owner : System.Address);
-         procedure Hold;
-         procedure Free;
-         function  Is_Busy return Boolean;
-      private
-         Busy    : Boolean := False;
-         Held_By : System.Address := System.Null_Address;
-      end Latch;
-
-      protected body Latch is
-         entry Acquire (Owner : System.Address) when not Busy is
-         begin
-            Busy    := True;
-            Held_By := Owner;
-         end Acquire;
-         procedure Release_If_Owner (Owner : System.Address) is
-         begin
-            if Busy and then Held_By = Owner then
-               Busy    := False;
-               Held_By := System.Null_Address;
-            end if;
-         end Release_If_Owner;
-         procedure Hold is
-         begin
-            Busy := True;
-         end Hold;
-         procedure Free is
-         begin
-            Busy    := False;
-            Held_By := System.Null_Address;
-         end Free;
-         function Is_Busy return Boolean is (Busy);
-      end Latch;
-
-      type Token is new Ada.Finalization.Limited_Controlled
-        with null record;
-      overriding procedure Finalize (T : in out Token);
-      overriding procedure Finalize (T : in out Token) is
-      begin
-         Latch.Release_If_Owner (T'Address);
-      end Finalize;
-   begin
-      for I in 1 .. Rounds loop
-         Latch.Free;
-         Latch.Hold;                     --  someone else holds it
-         declare
-            task Victim;
-            task body Victim is
-               T : Token;
-            begin
-               Latch.Acquire (T'Address);
-               delay 5.0;                --  aborted long before this
-            exception
-               when others => null;
-            end Victim;
-         begin
-            delay 0.002;                 --  let Victim reach the queue
-            Latch.Free;                  --  hands the latch to Victim
-            abort Victim;                --  ... before it is scheduled
-            while not Victim'Terminated loop
-               delay 0.001;
-            end loop;
-         end;
-         if Latch.Is_Busy then
-            Leaked := Leaked + 1;
-         end if;
-      end loop;
-
-      if Leaked > 0 then
-         Fail ("guard-idiom:" & Leaked'Image & " of" & Rounds'Image
-               & " aborted acquisitions left the latch held — a token"
-               & " cannot record ownership after the acquiring"
-               & " protected action returns");
-      end if;
-   end;
-
    if Failures = 0 then
       Put_Line ("test_ws_abort: OK (teardown winner, connect attempt,"
                 & " handoff sweep and senders around the guard all"
-                & " survive being aborted; ownership recording pinned)");
+                & " survive being aborted)");
       Ada.Command_Line.Set_Exit_Status (0);
    else
       Put_Line ("test_ws_abort:" & Failures'Image & " failure(s)");
