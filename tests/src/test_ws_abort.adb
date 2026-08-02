@@ -2,14 +2,15 @@
 --  ownership handoffs.
 --
 --  Every other test drives the client through ordinary returns and
---  exceptions, so none of them can reach the paths where an Ada task
---  is torn out of a call it is blocked in. Those paths are exactly
+--  exceptions, so none of them reaches the paths where an Ada task is
+--  torn out of a call it is blocked in. Those are exactly the paths
 --  where hand-written cleanup fails and controlled finalization has
---  to carry the invariant instead, which is why they are worth
---  pinning separately.
+--  to carry the invariant instead.
 --
---  Two cases, both bounded so a regression FAILS rather than hanging
---  the suite:
+--  Four cases. Three are deterministic: each waits for positive
+--  evidence that the operation reached the state under test before
+--  aborting it, so none can pass by aborting something that had not
+--  started yet. The last is a sweep, and says so.
 --
 --    1. Abort the winner of a teardown. Winning stops admission and
 --       makes that caller the only task that can wake the receiver:
@@ -23,9 +24,29 @@
 --       cleanup does not run, the client is stranded in Connecting
 --       and can never be connected again.
 --
---  Both fixtures outlast the assertions deliberately, so a failure
---  can only mean the client did the wrong thing, never that the peer
---  went away underneath it.
+--    3. Abort a sender parked inside Send_Guard. The guard is a plain
+--       busy latch, so a task torn out between taking and returning
+--       it would leave it latched and every later sender — the close
+--       handshake included — would block on it forever.
+--
+--    4. Sweep an abort across the whole connect, so some samples land
+--       on the Start rendezvous itself. That is where the session
+--       changes hands, and where an abort that lost the handoff record
+--       would make the attempt's cleanup free a session the receiver
+--       now owns. The window is a few instructions wide and cannot be
+--       hit on demand from the public API, so this SAMPLES it rather
+--       than pinning it: it calibrates the handshake first, sweeps the
+--       abort deadline across that span, and round-trips a message on
+--       every connection that survived, since a freed session shows up
+--       when the receiver next touches it. A deterministic version
+--       needs a second generation to keep the receiver busy so Start
+--       actually queues, which only becomes possible once repeated
+--       connects exist.
+--
+--  Every fixture outlasts the assertions that depend on it, so a
+--  failure can only mean the client did the wrong thing, never that
+--  the peer went away underneath it. The bounds make a regression a
+--  FAIL rather than a hung suite.
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Characters.Handling;
@@ -40,11 +61,14 @@ with GNAT.Sockets; use GNAT.Sockets;
 with GNAT.SHA1;
 
 with AHT.Bytes;
+with AHT.Transport;
 with AHT.URL;
 with AHT.Websocket;
 with AHT.Websocket.Client;
 
 procedure Test_WS_Abort is
+
+   Echo_URL : constant String := "ws://127.0.0.1:8765/";
 
    Failures : Natural := 0;
 
@@ -53,6 +77,22 @@ procedure Test_WS_Abort is
       Put_Line ("test_ws_abort: FAIL — " & Msg);
       Failures := Failures + 1;
    end Fail;
+
+   --  Spin until Cond holds or the bound expires, so every wait in
+   --  this test is on an observable fact rather than a guessed delay.
+   generic
+      with function Cond return Boolean;
+   function Await (Bound : Duration) return Boolean;
+
+   function Await (Bound : Duration) return Boolean is
+      Waited : Duration := 0.0;
+   begin
+      while not Cond and then Waited < Bound loop
+         delay 0.02;
+         Waited := Waited + 0.02;
+      end loop;
+      return Cond;
+   end Await;
 
    --  Same computation the client does internally, so the fake server
    --  can answer a valid Accept for whatever Key the client generated.
@@ -104,13 +144,40 @@ procedure Test_WS_Abort is
         (Request_Bytes (Value_Start .. Value_End - 1), Ada.Strings.Both);
    end Extract_Key;
 
-   --  Completes the WebSocket handshake and then goes silent: it never
-   --  echoes a Close, so a client waiting for the peer's echo waits
-   --  forever and the only thing that can end the wait is the client's
-   --  own machinery. Holds well past every assertion below, then drops
-   --  the socket so a stranded receiver still terminates and the suite
-   --  reports a failure rather than deadlocking.
-   task type Silent_Server is
+   --  Set by the fixture the moment it reads anything the client sent
+   --  after the handshake — in practice the Close frame. Case 1 waits
+   --  on this rather than on a delay, so "the closer is parked waiting
+   --  for an echo" is an observed fact.
+   protected Peer_Traffic is
+      procedure Note;
+      function  Seen return Boolean;
+   private
+      Got : Boolean := False;
+   end Peer_Traffic;
+
+   protected body Peer_Traffic is
+      procedure Note is
+      begin
+         Got := True;
+      end Note;
+      function Seen return Boolean is (Got);
+   end Peer_Traffic;
+
+   function Traffic_Seen return Boolean is (Peer_Traffic.Seen);
+   function Await_Traffic is new Await (Traffic_Seen);
+
+   --  Completes the WebSocket handshake, then drains without ever
+   --  answering: it reads the client's Close frame (so the test can
+   --  see that it arrived) but never echoes it, so a client waiting
+   --  for the echo waits forever and only its own machinery can end
+   --  the wait. Holds past every assertion, then drops the socket so
+   --  a stranded receiver still terminates and the suite reports a
+   --  failure instead of deadlocking.
+   --  Deaf_Ms delays the drain loop, so the peer stops reading for
+   --  that long after the handshake. A client writing more than the
+   --  socket buffers hold then blocks in Write -- which is the only
+   --  way to park a task inside Send_Guard.
+   task type Silent_Server (Deaf_Ms : Natural := 0) is
       entry Get_Port (P : out AHT.URL.Port_Number; Err : out Unbounded_String);
       entry Wait_Done;
    end Silent_Server;
@@ -129,6 +196,15 @@ procedure Test_WS_Abort is
          Create_Socket (Server, Family_Inet, Socket_Stream);
          Set_Socket_Option
            (Server, Socket_Level, (Name => Reuse_Address, Enabled => True));
+         if Deaf_Ms > 0 then
+            --  Tiny receive buffer, inherited by the accepted socket:
+            --  it shrinks the TCP window so a deaf peer backs the
+            --  client's writer up after a few KB instead of after
+            --  however many megabytes the kernel felt like buffering.
+            Set_Socket_Option
+              (Server, Socket_Level,
+               (Name => Receive_Buffer, Size => 4_096));
+         end if;
          Bind_To.Addr := Inet_Addr ("127.0.0.1");
          Bind_To.Port := 0;
          Bind_Socket (Server, Bind_To);
@@ -151,6 +227,11 @@ procedure Test_WS_Abort is
       if Length (Setup_Error) = 0 then
          begin
             Accept_Socket (Server, Client, Peer);
+            if Deaf_Ms > 0 then
+               Set_Socket_Option
+                 (Client, Socket_Level,
+                  (Name => Receive_Buffer, Size => 4_096));
+            end if;
             declare
                Buf  : Stream_Element_Array (1 .. 4_096);
                Last : Stream_Element_Offset;
@@ -178,27 +259,58 @@ procedure Test_WS_Abort is
                     & ASCII.CR & ASCII.LF;
                   R_Buf : Stream_Element_Array
                     (1 .. Stream_Element_Offset (Resp'Length));
+                  From  : Stream_Element_Offset := 1;
                   Sent  : Stream_Element_Offset;
                begin
                   for I in Resp'Range loop
                      R_Buf (Stream_Element_Offset (I - Resp'First + 1)) :=
                        Stream_Element (Character'Pos (Resp (I)));
                   end loop;
-                  Send_Socket (Client, R_Buf, Sent);
+                  --  Send_Socket may write short. A truncated 101 would
+                  --  leave the client's unbounded Connect waiting for
+                  --  the rest of a response that never comes, which
+                  --  would look exactly like a client-side hang.
+                  while From <= R_Buf'Last loop
+                     Send_Socket (Client, R_Buf (From .. R_Buf'Last), Sent);
+                     exit when Sent < From;   --  peer gone
+                     From := Sent + 1;
+                  end loop;
                end;
             end;
 
-            --  Silence. Anything the client sends is left unread and
-            --  unanswered; in particular its Close frame is never
-            --  echoed. Held until the test says it is done, or until
-            --  the cap expires -- so a client that fails to tear
-            --  itself down still gets an EOF eventually and the suite
-            --  reports a failure instead of deadlocking.
-            select
-               accept Wait_Done;
-            or
-               delay Hold_Seconds;
-            end select;
+            if Deaf_Ms > 0 then
+               delay Duration (Deaf_Ms) / 1000.0;
+            end if;
+
+            --  Drain, never answer. A short receive timeout keeps this
+            --  loop responsive to Wait_Done and to the cap.
+            declare
+               Buf     : Stream_Element_Array (1 .. 65_536);
+               Last    : Stream_Element_Offset;
+               Stop_At : constant Time := Clock + Hold_Seconds;
+               Told    : Boolean := False;
+            begin
+               Set_Socket_Option
+                 (Client, Socket_Level,
+                  (Name => Receive_Timeout, Timeout => 0.25));
+               while not Told and then Clock < Stop_At loop
+                  select
+                     accept Wait_Done;
+                     Told := True;
+                  else
+                     null;
+                  end select;
+                  exit when Told;
+                  begin
+                     Receive_Socket (Client, Buf, Last);
+                     exit when Last < Buf'First;   --  client closed
+                     Peer_Traffic.Note;
+                  exception
+                     when Socket_Error => null;    --  idle tick
+                  end;
+               end loop;
+            end;
+
             Shutdown_Socket (Client, Shut_Read_Write);
             Close_Socket (Client);
          exception
@@ -212,12 +324,31 @@ procedure Test_WS_Abort is
          end;
       end if;
 
+      --  A Wait_Done that arrives after the drain loop ended still has
+      --  somewhere to land, so the test never blocks calling it.
       select
          accept Wait_Done;
       or
          terminate;
       end select;
    end Silent_Server;
+
+   --  Runs a Close that cannot return, on its own task, so the test
+   --  can abort it once it has provably taken the teardown.
+   task type Closer_Task is
+      entry Go (Target : AHT.Websocket.Client.Client_Access);
+   end Closer_Task;
+
+   task body Closer_Task is
+      C : AHT.Websocket.Client.Client_Access;
+   begin
+      accept Go (Target : AHT.Websocket.Client.Client_Access) do
+         C := Target;
+      end Go;
+      AHT.Websocket.Client.Close (C.all, Timeout => Duration'Last);
+   exception
+      when others => null;
+   end Closer_Task;
 
    function URL_For (Port : AHT.URL.Port_Number) return String is
      ("ws://127.0.0.1:"
@@ -226,20 +357,19 @@ procedure Test_WS_Abort is
 
 begin
    --  Case 1: abort the task that won the teardown.
-   --
-   --  Close (Timeout => Duration'Last) parks waiting for a Close echo
-   --  the fixture will never send. Aborting it there leaves a client
-   --  whose admission is already stopped and whose receiver has not
-   --  been woken — so the invariant under test is that the abort still
-   --  released the receiver, and a later Close therefore completes at
-   --  once instead of waiting out the fixture.
    declare
       Server    : Silent_Server;
       Port      : AHT.URL.Port_Number;
       Setup_Err : Unbounded_String;
-      C         : AHT.Websocket.Client.Client_Type;
+      C         : aliased AHT.Websocket.Client.Client_Type;
+
+      function Not_Open return Boolean is
+        (not AHT.Websocket.Client.Is_Open (C));
+      function Await_Closing is new Await (Not_Open);
+
       Started, Ended : Time;
-      Bound     : constant Duration := 2.0;
+      Join_Bound     : constant Duration := 2.0;
+      Connected      : Boolean := False;
    begin
       Server.Get_Port (Port, Setup_Err);
       if Length (Setup_Err) > 0 then
@@ -247,49 +377,81 @@ begin
       else
          begin
             AHT.Websocket.Client.Connect (C, URL_For (Port));
+            Connected := True;
          exception
             when E : others =>
                Fail ("close-abort: Connect raised "
-                     & Ada.Exceptions.Exception_Name (E));
+                     & Ada.Exceptions.Exception_Name (E) & ": "
+                     & Ada.Exceptions.Exception_Message (E));
          end;
-
-         --  Tear the closing task out mid-handshake.
-         select
-            delay 0.3;
-         then abort
-            AHT.Websocket.Client.Close (C, Timeout => Duration'Last);
-         end select;
-
-         --  The aborted winner must still have woken the receiver, so
-         --  this join finds a teardown that actually completes. If the
-         --  wake gates were skipped, the receiver is still parked in
-         --  Read and this cannot return until the fixture drops the
-         --  socket at Hold_Seconds.
-         Started := Clock;
-         select
-            delay Hold_Seconds + 2.0;
-            Fail ("close-abort: the joining Close never returned at all");
-         then abort
-            AHT.Websocket.Client.Close (C);
-         end select;
-         Ended := Clock;
-
-         if Ended - Started > Bound then
-            Fail ("close-abort: joining Close took"
-                  & Duration'Image (Ended - Started)
-                  & "s (bound" & Duration'Image (Bound)
-                  & "s) — the aborted winner left the receiver parked"
-                  & " and the join waited for the fixture instead");
-         end if;
-
-         if AHT.Websocket.Client.Is_Open (C) then
-            Fail ("close-abort: Is_Open true after the teardown");
-         end if;
-
-         --  Let the fixture go rather than waiting out its cap at
-         --  block exit.
-         Server.Wait_Done;
       end if;
+
+      if Connected then
+         declare
+            Closer : Closer_Task;
+         begin
+            Closer.Go (C'Unchecked_Access);
+
+            --  Positive evidence before aborting anything. Is_Open goes
+            --  false the instant Begin_Teardown runs, so it proves the
+            --  closer won; the fixture seeing traffic proves it got as
+            --  far as putting the Close frame on the wire. Together
+            --  they place it in the wait for an echo that never comes.
+            --  Without this the abort could land before the teardown
+            --  even started, and the join below would then be measuring
+            --  an ordinary Close.
+            if not Await_Closing (3.0) then
+               Fail ("close-abort: the closer never took the teardown"
+                     & " — nothing was aborted mid-handshake, so this"
+                     & " case proved nothing");
+            elsif not Await_Traffic (3.0) then
+               Fail ("close-abort: the Close frame never reached the"
+                     & " peer — the closer cannot be parked waiting"
+                     & " for an echo, so this case proved nothing");
+            else
+               abort Closer;
+
+               --  Its finalization is what has to have woken the
+               --  receiver, so wait for it to finish before timing.
+               declare
+                  function Gone return Boolean is (Closer'Terminated);
+                  function Await_Gone is new Await (Gone);
+               begin
+                  if not Await_Gone (3.0) then
+                     Fail ("close-abort: the aborted closer never"
+                           & " terminated");
+                  end if;
+               end;
+
+               --  If the abort skipped the wake gates, the receiver is
+               --  still parked in Read and this join cannot return
+               --  until the fixture drops the socket at Hold_Seconds.
+               Started := Clock;
+               select
+                  delay Hold_Seconds + 2.0;
+                  Fail ("close-abort: the joining Close never returned");
+               then abort
+                  AHT.Websocket.Client.Close (C);
+               end select;
+               Ended := Clock;
+
+               if Ended - Started > Join_Bound then
+                  Fail ("close-abort: joining Close took"
+                        & Duration'Image (Ended - Started)
+                        & "s (bound" & Duration'Image (Join_Bound)
+                        & "s) — the aborted winner left the receiver"
+                        & " parked and the join waited for the fixture");
+               end if;
+
+               if AHT.Websocket.Client.Is_Open (C) then
+                  Fail ("close-abort: Is_Open true after the teardown");
+               end if;
+            end if;
+         end;
+      end if;
+
+      --  Release the fixture rather than waiting out its cap here.
+      Server.Wait_Done;
    end;
 
    --  Case 2: abort a connect attempt in flight.
@@ -297,8 +459,8 @@ begin
    --  The stall fixture on 8767 accepts and then says nothing, so the
    --  upgrade response never arrives and Connect blocks. The attempt
    --  holds both the client's admission and an unpublished session; if
-   --  the abort does not run its cleanup, the client is stuck in
-   --  Connecting and the next Connect is refused.
+   --  its cleanup does not run, the client is stuck in Connecting and
+   --  the next Connect is refused.
    declare
       C : AHT.Websocket.Client.Client_Type;
    begin
@@ -321,7 +483,7 @@ begin
       end;
 
       begin
-         AHT.Websocket.Client.Connect (C, "ws://127.0.0.1:8765/");
+         AHT.Websocket.Client.Connect (C, Echo_URL);
          if not AHT.Websocket.Client.Is_Open (C) then
             Fail ("connect-abort: reconnect reported not open");
          end if;
@@ -338,9 +500,240 @@ begin
       end;
    end;
 
+   --  Case 3: sweep an abort across the connect, to sample the Start
+   --  rendezvous. Any connection that survives the abort is made to
+   --  round-trip a message, because that is what forces the receiver
+   --  to touch the session it was handed: if the aborted attempt had
+   --  wrongly freed it, this is where that shows.
+   declare
+      Samples   : constant := 40;
+      Calibrate : Duration := 0.0;
+      Survived  : Natural := 0;
+      Torn      : Natural := 0;
+   begin
+      --  How long a clean handshake takes, so the sweep brackets the
+      --  handoff instead of guessing at it.
+      declare
+         C     : AHT.Websocket.Client.Client_Type;
+         Start : constant Time := Clock;
+      begin
+         AHT.Websocket.Client.Connect (C, Echo_URL);
+         Calibrate := Clock - Start;
+         AHT.Websocket.Client.Close (C);
+      exception
+         when E : others =>
+            Fail ("handoff-sweep: calibration Connect raised "
+                  & Ada.Exceptions.Exception_Name (E)
+                  & " (is server_ws.py running?)");
+            Calibrate := 0.0;
+      end;
+
+      if Calibrate > 0.0 then
+         for I in 1 .. Samples loop
+            declare
+               --  Across roughly half to one-and-a-half of a
+               --  handshake, so the abort lands everywhere from the
+               --  dial to just past the rendezvous.
+               Fraction : constant Float :=
+                 0.5 + Float (I) / Float (Samples);
+               When_To_Abort : constant Duration :=
+                 Duration (Float (Calibrate) * Fraction);
+               C   : AHT.Websocket.Client.Client_Type;
+               Msg : AHT.Websocket.Client.Message_Type;
+            begin
+               begin
+                  select
+                     delay When_To_Abort;
+                  then abort
+                     AHT.Websocket.Client.Connect (C, Echo_URL);
+                  end select;
+               exception
+                  when AHT.Websocket.Handshake_Error
+                     | AHT.Transport.Transport_Error =>
+                     null;   --  ordinary failure of a torn attempt
+                  when E : others =>
+                     Fail ("handoff-sweep: sample" & I'Image
+                           & " raised " & Ada.Exceptions.Exception_Name (E)
+                           & ": " & Ada.Exceptions.Exception_Message (E));
+               end;
+
+               if AHT.Websocket.Client.Is_Open (C) then
+                  --  Published despite the abort: the receiver owns
+                  --  this session now. Make it use it.
+                  Survived := Survived + 1;
+                  begin
+                     AHT.Websocket.Client.Send_Text (C, "handoff");
+                     AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
+                     if AHT.Bytes.To_String (Msg.Payload) /= "handoff" then
+                        Fail ("handoff-sweep: sample" & I'Image
+                              & " echoed """
+                              & AHT.Bytes.To_String (Msg.Payload) & """");
+                     end if;
+                  exception
+                     when E : others =>
+                        Fail ("handoff-sweep: sample" & I'Image
+                              & " round-trip raised "
+                              & Ada.Exceptions.Exception_Name (E) & ": "
+                              & Ada.Exceptions.Exception_Message (E));
+                  end;
+                  AHT.Websocket.Client.Close (C, Timeout => 2.0);
+               else
+                  Torn := Torn + 1;
+               end if;
+            end;
+         end loop;
+
+         --  A sweep that never tore anything, or never let anything
+         --  through, swept the wrong span and is not sampling the
+         --  handoff at all.
+         if Survived = 0 or else Torn = 0 then
+            Fail ("handoff-sweep:" & Survived'Image & " survived,"
+                  & Torn'Image & " torn — the sweep did not bracket"
+                  & " the handshake, so it never approached the"
+                  & " rendezvous (calibration"
+                  & Duration'Image (Calibrate) & "s)");
+         end if;
+      end if;
+   end;
+
+   --  Case 4: abort a sender parked inside Send_Guard.
+   --
+   --  Send_Guard is a plain busy latch. A task aborted between taking
+   --  it and giving it back leaves it latched with nobody able to
+   --  clear it, and every later sender -- including the receiver's own
+   --  echo paths and the close handshake -- blocks on it forever. The
+   --  probe: park a writer in Write by writing more than the socket
+   --  buffers hold to a peer that has stopped reading, abort it there,
+   --  then require Close to complete once the peer resumes draining.
+   declare
+      Server    : Silent_Server (Deaf_Ms => 2_000);
+      Port      : AHT.URL.Port_Number;
+      Setup_Err : Unbounded_String;
+      C         : aliased AHT.Websocket.Client.Client_Type;
+      Connected : Boolean := False;
+
+      --  Bigger than any plausible loopback send+receive buffer, so
+      --  the write provably cannot complete while the peer is deaf.
+      --  On the heap: 16 MB would not fit the environment task's
+      --  stack, and Storage_Error here would look like a client bug.
+      type Bulk_Access is access AHT.Bytes.Byte_Array;
+      Bulk : constant Bulk_Access :=
+        new AHT.Bytes.Byte_Array'(1 .. 4 * 1024 * 1024 => 16#5A#);
+
+      protected Writer_State is
+         procedure Note_Returned (Why : String);
+         function  Returned return Boolean;
+         function  Detail return String;
+      private
+         Done : Boolean := False;
+         Text : Unbounded_String;
+      end Writer_State;
+
+      protected body Writer_State is
+         procedure Note_Returned (Why : String) is
+         begin
+            Done := True;
+            Text := To_Unbounded_String (Why);
+         end Note_Returned;
+         function Returned return Boolean is (Done);
+         function Detail return String is (To_String (Text));
+      end Writer_State;
+
+      --  Gated on an entry: a task declared here would otherwise
+      --  activate at this block's `begin`, i.e. before Connect has
+      --  run, and its Send_Binary would raise Closed_Error at once --
+      --  which is indistinguishable from a write that completed.
+      task Bulk_Writer is
+         entry Go;
+      end Bulk_Writer;
+
+      task body Bulk_Writer is
+      begin
+         accept Go;
+         AHT.Websocket.Client.Send_Binary (C, Bulk.all);
+         Writer_State.Note_Returned ("returned normally");
+      exception
+         when E : others =>
+            Writer_State.Note_Returned
+              (Ada.Exceptions.Exception_Name (E) & ": "
+               & Ada.Exceptions.Exception_Message (E));
+      end Bulk_Writer;
+
+      Started, Ended : Time;
+      Close_Bound    : constant Duration := 6.0;
+   begin
+      Server.Get_Port (Port, Setup_Err);
+      if Length (Setup_Err) > 0 then
+         Fail ("guard-abort: " & To_String (Setup_Err));
+      else
+         begin
+            AHT.Websocket.Client.Connect (C, URL_For (Port));
+            Connected := True;
+         exception
+            when E : others =>
+               Fail ("guard-abort: Connect raised "
+                     & Ada.Exceptions.Exception_Name (E));
+         end;
+      end if;
+
+      if Connected then
+         Bulk_Writer.Go;
+      end if;
+
+      --  Give the writer time to fill the buffers and park. If it
+      --  finished instead, it never held the guard across a block and
+      --  this case would prove nothing -- so say so.
+      delay 1.0;
+
+      if Connected and then Writer_State.Returned then
+         Fail ("guard-abort: the bulk write ended ("
+               & Writer_State.Detail & ") instead of parking, so no"
+               & " sender was ever holding the guard across a block"
+               & " — this case proved nothing");
+      elsif Connected then
+         abort Bulk_Writer;
+
+         declare
+            function Gone return Boolean is (Bulk_Writer'Terminated);
+            function Await_Gone is new Await (Gone);
+         begin
+            if not Await_Gone (3.0) then
+               Fail ("guard-abort: the aborted writer never terminated");
+            end if;
+         end;
+
+         --  The peer resumes draining at Deaf_Ms, so the only thing
+         --  that can keep Close out now is a guard the aborted writer
+         --  never gave back.
+         Started := Clock;
+         select
+            delay Close_Bound;
+            Fail ("guard-abort: Close never returned within"
+                  & Duration'Image (Close_Bound)
+                  & "s — the aborted writer left Send_Guard latched");
+         then abort
+            AHT.Websocket.Client.Close (C, Timeout => 2.0);
+         end select;
+         Ended := Clock;
+
+         if AHT.Websocket.Client.Is_Open (C) then
+            Fail ("guard-abort: Is_Open true after Close (took"
+                  & Duration'Image (Ended - Started) & "s)");
+         end if;
+      end if;
+
+      if not Connected then
+         --  Release the gated task so this block can finish.
+         abort Bulk_Writer;
+      end if;
+
+      Server.Wait_Done;
+   end;
+
    if Failures = 0 then
-      Put_Line ("test_ws_abort: OK (teardown winner and connect attempt "
-                & "both survive being aborted)");
+      Put_Line ("test_ws_abort: OK (teardown winner, connect attempt,"
+                & " handoff sweep and parked sender all survive being"
+                & " aborted)");
       Ada.Command_Line.Set_Exit_Status (0);
    else
       Put_Line ("test_ws_abort:" & Failures'Image & " failure(s)");

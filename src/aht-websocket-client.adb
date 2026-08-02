@@ -361,8 +361,12 @@ package body AHT.Websocket.Client is
          Admitting     := True;
          Forced        := False;
          Done          := False;
+         Handed_Off_Gen := S.Generation;
          St            := Open;
       end Publish;
+
+      function Attempt_Handed_Off (Gen : Positive) return Boolean is
+        (Handed_Off_Gen >= Gen);
 
       procedure Acquire (S : out Session_Access; OK : out Boolean) is
       begin
@@ -498,28 +502,77 @@ package body AHT.Websocket.Client is
       end if;
    end Finalize;
 
+   --  Holds Send_Guard for the duration of one frame write. The guard
+   --  is a plain busy latch, so a task aborted between taking it and
+   --  giving it back would leave it latched with nobody able to clear
+   --  it: every other sender and the receiver's own echo paths would
+   --  block on it forever, and reclamation would never drain. Finalize
+   --  is what closes that, and it is abort-deferred (RM 9.8) so it
+   --  always runs.
+   --
+   --  Take is deliberately NOT Initialize. Initialize is abort-deferred
+   --  too, and blocking inside it makes the caller UNABORTABLE for as
+   --  long as the guard is contended -- so a Close under an
+   --  asynchronous select would hang instead of being cancelled,
+   --  whenever some other writer were stuck. Measured on GNAT, not
+   --  assumed: an ATC cannot interrupt a queued entry call made from
+   --  Initialize, though it interrupts the same call made directly.
+   --  Acquiring through a plain call keeps the caller abortable while
+   --  it waits; the only unprotected gap left is between Acquire
+   --  returning and Held being set, which contains no blocking
+   --  operation for an abort to land on.
+   type Guard_Token (G : access Send_Guard) is
+     new Ada.Finalization.Limited_Controlled with record
+        Held : Boolean := False;
+     end record;
+
+   --  Class-wide so it is not a primitive of a body-local tagged type,
+   --  which would only ever be called statically anyway.
+   procedure Take (T : in out Guard_Token'Class);
+
+   overriding procedure Finalize (T : in out Guard_Token);
+
+   procedure Take (T : in out Guard_Token'Class) is
+   begin
+      T.G.Acquire;
+      T.Held := True;
+   end Take;
+
+   overriding procedure Finalize (T : in out Guard_Token) is
+   begin
+      if T.Held then
+         T.Held := False;
+         T.G.Release;
+      end if;
+   end Finalize;
+
    --  Owns an admitted, still-UNPUBLISHED connection attempt. Every
    --  exit that did not hand the session to the receiver -- a raise,
    --  or an abort of the connecting task -- drops the transport, frees
    --  the session and releases admission, so the client is never
    --  stranded in Connecting with a leaked transport.
    --
-   --  A null Sess means the handoff happened: the receiver clears the
-   --  caller's pointer from INSIDE the Start rendezvous. Waiting for
-   --  an accepted entry call to complete is abort-deferred (RM 9.8),
-   --  so that write lands before any abort of this task takes effect.
-   --  A flag set after Start returned would leave a window in which an
-   --  abort made this Finalize free a session the receiver now owns --
-   --  trading a leak for a double free. A flag in the CONTROLLER would
-   --  be no better once repeated Connects exist: it is not specific to
-   --  an attempt, so a later admission could reset it under an earlier
-   --  attempt's cleanup.
+   --  Whether the handoff happened is asked of the CONTROLLER, keyed
+   --  by this attempt's generation. Two simpler answers are both
+   --  wrong:
    --
-   --  Gen is that attempt-specific identity, and admission release
-   --  needs it for the same reason: by the time an early generation's
-   --  frame finalizes, its session may already have been published,
-   --  reclaimed AND a fresh Connect admitted, and this cleanup must
-   --  not release an admission belonging to that newer attempt.
+   --    * A local flag set after Start returns leaves a window where
+   --      an abort makes this Finalize free a session the receiver
+   --      already owns -- trading a leak for a double free.
+   --    * Clearing the caller's pointer through an `in out` entry
+   --      parameter looks like it closes that window, but does not:
+   --      GNAT does not deliver the copy-back when the caller is
+   --      aborted during the rendezvous, so the pointer stays set and
+   --      the double free is back. Measured, not assumed -- and the
+   --      handoff sweep in test_ws_abort is what caught it.
+   --
+   --  Publish records the generation from inside a protected action,
+   --  which IS abort-deferred, so the record cannot be lost. Gen also
+   --  qualifies the admission release: by the time an early
+   --  generation's frame finalizes, its session may already have been
+   --  published, reclaimed AND a fresh Connect admitted, and this
+   --  cleanup must not release an admission belonging to that newer
+   --  attempt.
    type Attempt_Owner
      (Ctl : access Lifecycle_Controller;
       Gen : Positive) is
@@ -531,6 +584,12 @@ package body AHT.Websocket.Client is
 
    overriding procedure Finalize (A : in out Attempt_Owner) is
    begin
+      if A.Ctl.Attempt_Handed_Off (A.Gen) then
+         --  The receiver owns it now and will reclaim it.
+         A.Sess := null;
+         return;
+      end if;
+
       if A.Sess /= null then
          --  Never handed over, so it is still ours to dispose of.
          begin
@@ -816,9 +875,9 @@ package body AHT.Websocket.Client is
            (Code : AHT.Websocket.Valid_Close_Code := 1000)
          is
             Should_Send : Boolean;
+            Token       : Guard_Token (S.Guard'Unchecked_Access);
          begin
-            S.Guard.Acquire;
-
+            Take (Token);
             --  A forced teardown may already have fired Abort_Pending,
             --  which wakes only the waiters that existed at the time.
             --  Starting a write now would park with nothing left to
@@ -827,13 +886,11 @@ package body AHT.Websocket.Client is
             --  Try_Mark_Local_Close, or we would consume the "someone
             --  will send the Close" token and then decline to send it.
             if Conn.Ctl.Draining_Forced then
-               S.Guard.Release;
                return;
             end if;
 
             S.State.Try_Mark_Local_Close (Should_Send);
             if not Should_Send then
-               S.Guard.Release;
                return;
             end if;
 
@@ -846,25 +903,21 @@ package body AHT.Websocket.Client is
             exception
                when others =>
                   --  If the echo can't go out (peer already torn the
-                  --  transport down, etc.), we still want to release
-                  --  the guard and exit cleanly. Latch anyway: the
+                  --  transport down, etc.), latch anyway: the
                   --  connection is finished, no data frame may follow.
-                  S.Guard.Mark_Close_Sent;
-                  S.Guard.Release;
-                  return;
+                  null;
             end;
             --  Latch under the guard so a Send_* racing this echo sees
             --  Close_Frame_Sent and raises instead of writing behind it.
             S.Guard.Mark_Close_Sent;
-            S.Guard.Release;
          end Maybe_Send_Close_Echo;
 
          procedure Send_Pong (Payload : AHT.Bytes.Byte_Array) is
+            Token : Guard_Token (S.Guard'Unchecked_Access);
          begin
-            S.Guard.Acquire;
+            Take (Token);
             --  Same forced-teardown gate as the Close echo above.
             if Conn.Ctl.Draining_Forced then
-               S.Guard.Release;
                return;
             end if;
             begin
@@ -874,11 +927,8 @@ package body AHT.Websocket.Client is
                   FIN     => True,
                   Payload => Payload);
             exception
-               when others =>
-                  S.Guard.Release;
-                  return;
+               when others => null;
             end;
-            S.Guard.Release;
          end Send_Pong;
 
          procedure Deliver
@@ -1141,22 +1191,16 @@ package body AHT.Websocket.Client is
    begin
       loop
          select
-            accept Start
-              (Owner : Client_Access; Sess : in out Session_Access)
-            do
+            accept Start (Owner : Client_Access; Sess : Session_Access) do
                Conn     := Owner;
                Cur_Sess := Sess;
                --  Publishing inside the rendezvous makes it atomic
                --  with taking ownership, so a receiver that hits
                --  instant EOF cannot start reclaiming a session the
-               --  controller has not published yet.
+               --  controller has not published yet. It is also what
+               --  records the handoff for the connecting task's
+               --  cleanup -- see Attempt_Owner.
                Conn.Ctl.Publish (Sess);
-               --  Take the pointer away from the caller, still inside
-               --  the rendezvous. That is what tells its cleanup the
-               --  session is no longer its to free, and being inside
-               --  an accepted entry call makes the write immune to an
-               --  abort of the caller (RM 9.8).
-               Sess := null;
             end Start;
          or
             terminate;
@@ -1434,8 +1478,10 @@ package body AHT.Websocket.Client is
          raise AHT.Websocket.Closed_Error with
            "Send_Text: connection is not open";
       end if;
-      L.Sess.Guard.Acquire;
+      declare
+         Token : Guard_Token (L.Sess.Guard'Unchecked_Access);
       begin
+         Take (Token);
          --  Re-check under the guard, not just at borrow time.
          --  We may have queued here for a long time behind
          --  another writer, and teardown may have started --
@@ -1457,12 +1503,7 @@ package body AHT.Websocket.Client is
             Op      => AHT.Websocket.Text,
             FIN     => True,
             Payload => AHT.Bytes.From_String (Text));
-      exception
-         when others =>
-            L.Sess.Guard.Release;
-            raise;
       end;
-      L.Sess.Guard.Release;
    end Send_Text;
 
    procedure Send_Binary
@@ -1475,8 +1516,10 @@ package body AHT.Websocket.Client is
          raise AHT.Websocket.Closed_Error with
            "Send_Binary: connection is not open";
       end if;
-      L.Sess.Guard.Acquire;
+      declare
+         Token : Guard_Token (L.Sess.Guard'Unchecked_Access);
       begin
+         Take (Token);
          --  Re-check under the guard, not just at borrow time.
          --  We may have queued here for a long time behind
          --  another writer, and teardown may have started --
@@ -1498,12 +1541,7 @@ package body AHT.Websocket.Client is
             Op      => AHT.Websocket.Binary,
             FIN     => True,
             Payload => Data);
-      exception
-         when others =>
-            L.Sess.Guard.Release;
-            raise;
       end;
-      L.Sess.Guard.Release;
    end Send_Binary;
 
    procedure Send_Ping
@@ -1516,8 +1554,10 @@ package body AHT.Websocket.Client is
          raise AHT.Websocket.Closed_Error with
            "Send_Ping: connection is not open";
       end if;
-      L.Sess.Guard.Acquire;
+      declare
+         Token : Guard_Token (L.Sess.Guard'Unchecked_Access);
       begin
+         Take (Token);
          --  Re-check under the guard, not just at borrow time.
          --  We may have queued here for a long time behind
          --  another writer, and teardown may have started --
@@ -1539,12 +1579,7 @@ package body AHT.Websocket.Client is
             Op      => AHT.Websocket.Ping_Op,
             FIN     => True,
             Payload => Payload);
-      exception
-         when others =>
-            L.Sess.Guard.Release;
-            raise;
       end;
-      L.Sess.Guard.Release;
    end Send_Ping;
 
    procedure Close
@@ -1567,24 +1602,27 @@ package body AHT.Websocket.Client is
          --  if the peer goes silent.
          S.State.Try_Mark_Local_Close (Should_Send);
          if Should_Send then
-            S.Guard.Acquire;
+            declare
+               Token : Guard_Token (S.Guard'Unchecked_Access);
             begin
-               Send_Frame
-                 (Active (S).all, S.Guard,
-                  Op      => AHT.Websocket.Close_Op,
-                  FIN     => True,
-                  Payload => Build_Close_Payload (Code, Reason));
-            exception
-               when others =>
-                  --  Best effort. Continue with the local teardown
-                  --  regardless.
-                  null;
+               Take (Token);
+               begin
+                  Send_Frame
+                    (Active (S).all, S.Guard,
+                     Op      => AHT.Websocket.Close_Op,
+                     FIN     => True,
+                     Payload => Build_Close_Payload (Code, Reason));
+               exception
+                  when others =>
+                     --  Best effort. Continue with the local teardown
+                     --  regardless.
+                     null;
+               end;
+               --  Latch under the guard: a Send_* blocked on Acquire
+               --  will now observe Close_Frame_Sent and raise rather
+               --  than writing a data frame after our Close.
+               S.Guard.Mark_Close_Sent;
             end;
-            --  Latch under the guard before releasing: a Send_* blocked
-            --  on Acquire will now observe Close_Frame_Sent and raise
-            --  rather than writing a data frame after our Close.
-            S.Guard.Mark_Close_Sent;
-            S.Guard.Release;
          end if;
 
          --  Move to Closing, but never clobber a Closed the receiver

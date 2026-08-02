@@ -234,7 +234,7 @@ private
    type Session_Type (Kind : Transport_Kind) is limited record
       State             : State_PO;
       Inbox             : Inbox_PO;
-      Guard             : Send_Guard;
+      Guard             : aliased Send_Guard;
       Selected_Protocol : Ada.Strings.Unbounded.Unbounded_String;
       Generation        : Positive := 1;
 
@@ -306,6 +306,20 @@ private
       --  hits instant EOF cannot begin reclaiming a session the
       --  controller has not yet published.
       procedure Publish (S : Session_Access);
+      --  Whether the attempt that reserved Gen handed its session to
+      --  the receiver. Publish records the generation it published,
+      --  from inside the Start rendezvous and inside a protected
+      --  action, so the record is atomic with the handoff and cannot
+      --  be lost to an abort of the connecting task.
+      --
+      --  Comparing >= rather than = is what makes it attempt-specific
+      --  without keeping a set. Generations are assigned in
+      --  increasing order, and an attempt that did NOT publish still
+      --  holds admission until its own cleanup releases it -- so no
+      --  later generation can have published by the time it asks. A
+      --  later generation's number therefore only ever appears here
+      --  if this attempt published too.
+      function  Attempt_Handed_Off (Gen : Positive) return Boolean;
 
       --  Borrowing. The owner never borrows; this is exclusively how
       --  a task that does NOT own the session gets to touch it.
@@ -365,6 +379,8 @@ private
       Published_Gen : Natural := 0;
       Done          : Boolean := True;    --  no generation in flight
       Forced        : Boolean := False;
+      --  Highest generation ever published; never reset.
+      Handed_Off_Gen : Natural := 0;
       CBs           : Callbacks;
       Proto         : Ada.Strings.Unbounded.Unbounded_String;
    end Lifecycle_Controller;
@@ -389,13 +405,7 @@ private
    --  forbids anonymous access on entry parameters, and both are
    --  named access types.
    task type Receiver_Task is
-      --  Sess is in out: the receiver clears the caller's pointer
-      --  from inside the rendezvous, which is how the connecting task
-      --  learns the handoff happened. Waiting for an accepted entry
-      --  call to complete is abort-deferred (RM 9.8), so that write
-      --  cannot be lost to an abort of the caller and its cleanup can
-      --  never free a session this task has taken over.
-      entry Start (Owner : Client_Access; Sess : in out Session_Access);
+      entry Start (Owner : Client_Access; Sess : Session_Access);
    end Receiver_Task;
 
    type Client_Type is tagged limited record
