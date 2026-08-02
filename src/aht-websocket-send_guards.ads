@@ -62,10 +62,11 @@ package AHT.Websocket.Send_Guards is
       --  are queued for it, and how many acquisitions have completed.
       --
       --  All three are diagnostics and none is a control primitive.
-      --  Waiters in particular is stale the instant it is read -- a
-      --  caller may join or leave the queue immediately after -- so it
-      --  can answer "did anyone ever queue" but must never gate a
-      --  decision about who gets the latch. Acquisitions saturates at
+      --  Waiters reports the queue length at the instant of the
+      --  protected read and nothing more: a caller may join or leave
+      --  immediately after, so the value is stale as soon as it is
+      --  returned and must never gate a decision about who gets the
+      --  latch. Acquisitions saturates at
       --  Natural'Last rather than overflowing; it exists so a test can
       --  confirm a handover it arranged really happened without
       --  looking between the release and the abort it is timing

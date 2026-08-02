@@ -7,9 +7,15 @@
 --  path that can hang first and hide them. For the same reason this
 --  runs ahead of every fixture-dependent WebSocket test.
 --
---  Every wait here is bounded and every task is aborted on the way
---  out, and a detected leak stops the run rather than continuing into
---  a round that would block forever on the latch it just found held.
+--  Every wait here is bounded, every task is aborted on the way out,
+--  and a detected leak stops the run rather than continuing into a
+--  round that would block forever on the latch it just found held.
+--
+--  Bounded polling is not the whole story, though: Ada waits for
+--  dependent tasks at scope exit, so a task that refuses to terminate
+--  blocks this test after it has reported the problem, not before.
+--  The aborts are what make termination possible, and the runner's
+--  per-test cap is the backstop if they somehow do not take.
 --
 --  These are the production types. An abort-safety claim tested
 --  against a hand-written replica of the protocol is not tested at
@@ -124,7 +130,15 @@ begin
       abort Waiter;
 
       if not Await (2.0, Gone_Ref) then
-         Fail ("cancelled: the aborted waiter never terminated");
+         --  Reporting is not enough here. Leaving this block with a
+         --  live dependent task blocks at `end`, however tightly the
+         --  poll above was bounded, so try harder before giving up.
+         abort Waiter;
+         if not Await (10.0, Gone_Ref) then
+            Fail ("cancelled: the aborted waiter is still running; the"
+                  & " scope exit below will block and the runner's"
+                  & " per-test cap is what will report it");
+         end if;
       end if;
 
       --  The waiter's token has been finalized by now. It never owned
@@ -200,9 +214,16 @@ begin
             abort Victim;
 
             if not Await (2.0, Gone_Ref) then
-               Fail ("handover: round" & I'Image & " left an aborted"
-                     & " victim running");
-               Broke := True;
+               --  Same as above: a live dependent task blocks the
+               --  scope exit no matter what bound we polled with.
+               abort Victim;
+               if not Await (10.0, Gone_Ref) then
+                  Fail ("handover: round" & I'Image & " left an aborted"
+                        & " victim running; the scope exit will block"
+                        & " and the runner's per-test cap is what will"
+                        & " report it");
+                  Broke := True;
+               end if;
             end if;
 
             --  Counted inside Acquire, so this is evidence that the

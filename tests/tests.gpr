@@ -14,8 +14,15 @@ project Tests is
    for Object_Dir  use "obj/" & Aht.Variant;
    for Exec_Dir    use "bin/" & Aht.Variant;
 
+   --  test_ws_send_guard runs first, and deliberately so. It needs no
+   --  fixture, and what it checks -- that an aborted acquirer never
+   --  leaves the write latch held -- shows up everywhere else as a
+   --  hang. The runner walks this list in order, so anything ahead of
+   --  it that hung would stop it running at all, which is the failure
+   --  mode it exists to catch.
    for Main use
-     ("test_bytes_buffer.adb",
+     ("test_ws_send_guard.adb",
+      "test_bytes_buffer.adb",
       "test_url.adb",
       "test_url_encoding.adb",
       "test_headers.adb",
@@ -34,7 +41,6 @@ project Tests is
       "test_http_streaming.adb",
       "test_http_async.adb",
       "test_httpbin.adb",
-      "test_ws_send_guard.adb",
       "test_ws_frames.adb",
       "test_ws_utf8.adb",
       "test_ws_handshake.adb",

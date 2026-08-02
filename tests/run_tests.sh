@@ -233,6 +233,26 @@ if [ -z "$NAMES" ]; then
     exit 2
 fi
 
+# Per-test wall-clock cap. Without one, a test that deadlocks stalls
+# the run and hides every test after it — and a deadlock is exactly
+# what several of these tests exist to catch, so the failure mode and
+# the detector would cancel out. A test may also be unable to unwind
+# itself: Ada waits for dependent tasks at scope exit, so a test that
+# has already reported a stuck task still cannot exit. This is the
+# backstop for that.
+#
+# `timeout` is coreutils; stock macOS has neither it nor gtimeout, and
+# there the suite runs uncapped rather than not at all.
+TEST_TIMEOUT=${TEST_TIMEOUT:-300}
+if command -v timeout >/dev/null 2>&1; then
+    CAP="timeout $TEST_TIMEOUT"
+elif command -v gtimeout >/dev/null 2>&1; then
+    CAP="gtimeout $TEST_TIMEOUT"
+else
+    CAP=
+    echo "  (no timeout(1); tests run without a per-test cap)"
+fi
+
 FAILED=0
 TOTAL=0
 for name in $NAMES; do
@@ -243,10 +263,15 @@ for name in $NAMES; do
         FAILED=$((FAILED + 1))
         continue
     fi
-    if "$bin"; then
+    if $CAP "$bin"; then
         :
     else
-        echo "  FAIL $name"
+        status=$?
+        if [ "$status" -eq 124 ]; then
+            echo "  TIMEOUT $name (exceeded ${TEST_TIMEOUT}s)"
+        else
+            echo "  FAIL $name"
+        fi
         FAILED=$((FAILED + 1))
     fi
 done
