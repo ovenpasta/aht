@@ -7,41 +7,55 @@
 --  where hand-written cleanup fails and controlled finalization has
 --  to carry the invariant instead.
 --
---  Four cases. Three are deterministic: each waits for positive
---  evidence that the operation reached the state under test before
---  aborting it, so none can pass by aborting something that had not
---  started yet. The last is a sweep, and says so.
+--  Five cases, in the order they run. How firmly each lands on the
+--  state it means to test differs, so that is stated per case rather
+--  than claimed uniformly.
 --
 --    1. Abort the winner of a teardown. Winning stops admission and
 --       makes that caller the only task that can wake the receiver:
 --       every later Close joins and waits. If the abort skips the
 --       wake gates, the receiver stays parked in Read and the join
 --       cannot complete until the fixture drops the socket seconds
---       later — which is what the timing bound detects.
+--       later — which is what the timing bound detects. Waits for two
+--       observed facts before aborting: that the teardown was taken,
+--       and that the Close frame reached the peer.
 --
---    2. Abort a connect attempt in flight. The attempt owns an
+--    2. Abort a connect attempt in flight, after a fixed delay
+--       against a fixture that never answers. The attempt owns an
 --       unpublished session and holds the client's admission; if its
 --       cleanup does not run, the client is stranded in Connecting
---       and can never be connected again.
+--       and can never be connected again. Timing-based, but the
+--       fixture is silent for far longer than the delay.
 --
---    3. Abort a sender parked inside Send_Guard. The guard is a plain
---       busy latch, so a task torn out between taking and returning
---       it would leave it latched and every later sender — the close
---       handshake included — would block on it forever.
---
---    4. Sweep an abort across the whole connect, so some samples land
+--    3. Sweep an abort across the whole connect, so some samples land
 --       on the Start rendezvous itself. That is where the session
---       changes hands, and where an abort that lost the handoff record
---       would make the attempt's cleanup free a session the receiver
---       now owns. The window is a few instructions wide and cannot be
---       hit on demand from the public API, so this SAMPLES it rather
---       than pinning it: it calibrates the handshake first, sweeps the
---       abort deadline across that span, and round-trips a message on
---       every connection that survived, since a freed session shows up
---       when the receiver next touches it. A deterministic version
---       needs a second generation to keep the receiver busy so Start
---       actually queues, which only becomes possible once repeated
---       connects exist.
+--       changes hands, and where an abort that lost the handoff
+--       record would make the attempt's cleanup free a session the
+--       receiver now owns. The window is a few instructions wide and
+--       cannot be hit on demand from the public API, so this SAMPLES
+--       it rather than pinning it: it calibrates the handshake first,
+--       sweeps the abort deadline across that span, and round-trips a
+--       message on every connection that survived, since a freed
+--       session shows up when the receiver next touches it. A
+--       deterministic version needs a second generation to keep the
+--       receiver busy so Start actually queues, which only becomes
+--       possible once repeated connects exist.
+--
+--    4. Abort senders around Send_Guard. The guard is a plain busy
+--       latch, so a task torn out while holding it would leave it
+--       latched and every later sender, the close handshake included,
+--       would block on it forever. Two senders are aborted together:
+--       one parked in Write provably holding the guard, one still on
+--       its entry queue, covering the holder and cancellation paths.
+--
+--    5. Pin the ownership-recording property that guard depends on,
+--       against a latch of the same shape. Case 4 cannot reach it:
+--       the interval between an acquisition completing and the
+--       acquirer noting it is a couple of instructions, and by the
+--       time this task can see the guard change hands the victim is
+--       long past it. Here the release and the abort are adjacent in
+--       one task, so the victim is made runnable and then aborted
+--       before it is ever scheduled.
 --
 --  Every fixture outlasts the assertions that depend on it, so a
 --  failure can only mean the client did the wrong thing, never that
@@ -52,6 +66,7 @@ with Ada.Calendar; use Ada.Calendar;
 with Ada.Characters.Handling;
 with Ada.Command_Line;
 with Ada.Exceptions;
+with Ada.Finalization;
 with Ada.Streams; use Ada.Streams;
 with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
@@ -59,6 +74,8 @@ with Ada.Text_IO; use Ada.Text_IO;
 with GNAT.Sockets; use GNAT.Sockets;
 
 with GNAT.SHA1;
+
+with System;
 
 with AHT.Bytes;
 with AHT.Transport;
@@ -612,10 +629,11 @@ begin
       C         : aliased AHT.Websocket.Client.Client_Type;
       Connected : Boolean := False;
 
-      --  Bigger than any plausible loopback send+receive buffer, so
-      --  the write provably cannot complete while the peer is deaf.
-      --  On the heap: 16 MB would not fit the environment task's
-      --  stack, and Storage_Error here would look like a client bug.
+      --  Far larger than the 4 KB receive buffer the fixture sets for
+      --  its deaf window, so the write provably cannot complete while
+      --  the peer is not reading. On the heap: 4 MB would not fit the
+      --  environment task's stack, and Storage_Error here would look
+      --  like a client bug.
       type Bulk_Access is access AHT.Bytes.Byte_Array;
       Bulk : constant Bulk_Access :=
         new AHT.Bytes.Byte_Array'(1 .. 4 * 1024 * 1024 => 16#5A#);
@@ -646,6 +664,25 @@ begin
       task Bulk_Writer is
          entry Go;
       end Bulk_Writer;
+
+      --  Queues behind the parked writer and is aborted with it, so
+      --  the cancellation path -- an abort arriving while the call is
+      --  still on the entry queue -- is exercised alongside the
+      --  holder's. The narrower window, where the abort arrives just
+      --  as the acquisition completes, is a couple of instructions
+      --  wide and is not reachable from this side of the API; case 5
+      --  pins that one directly.
+      task Queued_Sender is
+         entry Go;
+      end Queued_Sender;
+
+      task body Queued_Sender is
+      begin
+         accept Go;
+         AHT.Websocket.Client.Send_Text (C, "queued");
+      exception
+         when others => null;
+      end Queued_Sender;
 
       task body Bulk_Writer is
       begin
@@ -690,15 +727,23 @@ begin
                & Writer_State.Detail & ") instead of parking, so no"
                & " sender was ever holding the guard across a block"
                & " — this case proved nothing");
+         abort Queued_Sender;
       elsif Connected then
+         --  Put a second sender on the guard's queue, then tear both
+         --  out together: the writer's release and the queued
+         --  sender's acquisition happen in the same instant.
+         Queued_Sender.Go;
+         delay 0.3;
          abort Bulk_Writer;
+         abort Queued_Sender;
 
          declare
-            function Gone return Boolean is (Bulk_Writer'Terminated);
+            function Gone return Boolean is
+              (Bulk_Writer'Terminated and then Queued_Sender'Terminated);
             function Await_Gone is new Await (Gone);
          begin
             if not Await_Gone (3.0) then
-               Fail ("guard-abort: the aborted writer never terminated");
+               Fail ("guard-abort: an aborted sender never terminated");
             end if;
          end;
 
@@ -723,17 +768,122 @@ begin
       end if;
 
       if not Connected then
-         --  Release the gated task so this block can finish.
+         --  Release the gated tasks so this block can finish.
          abort Bulk_Writer;
+         abort Queued_Sender;
       end if;
 
       Server.Wait_Done;
    end;
 
+   --  Case 5: the ownership-recording property the guard depends on.
+   --
+   --  Send_Guard is released by a scope guard's Finalize, so the two
+   --  have to agree on whether this caller actually holds the latch.
+   --  The obvious way -- the caller setting a flag once Acquire
+   --  returns -- does not survive an abort: a pending abort takes
+   --  effect at the END of the acquiring protected action, before
+   --  that assignment, and the release then declines to free a latch
+   --  it really holds. Recording ownership INSIDE the protected
+   --  action leaves no such interval.
+   --
+   --  That interval is a couple of instructions wide, so it cannot be
+   --  reached through Send_* or Close: by the time this task can
+   --  observe the guard changing hands, the victim is long past it.
+   --  What makes it reachable here is that the release and the abort
+   --  are adjacent in ONE task, so the victim is made runnable and
+   --  then aborted before it is ever scheduled. So this pins the
+   --  property against a latch of the same shape rather than against
+   --  the client's own -- which is the difference between a hazard
+   --  that is understood and one that is merely believed absent.
+   declare
+      use type System.Address;
+
+      Rounds : constant := 50;
+      Leaked : Natural := 0;
+
+      protected Latch is
+         entry     Acquire (Owner : System.Address);
+         procedure Release_If_Owner (Owner : System.Address);
+         procedure Hold;
+         procedure Free;
+         function  Is_Busy return Boolean;
+      private
+         Busy    : Boolean := False;
+         Held_By : System.Address := System.Null_Address;
+      end Latch;
+
+      protected body Latch is
+         entry Acquire (Owner : System.Address) when not Busy is
+         begin
+            Busy    := True;
+            Held_By := Owner;
+         end Acquire;
+         procedure Release_If_Owner (Owner : System.Address) is
+         begin
+            if Busy and then Held_By = Owner then
+               Busy    := False;
+               Held_By := System.Null_Address;
+            end if;
+         end Release_If_Owner;
+         procedure Hold is
+         begin
+            Busy := True;
+         end Hold;
+         procedure Free is
+         begin
+            Busy    := False;
+            Held_By := System.Null_Address;
+         end Free;
+         function Is_Busy return Boolean is (Busy);
+      end Latch;
+
+      type Token is new Ada.Finalization.Limited_Controlled
+        with null record;
+      overriding procedure Finalize (T : in out Token);
+      overriding procedure Finalize (T : in out Token) is
+      begin
+         Latch.Release_If_Owner (T'Address);
+      end Finalize;
+   begin
+      for I in 1 .. Rounds loop
+         Latch.Free;
+         Latch.Hold;                     --  someone else holds it
+         declare
+            task Victim;
+            task body Victim is
+               T : Token;
+            begin
+               Latch.Acquire (T'Address);
+               delay 5.0;                --  aborted long before this
+            exception
+               when others => null;
+            end Victim;
+         begin
+            delay 0.002;                 --  let Victim reach the queue
+            Latch.Free;                  --  hands the latch to Victim
+            abort Victim;                --  ... before it is scheduled
+            while not Victim'Terminated loop
+               delay 0.001;
+            end loop;
+         end;
+         if Latch.Is_Busy then
+            Leaked := Leaked + 1;
+         end if;
+      end loop;
+
+      if Leaked > 0 then
+         Fail ("guard-idiom:" & Leaked'Image & " of" & Rounds'Image
+               & " aborted acquisitions left the latch held — a token"
+               & " cannot record ownership after the acquiring"
+               & " protected action returns");
+      end if;
+   end;
+
    if Failures = 0 then
       Put_Line ("test_ws_abort: OK (teardown winner, connect attempt,"
-                & " handoff sweep and parked sender all survive being"
-                & " aborted)");
+                & " handoff sweep and senders around the guard all"
+                & " survive being aborted; ownership recording pinned)");
       Ada.Command_Line.Set_Exit_Status (0);
    else
       Put_Line ("test_ws_abort:" & Failures'Image & " failure(s)");

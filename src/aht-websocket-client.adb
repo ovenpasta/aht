@@ -256,15 +256,20 @@ package body AHT.Websocket.Client is
 
    protected body Send_Guard is
 
-      entry Acquire when not Busy is
+      entry Acquire (Owner : System.Address) when not Busy is
       begin
-         Busy := True;
+         Busy    := True;
+         Held_By := Owner;
       end Acquire;
 
-      procedure Release is
+      procedure Release_If_Owner (Owner : System.Address) is
+         use type System.Address;
       begin
-         Busy := False;
-      end Release;
+         if Busy and then Held_By = Owner then
+            Busy    := False;
+            Held_By := System.Null_Address;
+         end if;
+      end Release_If_Owner;
 
       procedure Mark_Close_Sent is
       begin
@@ -506,25 +511,31 @@ package body AHT.Websocket.Client is
    --  is a plain busy latch, so a task aborted between taking it and
    --  giving it back would leave it latched with nobody able to clear
    --  it: every other sender and the receiver's own echo paths would
-   --  block on it forever, and reclamation would never drain. Finalize
-   --  is what closes that, and it is abort-deferred (RM 9.8) so it
-   --  always runs.
+   --  block on it forever, and reclamation would never drain.
    --
-   --  Take is deliberately NOT Initialize. Initialize is abort-deferred
-   --  too, and blocking inside it makes the caller UNABORTABLE for as
-   --  long as the guard is contended -- so a Close under an
-   --  asynchronous select would hang instead of being cancelled,
-   --  whenever some other writer were stuck. Measured on GNAT, not
-   --  assumed: an ATC cannot interrupt a queued entry call made from
-   --  Initialize, though it interrupts the same call made directly.
-   --  Acquiring through a plain call keeps the caller abortable while
-   --  it waits; the only unprotected gap left is between Acquire
-   --  returning and Held being set, which contains no blocking
-   --  operation for an abort to land on.
+   --  Two things make the pairing abort-proof, and both are needed:
+   --
+   --    * Finalize is abort-deferred (RM 9.8), so the release always
+   --      runs. But Take is NOT Initialize -- Initialize is
+   --      abort-deferred too, and blocking inside it makes the caller
+   --      UNABORTABLE for as long as the guard is contended, so a
+   --      Close under an asynchronous select would hang instead of
+   --      being cancelled whenever another writer were stuck.
+   --      Measured on GNAT, not assumed: an ATC cannot interrupt a
+   --      queued entry call made from Initialize, though it
+   --      interrupts the same call made directly.
+   --    * Ownership is recorded by Acquire, inside the protected
+   --      action. A token that set a local "I hold it" flag after
+   --      Acquire returned would still leak: a pending abort takes
+   --      effect at the END of the protected action, before the
+   --      assignment, and Finalize would then decline to release a
+   --      latch it really does hold. Also measured.
+   --
+   --  So Finalize releases unconditionally-but-conditionally: it
+   --  always calls Release_If_Owner, which matches only if this
+   --  token's acquisition actually completed.
    type Guard_Token (G : access Send_Guard) is
-     new Ada.Finalization.Limited_Controlled with record
-        Held : Boolean := False;
-     end record;
+     new Ada.Finalization.Limited_Controlled with null record;
 
    --  Class-wide so it is not a primitive of a body-local tagged type,
    --  which would only ever be called statically anyway.
@@ -534,16 +545,12 @@ package body AHT.Websocket.Client is
 
    procedure Take (T : in out Guard_Token'Class) is
    begin
-      T.G.Acquire;
-      T.Held := True;
+      T.G.Acquire (T'Address);
    end Take;
 
    overriding procedure Finalize (T : in out Guard_Token) is
    begin
-      if T.Held then
-         T.Held := False;
-         T.G.Release;
-      end if;
+      T.G.Release_If_Owner (T'Address);
    end Finalize;
 
    --  Owns an admitted, still-UNPUBLISHED connection attempt. Every

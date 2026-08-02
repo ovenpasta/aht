@@ -1,4 +1,5 @@
 with Ada.Containers.Doubly_Linked_Lists;
+with System;
 with Ada.Numerics.Discrete_Random;
 with Ada.Strings.Unbounded;
 
@@ -164,12 +165,24 @@ private
      (AHT.Bytes.Octet);
 
    protected type Send_Guard is
-      --  Acquire / Release serialize the actual socket writes
-      --  across tasks (Client.Send_*, Receiver echoing Pong /
+      --  Acquire / Release_If_Owner serialize the actual socket
+      --  writes across tasks (Client.Send_*, Receiver echoing Pong /
       --  Close). The Write is performed *outside* the lock so a
       --  slow socket doesn't hold up the protected region.
-      entry Acquire;
-      procedure Release;
+      --
+      --  Ownership is passed IN and recorded inside the same
+      --  protected action that takes the latch, and the release is
+      --  conditional on it. That is what makes the pairing survive an
+      --  abort: a caller cannot record "I hold it" in its own state
+      --  after Acquire returns, because a pending abort takes effect
+      --  at the end of the protected action, before any such
+      --  assignment. Recording it inside leaves no interval at all --
+      --  a cancelled acquisition records nothing and its release is a
+      --  no-op, a completed one is always matched by its release.
+      --  Callers identify themselves by the address of the scope
+      --  guard making the call, which is unique among live guards.
+      entry Acquire (Owner : System.Address);
+      procedure Release_If_Owner (Owner : System.Address);
       --  Fresh 4-byte mask per frame, drawn under the protected
       --  lock so concurrent senders can't share generator state.
       procedure Random_Mask (Mask : out AHT.Bytes.Byte_Array);
@@ -185,6 +198,7 @@ private
       function  Close_Frame_Sent return Boolean;
    private
       Busy       : Boolean := False;
+      Held_By    : System.Address := System.Null_Address;
       Close_Sent : Boolean := False;
       Gen        : Random_Bytes.Generator;
       Seeded     : Boolean := False;
