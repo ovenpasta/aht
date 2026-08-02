@@ -9,14 +9,25 @@ process that traps or ignores it outlives the advertised cap anyway.
 Python is already a hard requirement here (every fixture is a Python
 server), so this depends on nothing new.
 
-The child gets its own process group and the cap is enforced against
-the whole group, so a test that leaves helpers behind cannot keep the
-run alive after its own process is gone. SIGTERM first, so a test can
-still unwind and flush what it printed; SIGKILL after a short grace
-period, because the tests this backstops are precisely the ones that
-may be unable to unwind — Ada waits for dependent tasks at scope
-exit, so a task that refuses to terminate blocks its test after it
-has already reported the problem.
+The child gets its own session, and everything below is driven by the
+resulting process GROUP rather than by the child itself. That
+distinction is the whole point: the group outlives its leader, so
+watching only the leader lets helpers escape twice over — once when
+the test exits normally having left something behind, and again on
+the timeout path, where the leader dying to SIGTERM would otherwise
+be read as "done" and skip the SIGKILL that the helper ignoring
+SIGTERM still needs.
+
+SIGTERM first, so a test can unwind and flush what it printed;
+SIGKILL after a grace period, because the tests this backstops are
+precisely the ones that may be unable to unwind — Ada waits for
+dependent tasks at scope exit, so a task that refuses to terminate
+blocks its test after it has already reported the problem.
+
+Because the child is in its own session it never sees signals sent to
+the runner's terminal, so interrupting the suite would otherwise
+leave a live test group behind. Termination signals are forwarded to
+the group, and the group is cleaned up on every exit path.
 
 Exit status is the child's, or 124 when the cap expired — matching
 timeout(1) so the runner's reporting does not have to care which
@@ -31,21 +42,72 @@ import os
 import signal
 import subprocess
 import sys
+import time
 
-GRACE = 5.0          # seconds between SIGTERM and SIGKILL
+GRACE = 5.0           # seconds between SIGTERM and SIGKILL
+POLL = 0.05
 TIMEOUT_STATUS = 124  # what timeout(1) reports
 
 
-def signal_group(proc: subprocess.Popen, sig: int) -> None:
-    """Signal the child's whole process group, falling back to the
-    child alone where process groups are unavailable."""
+def signal_group(pgid: int, sig: int) -> None:
+    """Best-effort signal to a whole process group."""
     try:
-        os.killpg(os.getpgid(proc.pid), sig)
+        os.killpg(pgid, sig)
     except (AttributeError, ProcessLookupError, PermissionError, OSError):
-        try:
-            proc.send_signal(sig)
-        except (ProcessLookupError, OSError):
-            pass
+        pass
+
+
+def group_alive(pgid: int) -> bool:
+    """Whether any process remains in the group.
+
+    Signal 0 checks for existence without delivering anything. A
+    reaped leader is gone from the group, so callers should poll the
+    child first — otherwise its zombie keeps the group 'alive'.
+    """
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists, just not ours to signal
+    except (AttributeError, OSError):
+        return False
+
+
+def reap_group(proc: subprocess.Popen, pgid: int) -> None:
+    """Terminate everything left in the group, leader or not.
+
+    Driven by the group: the leader may already be gone (normal exit,
+    or killed by the SIGTERM below) while a helper that ignores
+    SIGTERM is still running, and that helper is exactly what must not
+    survive this call.
+    """
+    proc.poll()
+    if not group_alive(pgid):
+        return
+
+    signal_group(pgid, signal.SIGTERM)
+
+    deadline = time.monotonic() + GRACE
+    while time.monotonic() < deadline:
+        proc.poll()                     # reap the leader if it exited
+        if not group_alive(pgid):
+            return
+        time.sleep(POLL)
+
+    signal_group(pgid, signal.SIGKILL)
+
+    # Give the kill a moment to take, then stop caring: an
+    # unkillable process (uninterruptible sleep) must not make this
+    # wrapper hang, which would be the very failure it exists to
+    # prevent.
+    deadline = time.monotonic() + GRACE
+    while time.monotonic() < deadline:
+        proc.poll()
+        if not group_alive(pgid):
+            return
+        time.sleep(POLL)
 
 
 def main() -> int:
@@ -65,30 +127,42 @@ def main() -> int:
 
     argv = sys.argv[2:]
 
-    # start_new_session puts the child in its own process group (and
-    # session) on POSIX, which is what makes the group signalling
-    # below reach helpers the test spawned.
+    # start_new_session puts the child in its own session and process
+    # group on POSIX; the group id is then the child's pid. Saved now,
+    # so the group stays addressable after the leader is gone.
     proc = subprocess.Popen(argv, start_new_session=True)
+    pgid = proc.pid
 
-    try:
-        return proc.wait(timeout=limit)
-    except subprocess.TimeoutExpired:
-        pass
+    def on_signal(signum, _frame):
+        # The child is in its own session and never received this.
+        reap_group(proc, pgid)
+        os._exit(128 + signum)
 
-    signal_group(proc, signal.SIGTERM)
-    try:
-        proc.wait(timeout=GRACE)
-    except subprocess.TimeoutExpired:
-        signal_group(proc, signal.SIGKILL)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         try:
-            proc.wait(timeout=GRACE)
-        except subprocess.TimeoutExpired:
-            # Unkillable (uninterruptible sleep, most likely). Report
-            # the cap anyway rather than waiting here forever, which
-            # would be the very failure this exists to prevent.
-            pass
+            signal.signal(sig, on_signal)
+        except (ValueError, OSError, AttributeError):
+            pass                        # not available here; carry on
 
-    return TIMEOUT_STATUS
+    timed_out = False
+    try:
+        try:
+            status = proc.wait(timeout=limit)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            status = TIMEOUT_STATUS
+        else:
+            if group_alive(pgid):
+                print(
+                    f"run_one.py: {argv[0]} exited leaving processes in"
+                    " its group; cleaning up",
+                    file=sys.stderr,
+                    flush=True,
+                )
+    finally:
+        reap_group(proc, pgid)
+
+    return TIMEOUT_STATUS if timed_out else status
 
 
 if __name__ == "__main__":
