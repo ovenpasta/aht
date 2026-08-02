@@ -11,7 +11,9 @@ with AHT.Bytes;
 --  part for one reason: its correctness argument is about abort, and
 --  an abort-safety claim tested against a hand-written replica of the
 --  protocol is not tested at all — the replica can stay correct while
---  the original rots. Here `test_ws_abort` drives these exact types.
+--  the original rots. Here `test_ws_send_guard` drives these exact
+--  types, in its own binary so that a hang in a client test cannot
+--  stop it running.
 package AHT.Websocket.Send_Guards is
 
    --  Random-byte source for client-side frame masks. RFC 6455 §5.3
@@ -56,13 +58,19 @@ package AHT.Websocket.Send_Guards is
       procedure Mark_Close_Sent;
       function  Close_Frame_Sent return Boolean;
 
-      --  Observability, for diagnostics and for the abort tests:
-      --  whether the latch is held, how many callers are queued for
-      --  it, and how many acquisitions have completed. The last is
-      --  what lets a test confirm that a handover it arranged really
-      --  happened, without having to look between the release and the
-      --  abort it is timing against -- looking there would itself
-      --  give the victim a chance to run.
+      --  Observability: whether the latch is held, how many callers
+      --  are queued for it, and how many acquisitions have completed.
+      --
+      --  All three are diagnostics and none is a control primitive.
+      --  Waiters in particular is stale the instant it is read -- a
+      --  caller may join or leave the queue immediately after -- so it
+      --  can answer "did anyone ever queue" but must never gate a
+      --  decision about who gets the latch. Acquisitions saturates at
+      --  Natural'Last rather than overflowing; it exists so a test can
+      --  confirm a handover it arranged really happened without
+      --  looking between the release and the abort it is timing
+      --  against, since looking there would itself give the other task
+      --  a chance to run.
       function  Is_Held return Boolean;
       function  Waiters return Natural;
       function  Acquisitions return Natural;

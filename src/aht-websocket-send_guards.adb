@@ -6,7 +6,12 @@ package body AHT.Websocket.Send_Guards is
       begin
          Busy    := True;
          Held_By := Owner;
-         Taken   := Taken + 1;
+         --  Saturating: this is a diagnostic, and a counter that
+         --  wrapped into Constraint_Error would take every
+         --  subsequent send on the connection down with it.
+         if Taken < Natural'Last then
+            Taken := Taken + 1;
+         end if;
       end Acquire;
 
       procedure Release_If_Owner (Owner : System.Address) is

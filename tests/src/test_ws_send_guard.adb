@@ -4,7 +4,12 @@
 --  deliberate. The guard's correctness argument is about abort, and
 --  the interesting cases leave a latch permanently held, which shows
 --  up elsewhere as a hang — so they must not be reached through a
---  path that can hang first and hide them.
+--  path that can hang first and hide them. For the same reason this
+--  runs ahead of every fixture-dependent WebSocket test.
+--
+--  Every wait here is bounded and every task is aborted on the way
+--  out, and a detected leak stops the run rather than continuing into
+--  a round that would block forever on the latch it just found held.
 --
 --  These are the production types. An abort-safety claim tested
 --  against a hand-written replica of the protocol is not tested at
@@ -101,6 +106,10 @@ begin
          when others => null;
       end Waiter;
 
+      function Gone return Boolean is (Waiter'Terminated);
+      Gone_Ref : constant access function return Boolean :=
+        Gone'Unrestricted_Access;
+
       Holder : Guards.Guard_Token (G'Access);
    begin
       Holder.Take;
@@ -109,14 +118,14 @@ begin
       if not Await (2.0, Queued_Ref) then
          Fail ("cancelled: the waiter never reached the entry queue,"
                & " so nothing was cancelled");
-         abort Waiter;
-      else
-         abort Waiter;        --  aborted while still queued
       end if;
+      --  Unconditional: the abort is also what unblocks the waiter so
+      --  this block can be left at all.
+      abort Waiter;
 
-      while not Waiter'Terminated loop
-         delay 0.002;
-      end loop;
+      if not Await (2.0, Gone_Ref) then
+         Fail ("cancelled: the aborted waiter never terminated");
+      end if;
 
       --  The waiter's token has been finalized by now. It never owned
       --  the latch, so its release must have been a no-op.
@@ -162,7 +171,12 @@ begin
                when others => null;
             end Victim;
 
-            Before : Natural := 0;
+            function Gone return Boolean is (Victim'Terminated);
+            Gone_Ref : constant access function return Boolean :=
+              Gone'Unrestricted_Access;
+
+            Before   : Natural := 0;
+            Took_It  : Boolean := False;
          begin
             Holder.Take;
             Victim.Go;
@@ -171,46 +185,57 @@ begin
                Fail ("handover: round" & I'Image & " never put a"
                      & " waiter on the queue");
                Broke := True;
-               abort Victim;
             else
-               Before := G.Acquisitions;
+               Before  := G.Acquisitions;
+               Took_It := True;
                --  The release hands the latch to the queued Victim
                --  inside its own protected action; the abort follows
                --  immediately.
                G.Release_If_Owner (Holder'Address);
-               abort Victim;
             end if;
 
-            while not Victim'Terminated loop
-               delay 0.002;
-            end loop;
+            --  Unconditional, and the only thing that lets this block
+            --  be left: a Victim still queued on the latch would
+            --  otherwise be waited for forever at scope exit.
+            abort Victim;
+
+            if not Await (2.0, Gone_Ref) then
+               Fail ("handover: round" & I'Image & " left an aborted"
+                     & " victim running");
+               Broke := True;
+            end if;
 
             --  Counted inside Acquire, so this is evidence that the
             --  handover happened rather than an assumption about it.
-            if G.Acquisitions > Before then
-               Sampled := Sampled + 1;
-            else
-               Cancelled := Cancelled + 1;
+            if Took_It then
+               if G.Acquisitions > Before then
+                  Sampled := Sampled + 1;
+               else
+                  Cancelled := Cancelled + 1;
+               end if;
             end if;
          end;
 
          --  Holder gave the latch away above and its Finalize cannot
          --  take it back, so anything still held is the victim's.
+         --
+         --  Stop at the first one. A held latch is exactly what the
+         --  next round's Holder.Take would block on forever, so
+         --  carrying on would turn a reported failure into a hung
+         --  suite.
          if G.Is_Held then
             Leaked := Leaked + 1;
+            Fail ("handover: round" & I'Image & " left the latch held"
+                  & " after its acquirer was aborted");
+            exit;
          end if;
          exit when Broke;
       end loop;
 
-      if Leaked > 0 then
-         Fail ("handover:" & Leaked'Image & " of" & Rounds'Image
-               & " aborted acquirers left the latch held");
-      end if;
-
       --  A run in which every victim was cancelled before acquiring
       --  never exercised the property, and a clean result would mean
       --  nothing.
-      if not Broke and then Sampled = 0 then
+      if not Broke and then Leaked = 0 and then Sampled = 0 then
          Fail ("handover: none of" & Rounds'Image & " rounds completed"
                & " an acquisition (" & Cancelled'Image & " cancelled)"
                & " — the property was never exercised");
