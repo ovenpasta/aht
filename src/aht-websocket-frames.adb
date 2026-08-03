@@ -240,10 +240,12 @@ package body AHT.Websocket.Frames is
    ---------------------------------------------------------------------
 
    procedure Decode
-     (Input   : AHT.Bytes.Byte_Array;
-      Hdr     : out Frame_Header;
-      Payload : out AHT.Bytes.Buffer;
-      Last    : out Natural)
+     (Input     : AHT.Bytes.Byte_Array;
+      Hdr       : out Frame_Header;
+      Payload   : out AHT.Bytes.Buffer;
+      Last      : out Natural;
+      Allowance : Natural        := Natural'Last;
+      Fragment  : Fragment_State := Unchecked)
    is
       Idx       : Positive;
       Available : Natural;
@@ -278,6 +280,33 @@ package body AHT.Websocket.Frames is
       end if;
 
       Hdr.Op := Op_From_Wire (B0 and 16#0F#);
+
+      --  Opcode sequencing (RFC 6455 §5.4), checked here -- before the
+      --  length is even parsed -- so that it takes precedence over the
+      --  size policy further down. A data frame arriving where a
+      --  Continuation was required is a protocol violation; reporting
+      --  it as "too big" because the remaining allowance happened to
+      --  be smaller would report the wrong close code and hide the
+      --  real fault. Control frames interleave legally and are exempt.
+      if not Is_Control (Hdr.Op) then
+         case Fragment is
+            when Unchecked =>
+               null;   --  caller holds no sequence state; see the spec
+            when No_Message =>
+               if Hdr.Op = Continuation then
+                  raise Protocol_Error
+                    with "Frames.Decode: Continuation frame with no"
+                      & " fragmented message in progress";
+               end if;
+            when In_Message =>
+               if Hdr.Op /= Continuation then
+                  raise Protocol_Error
+                    with "Frames.Decode: " & Opcode'Image (Hdr.Op)
+                      & " frame while a fragmented message is in"
+                      & " progress";
+               end if;
+         end case;
+      end if;
 
       Hdr.Masked := (B1 and 16#80#) /= 0;
       Short_Len  := B1 and 16#7F#;
@@ -327,9 +356,28 @@ package body AHT.Websocket.Frames is
                    & " (64-bit used for value" & V'Image & ")";
             end if;
             if V > Unsigned_64 (Natural'Last) then
-               raise Protocol_Error
-                 with "Frames.Decode: payload length"
-                   & V'Image & " exceeds Natural'Last";
+               --  Unrepresentable either way. With a finite ceiling in
+               --  force this is a size-policy failure (1009); with none
+               --  it stays what it has always been (1002).
+               --
+               --  The representability test has to come first. Checking
+               --  the allowance before it -- the obvious ordering --
+               --  would report Message_Too_Big even at the default
+               --  allowance, since a length above Natural'Last is
+               --  greater than Natural'Last too, quietly changing the
+               --  default behaviour.
+               if not Is_Control (Hdr.Op)
+                 and then Allowance < Natural'Last
+               then
+                  raise Message_Too_Big
+                    with "Frames.Decode: payload length" & V'Image
+                      & " exceeds the" & Natural'Image (Allowance)
+                      & " byte allowance (and Natural'Last)";
+               else
+                  raise Protocol_Error
+                    with "Frames.Decode: payload length"
+                      & V'Image & " exceeds Natural'Last";
+               end if;
             end if;
             Len := Natural (V);
          end;
@@ -349,6 +397,20 @@ package body AHT.Websocket.Frames is
               with "Frames.Decode: control frame payload"
                 & Natural'Image (Len) & " exceeds 125 bytes";
          end if;
+      end if;
+
+      --  Size policy, applied at header time and before the payload is
+      --  waited for. Everything below this point either buffers the
+      --  declared length or reports "need more bytes" until it can, so
+      --  a ceiling checked after Decode returns a frame would first
+      --  have to accumulate exactly what it exists to refuse. Control
+      --  frames are exempt: they are already capped at 125 bytes and
+      --  carry no part of a message.
+      if not Is_Control (Hdr.Op) and then Len > Allowance then
+         raise Message_Too_Big
+           with "Frames.Decode: payload length" & Natural'Image (Len)
+             & " exceeds the" & Natural'Image (Allowance)
+             & " byte allowance";
       end if;
 
       --  Mask key (4 bytes) if MASK was set.

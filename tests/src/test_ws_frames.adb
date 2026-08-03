@@ -49,6 +49,25 @@ procedure Test_WS_Frames is
       return True;
    end Bytes_Equal;
 
+   --  A frame header using the 64-bit extended length form, with no
+   --  payload bytes at all. That is the shape a size ceiling has to
+   --  cope with: ten bytes on the wire declaring an arbitrary length.
+   function Ext64
+     (B0 : AHT.Bytes.Octet; Len : Unsigned_64)
+      return AHT.Bytes.Byte_Array
+   is
+      R : AHT.Bytes.Byte_Array (1 .. 10);
+      V : Unsigned_64 := Len;
+   begin
+      R (1) := B0;
+      R (2) := 16#7F#;
+      for I in reverse 3 .. 10 loop
+         R (I) := AHT.Bytes.Octet (V and 16#FF#);
+         V := Shift_Right (V, 8);
+      end loop;
+      return R;
+   end Ext64;
+
    function Hex (B : AHT.Bytes.Byte_Array) return String is
       Digits_S : constant String := "0123456789ABCDEF";
       R : String (1 .. 2 * B'Length);
@@ -729,6 +748,230 @@ begin
       then
          Fail ("classify-utf8-reason: not Accept_Close");
       end if;
+   end;
+
+   --  Case 30: the allowance is enforced from the header alone.
+   --
+   --  This is the case that distinguishes a decoder-level ceiling from
+   --  a check applied to the frame Decode returns. The wire here is
+   --  ten bytes declaring 4 GB and nothing else: with a ceiling in the
+   --  decoder it is refused immediately, while the default path can
+   --  only say "incomplete" and wait for 4 GB that a hostile peer
+   --  need never send.
+   declare
+      Wire : constant AHT.Bytes.Byte_Array :=
+        Ext64 (16#82#, 1024 * 1024 * 1024);   --  FIN=1 Binary, 1 GiB
+      Hdr  : AHT.Websocket.Frames.Frame_Header;
+      Pay  : AHT.Bytes.Buffer;
+      Last : Natural;
+   begin
+      begin
+         AHT.Websocket.Frames.Decode
+           (Wire, Hdr, Pay, Last, Allowance => 1_024);
+         Fail ("allowance: a 1 GiB declaration was accepted under a"
+               & " 1 KiB allowance (Last =" & Last'Image & ")");
+      exception
+         when AHT.Websocket.Message_Too_Big => null;
+         when E : others =>
+            Fail ("allowance: expected Message_Too_Big, got "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+
+      --  Same bytes, default allowance: incomplete, not an error.
+      begin
+         AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
+         if Last /= 0 then
+            Fail ("allowance-default: Last =" & Last'Image
+                  & " (expected 0, incomplete)");
+         end if;
+      exception
+         when E : others =>
+            Fail ("allowance-default: raised "
+                  & Ada.Exceptions.Exception_Name (E)
+                  & " where the previous behaviour was to wait");
+      end;
+   end;
+
+   --  Case 31: control frames are never subject to the allowance.
+   --  They interleave legally and are already capped at 125 bytes, so
+   --  a ceiling meant for message payloads must not refuse a Ping.
+   declare
+      Wire : constant AHT.Bytes.Byte_Array :=
+        [16#89#, 16#04#, 16#70#, 16#69#, 16#6E#, 16#67#];  --  Ping "ping"
+      Hdr  : AHT.Websocket.Frames.Frame_Header;
+      Pay  : AHT.Bytes.Buffer;
+      Last : Natural;
+   begin
+      AHT.Websocket.Frames.Decode
+        (Wire, Hdr, Pay, Last, Allowance => 0);
+      if Last /= 6 or else Hdr.Op /= AHT.Websocket.Ping_Op then
+         Fail ("control-exempt: Last =" & Last'Image
+               & ", op = " & Hdr.Op'Image);
+      end if;
+      if Buf_To_String (Pay) /= "ping" then
+         Fail ("control-exempt: payload = """
+               & Buf_To_String (Pay) & """");
+      end if;
+   exception
+      when E : others =>
+         Fail ("control-exempt: a Ping was refused under allowance 0: "
+               & Ada.Exceptions.Exception_Name (E));
+   end;
+
+   --  Case 32: a length above Natural'Last reports the failure the
+   --  caller's policy implies. With a finite ceiling it is a size
+   --  failure; with none it stays the protocol error it has always
+   --  been. Getting this backwards is easy: the allowance comparison
+   --  is true in both cases, so only testing the representability
+   --  first keeps the default path unchanged.
+   declare
+      Too_Big : constant Unsigned_64 := Unsigned_64 (Natural'Last) + 1;
+      Wire : constant AHT.Bytes.Byte_Array := Ext64 (16#82#, Too_Big);
+      Hdr  : AHT.Websocket.Frames.Frame_Header;
+      Pay  : AHT.Bytes.Buffer;
+      Last : Natural;
+   begin
+      begin
+         AHT.Websocket.Frames.Decode
+           (Wire, Hdr, Pay, Last, Allowance => 1_024);
+         Fail ("over-natural: accepted under a finite allowance");
+      exception
+         when AHT.Websocket.Message_Too_Big => null;
+         when E : others =>
+            Fail ("over-natural: expected Message_Too_Big, got "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+
+      begin
+         AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last);
+         Fail ("over-natural-default: accepted");
+      exception
+         when AHT.Websocket.Protocol_Error => null;
+         when E : others =>
+            Fail ("over-natural-default: expected Protocol_Error, got "
+                  & Ada.Exceptions.Exception_Name (E)
+                  & " — the default path changed meaning");
+      end;
+   end;
+
+   --  Case 33: sequencing outranks size. This frame violates both —
+   --  a Text where a Continuation was required, declaring far more
+   --  than the allowance — and the protocol violation is the one
+   --  worth reporting, since it maps to a different close code.
+   declare
+      Wire : constant AHT.Bytes.Byte_Array :=
+        Ext64 (16#81#, 1024 * 1024 * 1024);   --  FIN=1 Text, 1 GiB
+      Hdr  : AHT.Websocket.Frames.Frame_Header;
+      Pay  : AHT.Bytes.Buffer;
+      Last : Natural;
+   begin
+      AHT.Websocket.Frames.Decode
+        (Wire, Hdr, Pay, Last,
+         Allowance => 1_024,
+         Fragment  => AHT.Websocket.Frames.In_Message);
+      Fail ("precedence: accepted a Text frame mid-fragment");
+   exception
+      when AHT.Websocket.Protocol_Error => null;
+      when AHT.Websocket.Message_Too_Big =>
+         Fail ("precedence: reported Message_Too_Big for a sequencing"
+               & " violation — the size check ran first");
+      when E : others =>
+         Fail ("precedence: expected Protocol_Error, got "
+               & Ada.Exceptions.Exception_Name (E));
+   end;
+
+   --  Case 34: the sequencing rule itself, both directions, plus the
+   --  default that has to keep decoding a standalone Continuation
+   --  (case 8 above relies on exactly that).
+   declare
+      Cont : constant AHT.Bytes.Byte_Array :=
+        [16#80#, 16#02#, 16#6C#, 16#6F#];          --  FIN=1 Cont "lo"
+      Text : constant AHT.Bytes.Byte_Array :=
+        [16#81#, 16#03#, 16#61#, 16#62#, 16#63#];  --  FIN=1 Text "abc"
+      Hdr  : AHT.Websocket.Frames.Frame_Header;
+      Pay  : AHT.Bytes.Buffer;
+      Last : Natural;
+
+      procedure Expect_Ok
+        (What : String;
+         Wire : AHT.Bytes.Byte_Array;
+         F    : AHT.Websocket.Frames.Fragment_State)
+      is
+      begin
+         AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last, Fragment => F);
+         if Last /= Wire'Length then
+            Fail (What & ": Last =" & Last'Image);
+         end if;
+      exception
+         when E : others =>
+            Fail (What & ": raised "
+                  & Ada.Exceptions.Exception_Name (E));
+      end Expect_Ok;
+
+      procedure Expect_Protocol
+        (What : String;
+         Wire : AHT.Bytes.Byte_Array;
+         F    : AHT.Websocket.Frames.Fragment_State)
+      is
+      begin
+         AHT.Websocket.Frames.Decode (Wire, Hdr, Pay, Last, Fragment => F);
+         Fail (What & ": accepted (Last =" & Last'Image & ")");
+      exception
+         when AHT.Websocket.Protocol_Error => null;
+         when E : others =>
+            Fail (What & ": expected Protocol_Error, got "
+                  & Ada.Exceptions.Exception_Name (E));
+      end Expect_Protocol;
+   begin
+      Expect_Protocol
+        ("seq: Continuation with nothing in progress",
+         Cont, AHT.Websocket.Frames.No_Message);
+      Expect_Protocol
+        ("seq: Text mid-fragment",
+         Text, AHT.Websocket.Frames.In_Message);
+      Expect_Ok
+        ("seq: Continuation mid-fragment",
+         Cont, AHT.Websocket.Frames.In_Message);
+      Expect_Ok
+        ("seq: Text with nothing in progress",
+         Text, AHT.Websocket.Frames.No_Message);
+      Expect_Ok
+        ("seq: Continuation unchecked (the default)",
+         Cont, AHT.Websocket.Frames.Unchecked);
+   end;
+
+   --  Case 35: the boundary. Exactly the allowance is accepted; one
+   --  byte more is not.
+   declare
+      Wire : constant AHT.Bytes.Byte_Array :=
+        [16#81#, 16#03#, 16#61#, 16#62#, 16#63#];  --  Text "abc"
+      Hdr  : AHT.Websocket.Frames.Frame_Header;
+      Pay  : AHT.Bytes.Buffer;
+      Last : Natural;
+   begin
+      begin
+         AHT.Websocket.Frames.Decode
+           (Wire, Hdr, Pay, Last, Allowance => 3);
+         if Last /= 5 then
+            Fail ("boundary: exactly-at-allowance gave Last ="
+                  & Last'Image);
+         end if;
+      exception
+         when E : others =>
+            Fail ("boundary: 3 bytes refused at an allowance of 3: "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+
+      begin
+         AHT.Websocket.Frames.Decode
+           (Wire, Hdr, Pay, Last, Allowance => 2);
+         Fail ("boundary: 3 bytes accepted at an allowance of 2");
+      exception
+         when AHT.Websocket.Message_Too_Big => null;
+         when E : others =>
+            Fail ("boundary: expected Message_Too_Big, got "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
    end;
 
    if Failures = 0 then

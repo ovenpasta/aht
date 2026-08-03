@@ -66,4 +66,11 @@ package AHT.Websocket is
    Protocol_Error  : exception;
    Closed_Error    : exception;
 
+   --  A frame or a reassembled message declares more bytes than the
+   --  configured ceiling allows. Distinct from Protocol_Error because
+   --  the peer did nothing malformed -- it asked for more than this
+   --  endpoint is willing to hold -- and the two close the connection
+   --  with different codes: 1009 Message Too Big rather than 1002.
+   Message_Too_Big : exception;
+
 end AHT.Websocket;

@@ -39,11 +39,23 @@ package AHT.Websocket.Frames is
    --      which must never appear on outbound wire).
    --  Each violation raises `AHT.Websocket.Protocol_Error`.
 
+   --  Where the caller is in a fragment sequence, so Decode can apply
+   --  RFC 6455 §5.4 opcode sequencing at header-parse time.
+   --
+   --  Unchecked is the default, and has to be: Decode's contract is
+   --  that it decodes any single frame in isolation, and callers that
+   --  hold no message state -- the codec tests among them -- decode a
+   --  standalone Continuation and expect it to succeed. A receiver
+   --  that does track the sequence passes the real state.
+   type Fragment_State is (Unchecked, No_Message, In_Message);
+
    procedure Decode
-     (Input   : AHT.Bytes.Byte_Array;
-      Hdr     : out Frame_Header;
-      Payload : out AHT.Bytes.Buffer;
-      Last    : out Natural);
+     (Input     : AHT.Bytes.Byte_Array;
+      Hdr       : out Frame_Header;
+      Payload   : out AHT.Bytes.Buffer;
+      Last      : out Natural;
+      Allowance : Natural        := Natural'Last;
+      Fragment  : Fragment_State := Unchecked);
    --  Parses one frame off `Input`. On success `Last` is the
    --  index of the last consumed byte; on "need more bytes" the
    --  outputs are cleared and `Last := 0`. Same direction-neutral
@@ -66,6 +78,29 @@ package AHT.Websocket.Frames is
    --      in 16 bits, RFC §5.2).
    --    * 64-bit length with the top bit set (RFC §5.2) or a
    --      length overflowing `Natural`.
+   --    * A data frame whose opcode contradicts `Fragment`: a
+   --      `Continuation` with `No_Message`, or a `Text`/`Binary` with
+   --      `In_Message` (RFC §5.4). Control frames interleave legally
+   --      and are exempt.
+   --
+   --  Raises `AHT.Websocket.Message_Too_Big` when a *data* frame
+   --  declares more than `Allowance` bytes. The check is at
+   --  header-parse time, before the body is waited for, which is the
+   --  entire point: Decode signals "incomplete" until the whole
+   --  declared payload is buffered, so a ceiling applied to the
+   --  returned frame would have to accumulate the bytes it exists to
+   --  refuse. A peer declaring 4 GB is rejected off two header bytes.
+   --
+   --  Sequencing is checked BEFORE size. A data frame arriving where a
+   --  `Continuation` was required is a 1002, and reporting 1009 for it
+   --  because the remaining allowance happened to be smaller would
+   --  hide the real fault.
+   --
+   --  For a fragmented message the receiver passes the allowance
+   --  remaining for the whole logical message, so the ceiling bounds
+   --  the message rather than each frame independently.
+   --
+   --  Both defaults reproduce the previous behaviour exactly.
 
    --  Inbound policy verdict for a *received* Close-frame payload,
    --  applied by the Client layer above Decode.
