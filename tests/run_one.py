@@ -110,6 +110,20 @@ def reap_group(proc: subprocess.Popen, pgid: int) -> None:
         time.sleep(POLL)
 
 
+def shell_status(status: int) -> int:
+    """Translate a subprocess return code into a shell exit status.
+
+    subprocess reports death by signal as a negative code; shells
+    report 128 + signal. Passing the negative straight to sys.exit
+    wraps it modulo 256, so a test killed by SIGTERM would surface as
+    241 instead of 143 — a number the runner would print as an
+    ordinary failure with no hint that a signal was involved.
+    """
+    if status < 0:
+        return 128 - status          # status is negative
+    return status
+
+
 def main() -> int:
     if len(sys.argv) < 3:
         print(
@@ -127,15 +141,21 @@ def main() -> int:
 
     argv = sys.argv[2:]
 
-    # start_new_session puts the child in its own session and process
-    # group on POSIX; the group id is then the child's pid. Saved now,
-    # so the group stays addressable after the leader is gone.
-    proc = subprocess.Popen(argv, start_new_session=True)
-    pgid = proc.pid
+    # Handlers go in BEFORE the spawn. Installing them afterwards
+    # leaves a window between the child existing and the wrapper being
+    # able to clean it up: a signal arriving there kills the wrapper
+    # by default while the child, isolated in its own session, never
+    # sees it and survives. Measured — that window escapes.
+    #
+    # Until there is a group to clean, the handler can only record
+    # what arrived; the spawn honours it immediately afterwards.
+    state = {"proc": None, "pgid": None, "pending": None}
 
     def on_signal(signum, _frame):
-        # The child is in its own session and never received this.
-        reap_group(proc, pgid)
+        if state["pgid"] is None:
+            state["pending"] = signum
+            return
+        reap_group(state["proc"], state["pgid"])
         os._exit(128 + signum)
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
@@ -143,6 +163,23 @@ def main() -> int:
             signal.signal(sig, on_signal)
         except (ValueError, OSError, AttributeError):
             pass                        # not available here; carry on
+
+    if state["pending"] is not None:
+        return 128 + state["pending"]   # nothing spawned yet
+
+    # start_new_session puts the child in its own session and process
+    # group on POSIX; the group id is then the child's pid. Saved now,
+    # so the group stays addressable after the leader is gone.
+    proc = subprocess.Popen(argv, start_new_session=True)
+    state["proc"] = proc
+    state["pgid"] = proc.pid
+    pgid = proc.pid
+
+    # A signal that landed during the spawn was recorded rather than
+    # acted on, because there was nothing to clean up yet.
+    if state["pending"] is not None:
+        reap_group(proc, pgid)
+        os._exit(128 + state["pending"])
 
     timed_out = False
     try:
@@ -162,7 +199,7 @@ def main() -> int:
     finally:
         reap_group(proc, pgid)
 
-    return TIMEOUT_STATUS if timed_out else status
+    return TIMEOUT_STATUS if timed_out else shell_status(status)
 
 
 if __name__ == "__main__":
