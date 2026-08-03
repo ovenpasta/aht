@@ -73,4 +73,14 @@ package AHT.Websocket is
    --  with different codes: 1009 Message Too Big rather than 1002.
    Message_Too_Big : exception;
 
+   --  The operation is not available in the client's current
+   --  configuration: Receive under Callback_Only delivery, connecting
+   --  under Callback_Only with no callback installed, clearing that
+   --  callback while such a connection is in force, or reconfiguring
+   --  limits once a session already exists. All are the same mistake
+   --  in different clothes -- asking for a delivery arrangement the
+   --  client is not in a position to honour -- and none of them is a
+   --  protocol fault, so none is a Protocol_Error.
+   Mode_Error : exception;
+
 end AHT.Websocket;

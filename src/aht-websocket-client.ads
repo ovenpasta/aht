@@ -1,4 +1,5 @@
-with Ada.Containers.Doubly_Linked_Lists;
+with Ada.Containers;
+with Ada.Containers.Bounded_Doubly_Linked_Lists;
 with Ada.Strings.Unbounded;
 
 with AHT.Bytes;
@@ -36,6 +37,39 @@ package AHT.Websocket.Client is
       URL      : String;
       Insecure : Boolean := False;
       CA_Path  : String := "");
+
+   --  How decoded messages reach the application.
+   --
+   --  Callback_Only does not enqueue at all, which is the only mode
+   --  that removes the inbox as a growth path outright; the others
+   --  keep a bounded queue that Receive drains. It also requires an
+   --  On_Message callback, since with none there is no consumer and
+   --  every message would be dropped in silence.
+   type Delivery_Mode is (Pull_Only, Callback_Only, Both);
+
+   --  Ceilings for one connection. Defaults are policy, not minimums:
+   --  32 MiB covers the Autobahn §9 cases (~16 MiB) with room to
+   --  spare and matches what the test fixture itself accepts.
+   --
+   --  Max_Message_Bytes bounds the *logical* message — a fragment
+   --  sequence is measured across its parts, not per frame. It bounds
+   --  what the library will accumulate, not peak RSS: framing overhead
+   --  and copies sit on top.
+   type Limits is record
+      Max_Message_Bytes  : Natural := 32 * 1024 * 1024;
+      Max_Inbox_Messages : Ada.Containers.Count_Type := 1_024;
+      Max_Inbox_Bytes    : Natural := 64 * 1024 * 1024;
+      Delivery           : Delivery_Mode := Both;
+   end record;
+
+   --  Sets what the NEXT connection is built from. Legal only while
+   --  fully disconnected; raises Mode_Error during Connecting, Open or
+   --  Closing, because every limit becomes an immutable property of a
+   --  session at the moment it is allocated. A running connection
+   --  therefore cannot have its ceilings moved underneath it, and the
+   --  receiver never has to re-read a limit that might have changed
+   --  since it last looked.
+   procedure Configure (Self : in out Client_Type; L : Limits);
 
    function Is_Open (Self : Client_Type) return Boolean;
 
@@ -92,7 +126,10 @@ package AHT.Websocket.Client is
    --  Valid_Close_Code subtype so they cannot be sent on the wire.
 
    --  Blocking pull API: blocks up to Timeout for the next decoded message.
-   --  Raises Closed_Error if the connection has been closed.
+   --  Raises Closed_Error if the connection has been closed, and
+   --  Mode_Error under Callback_Only delivery -- where nothing is ever
+   --  enqueued, so blocking here would wait on an inbox that by
+   --  construction no one will fill.
    procedure Receive
      (Self    : in out Client_Type;
       Msg     : out Message_Type;
@@ -113,6 +150,13 @@ package AHT.Websocket.Client is
    --  The installed callbacks live in the client, not in a
    --  connection, so they are read afresh for every event rather
    --  than captured once.
+   --  Set_On_Message raises Mode_Error if it would clear the callback
+   --  while a Callback_Only connection is in force -- that is, from
+   --  admission through to the end of teardown. Both ends matter: the
+   --  gap before publication is where a race could strip the only
+   --  consumer from a session already committed to callback delivery,
+   --  and during teardown a message may already be decoded and waiting
+   --  to be dispatched.
    procedure Set_On_Message (Self : in out Client_Type; CB : On_Message_Callback);
    procedure Set_On_Close   (Self : in out Client_Type; CB : On_Close_Callback);
    procedure Set_On_Error   (Self : in out Client_Type; CB : On_Error_Callback);
@@ -156,22 +200,36 @@ private
       Local_Closed : Boolean    := False;
    end State_PO;
 
-   package Message_Lists is new Ada.Containers.Doubly_Linked_Lists
+   package Message_Lists is new Ada.Containers.Bounded_Doubly_Linked_Lists
      (Message_Type);
 
-   --  FIFO of decoded messages. Receiver pushes; the user's Receive
-   --  entry pulls. Mark_Closed flips the barrier so a parked Receive
-   --  wakes and raises Closed_Error if the connection went away while
-   --  it was blocked.
-   protected type Inbox_PO is
+   --  Bounded FIFO of decoded messages. Receiver pushes; the user's
+   --  Receive entry pulls. Mark_Closed flips the barrier so a parked
+   --  Receive wakes and raises Closed_Error if the connection went
+   --  away while it was blocked.
+   --
+   --  Two ceilings, because one does not imply the other: the list's
+   --  capacity bounds how many messages are held, and Max_Bytes bounds
+   --  how much payload they amount to. A thousand queued megabytes is
+   --  as much a runaway as a million queued empties.
+   protected type Inbox_PO
+     (Capacity  : Ada.Containers.Count_Type;
+      Max_Bytes : Natural) is
       entry Receive (Msg : out Message_Type);
-      procedure Push (Msg : Message_Type);
+      --  Non-raising: a full inbox means the peer is outrunning the
+      --  application, which is a policy outcome for the receiver to
+      --  act on, not an exception to unwind through it.
+      procedure Try_Push (Msg : Message_Type; Accepted : out Boolean);
       procedure Mark_Closed;
       function  Count return Natural;
+      function  Byte_Count return Natural;
       function  Is_Closed return Boolean;
    private
-      Q        : Message_Lists.List;
-      Closed_F : Boolean := False;
+      Q            : Message_Lists.List (Capacity);
+      --  Maintained in the same protected action as the list itself,
+      --  and only ever after an insertion actually succeeded.
+      Queued_Bytes : Natural := 0;
+      Closed_F     : Boolean := False;
    end Inbox_PO;
 
    --  ws:// runs on the plain TCP transport, wss:// on the TLS
@@ -197,9 +255,20 @@ private
    --    Draining    — still the receiver's, but no new borrows are
    --                  granted; it is freed once the outstanding ones
    --                  reach zero.
-   type Session_Type (Kind : Transport_Kind) is limited record
+   --  The limits are discriminants, not fields, and that is the whole
+   --  reason they are here: discriminants are immutable for the life
+   --  of the object, so a session carries the ceilings it was built
+   --  with and Configure cannot move them underneath a running
+   --  receiver. Every one of them is a discrete type, so every one of
+   --  them can be a discriminant.
+   type Session_Type
+     (Kind              : Transport_Kind;
+      Inbox_Capacity    : Ada.Containers.Count_Type;
+      Max_Message_Bytes : Natural;
+      Max_Inbox_Bytes   : Natural;
+      Delivery          : Delivery_Mode) is limited record
       State             : State_PO;
-      Inbox             : Inbox_PO;
+      Inbox             : Inbox_PO (Inbox_Capacity, Max_Inbox_Bytes);
       Guard             : aliased AHT.Websocket.Send_Guards.Send_Guard;
       Selected_Protocol : Ada.Strings.Unbounded.Unbounded_String;
       Generation        : Positive := 1;
@@ -226,7 +295,10 @@ private
    --  pinned session; everyone else joins and touches nothing.
    type Teardown_Result is (Won_Teardown, Join_Teardown, No_Session);
 
-   type Admission_Result is (Admitted, Wrong_State);
+   --  No_Callback is refused admission for the same reason a full
+   --  inbox is refused a message: there would be no consumer, and
+   --  silently discarding is not an option the caller could detect.
+   type Admission_Result is (Admitted, Wrong_State, No_Callback);
 
    --  Snapshot of the installed callbacks. The receiver takes one per
    --  event so it never runs user code while holding the lock.
@@ -252,9 +324,18 @@ private
       --  two tasks cannot both be admitted. Gen is Natural rather
       --  than Positive because it must hold a defined value (0) when
       --  admission is refused; only Admitted has any effect.
+      --  One protected action does all of it: the state check, the
+      --  transition, the generation reservation, the limits snapshot
+      --  the session will be built from, and the
+      --  Callback_Only-has-a-callback check. Split into a sequence,
+      --  Configure would race the state check and Set_On_Message
+      --  (null) would race the callback check.
       procedure Begin_Connect
         (Gen    : out Natural;
+         L      : out Limits;
          Result : out Admission_Result);
+      --  Public Configure. OK is False unless fully disconnected.
+      procedure Set_Pending_Limits (L : Limits; OK : out Boolean);
       --  MUST run on every failure after a successful Begin_Connect,
       --  or the client is stranded in Connecting. The attempt was by
       --  definition unpublished, so the client returns to Idle and
@@ -321,7 +402,9 @@ private
       entry     Wait_Generation_Done;
 
       --  Callback registry. Survives connections; read per event.
-      procedure Set_On_Message (CB : On_Message_Callback);
+      --  OK is False when this would clear the only consumer of a
+      --  Callback_Only connection that is already in force.
+      procedure Set_On_Message (CB : On_Message_Callback; OK : out Boolean);
       procedure Set_On_Close   (CB : On_Close_Callback);
       procedure Set_On_Error   (CB : On_Error_Callback);
       function  Current_Callbacks return Callbacks;
@@ -349,6 +432,13 @@ private
       Handed_Off_Gen : Natural := 0;
       CBs           : Callbacks;
       Proto         : Ada.Strings.Unbounded.Unbounded_String;
+      --  What the NEXT session is built from.
+      Pending       : Limits;
+      --  Snapshotted by an admitted Begin_Connect and held until the
+      --  generation is done, so it still answers during Connecting --
+      --  before any session exists -- and through Closing, while the
+      --  receiver may still be dispatching.
+      Active_Mode   : Delivery_Mode := Both;
    end Lifecycle_Controller;
 
    --  Persistent per-client task: it outlives any single connection,

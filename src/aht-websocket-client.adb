@@ -271,12 +271,35 @@ package body AHT.Websocket.Client is
          end if;
          Msg := Q.First_Element;
          Q.Delete_First;
+         --  Exact, deliberately. The counter is only ever incremented
+         --  after an insertion succeeded, so it cannot drift; clamping
+         --  here would hide an accounting bug rather than fix one.
+         Queued_Bytes := Queued_Bytes - Msg.Payload.Length;
       end Receive;
 
-      procedure Push (Msg : Message_Type) is
+      procedure Try_Push (Msg : Message_Type; Accepted : out Boolean) is
+         use type Ada.Containers.Count_Type;
+         Len : constant Natural := Msg.Payload.Length;
       begin
+         --  Subtraction, not addition: Queued_Bytes + Len could
+         --  overflow the very comparison meant to reject it. Written
+         --  this way the arithmetic stays in Natural's base type, and
+         --  a message larger than the whole budget makes the
+         --  right-hand side negative — which refuses, as it should.
+         if Closed_F
+           or else Q.Length >= Capacity
+           or else Queued_Bytes > Max_Bytes - Len
+         then
+            Accepted := False;
+            return;
+         end if;
+
          Q.Append (Msg);
-      end Push;
+         --  Only now: the count must never claim bytes the queue does
+         --  not hold.
+         Queued_Bytes := Queued_Bytes + Len;
+         Accepted     := True;
+      end Try_Push;
 
       procedure Mark_Closed is
       begin
@@ -284,6 +307,8 @@ package body AHT.Websocket.Client is
       end Mark_Closed;
 
       function Count return Natural is (Natural (Q.Length));
+
+      function Byte_Count return Natural is (Queued_Bytes);
 
       function Is_Closed return Boolean is (Closed_F);
 
@@ -293,21 +318,48 @@ package body AHT.Websocket.Client is
 
       procedure Begin_Connect
         (Gen    : out Natural;
+         L      : out Limits;
          Result : out Admission_Result) is
       begin
+         --  Every refusal leaves the object exactly as it was. A
+         --  rejected Connect must not burn a generation number, move
+         --  the state machine, or commit a delivery mode.
          if St /= Idle then
-            --  Refused: leave every field exactly as it was. A
-            --  rejected Connect must not burn a generation number or
-            --  move the state machine.
             Gen    := 0;
+            L      := Pending;
             Result := Wrong_State;
             return;
          end if;
-         Next_Gen := Next_Gen + 1;
-         Gen      := Next_Gen;
-         St       := Connecting;
-         Result   := Admitted;
+
+         if Pending.Delivery = Callback_Only
+           and then CBs.On_Message = null
+         then
+            Gen    := 0;
+            L      := Pending;
+            Result := No_Callback;
+            return;
+         end if;
+
+         Next_Gen    := Next_Gen + 1;
+         Gen         := Next_Gen;
+         St          := Connecting;
+         L           := Pending;
+         Active_Mode := Pending.Delivery;
+         Result      := Admitted;
       end Begin_Connect;
+
+      procedure Set_Pending_Limits (L : Limits; OK : out Boolean) is
+      begin
+         --  Only while fully disconnected. Anywhere else an attempt is
+         --  either in flight or winding down, and the session it
+         --  belongs to has already frozen its ceilings.
+         if St in Idle | Disconnected then
+            Pending := L;
+            OK      := True;
+         else
+            OK := False;
+         end if;
+      end Set_Pending_Limits;
 
       procedure Abandon_Connect (Gen : Positive) is
       begin
@@ -416,9 +468,24 @@ package body AHT.Websocket.Client is
          null;
       end Wait_Generation_Done;
 
-      procedure Set_On_Message (CB : On_Message_Callback) is
+      procedure Set_On_Message
+        (CB : On_Message_Callback; OK : out Boolean) is
       begin
+         --  Refused only when it would leave a Callback_Only
+         --  connection with no consumer at all. Connecting counts:
+         --  that is the gap between admission and publication, where
+         --  the session is already committed to callback delivery.
+         --  Closing counts too: a message may be decoded and waiting
+         --  to be dispatched right now.
+         if CB = null
+           and then Active_Mode = Callback_Only
+           and then St in Connecting | Open | Closing
+         then
+            OK := False;
+            return;
+         end if;
          CBs.On_Message := CB;
+         OK             := True;
       end Set_On_Message;
 
       procedure Set_On_Close (CB : On_Close_Callback) is
@@ -878,12 +945,39 @@ package body AHT.Websocket.Client is
             end if;
 
             declare
-               Msg : constant Message_Type :=
+               Msg      : constant Message_Type :=
                  (Kind => Kind, Payload => Payload);
+               Accepted : Boolean := True;
             begin
-               --  Inbox first so a pull-mode Receive doesn't starve if
-               --  the push callback runs slow.
-               S.Inbox.Push (Msg);
+               --  Callback_Only never enqueues, which is what removes
+               --  the inbox as a growth path rather than merely
+               --  bounding it.
+               if S.Delivery /= Callback_Only then
+                  --  Inbox first so a pull-mode Receive doesn't starve
+                  --  if the push callback runs slow.
+                  S.Inbox.Try_Push (Msg, Accepted);
+               end if;
+
+               if not Accepted then
+                  --  The peer is outrunning the application. That is a
+                  --  different failure from an oversized message: the
+                  --  frame was legal and within its ceiling, we simply
+                  --  cannot hold it. Dropping it silently would corrupt
+                  --  stream semantics the caller has no way to detect,
+                  --  so the connection goes down with 1008 instead.
+                  Maybe_Send_Close_Echo (Code => 1008);
+                  Fire_On_Error
+                    ("Receiver: inbox full ("
+                     & Natural'Image (S.Inbox.Count) & " messages,"
+                     & Natural'Image (S.Inbox.Byte_Count)
+                     & " bytes queued) — failing connection with 1008");
+                  S.State.Set (Closed);
+                  Stop_Loop := True;
+                  return;
+               end if;
+
+               --  Not reached for a refused push: pull and push
+               --  consumers must observe the same accepted set.
                Fire_On_Message (Msg);
             end;
          end Deliver;
@@ -1023,8 +1117,29 @@ package body AHT.Websocket.Client is
                if Live (Buf) = 0 then
                   Read_More;
                else
-                  AHT.Websocket.Frames.Decode
-                    (Buf.Data (Buf.Head .. Buf.Tail), Hdr, Payload, Last);
+                  --  What is left of the ceiling for the message being
+                  --  assembled, so it bounds the logical message
+                  --  rather than each frame separately. Computed by
+                  --  comparison rather than by subtracting and hoping:
+                  --  Used can only exceed the ceiling if something has
+                  --  already gone wrong, and an underflow here would
+                  --  turn that into a wildly permissive allowance.
+                  declare
+                     Used : constant Natural :=
+                       (if In_Reassembly then Reassembly_Buf.Length else 0);
+                     Allowance : constant Natural :=
+                       (if Used >= S.Max_Message_Bytes
+                        then 0 else S.Max_Message_Bytes - Used);
+                     Frag : constant AHT.Websocket.Frames.Fragment_State :=
+                       (if In_Reassembly
+                        then AHT.Websocket.Frames.In_Message
+                        else AHT.Websocket.Frames.No_Message);
+                  begin
+                     AHT.Websocket.Frames.Decode
+                       (Buf.Data (Buf.Head .. Buf.Tail), Hdr, Payload, Last,
+                        Allowance => Allowance,
+                        Fragment  => Frag);
+                  end;
                   if Last = 0 then
                      Read_More;
                   else
@@ -1033,6 +1148,16 @@ package body AHT.Websocket.Client is
                   end if;
                end if;
             exception
+               when E : AHT.Websocket.Message_Too_Big =>
+                  --  The peer declared more than this endpoint will
+                  --  hold. Nothing malformed happened, so it gets its
+                  --  own close code rather than the protocol one.
+                  Maybe_Send_Close_Echo (Code => 1009);
+                  Fire_On_Error
+                    (Ada.Exceptions.Exception_Name (E) & ": "
+                     & Ada.Exceptions.Exception_Message (E));
+                  S.State.Set (Closed);
+                  Stop_Loop := True;
                when E : AHT.Websocket.Protocol_Error
                   | AHT.HTTP.Protocol_Error
                   | AHT.Transport.Transport_Error
@@ -1163,6 +1288,7 @@ package body AHT.Websocket.Client is
 
       Gen : Natural;
       Adm : Admission_Result;
+      Lim : Limits;
    begin
       --  Admission. One protected action decides whether an attempt
       --  may start and reserves this attempt's generation number. A
@@ -1172,14 +1298,22 @@ package body AHT.Websocket.Client is
       --  Idle, so retries work — and now really do, because the
       --  retry gets a fresh session with fresh transports rather than
       --  re-dialing an already-latched one.
-      Self.Ctl.Begin_Connect (Gen, Adm);
-      if Adm /= Admitted then
-         raise AHT.Websocket.Handshake_Error
-           with "Websocket.Client.Connect: Client_Type has "
-             & "already been Connect'd (state = "
-             & Client_State'Image (Self.Ctl.State)
-             & "); declare a fresh Client per connection";
-      end if;
+      Self.Ctl.Begin_Connect (Gen, Lim, Adm);
+      case Adm is
+         when Admitted =>
+            null;
+         when No_Callback =>
+            raise AHT.Websocket.Mode_Error
+              with "Websocket.Client.Connect: delivery is "
+                & "Callback_Only but no On_Message callback is "
+                & "installed; every message would be discarded";
+         when Wrong_State =>
+            raise AHT.Websocket.Handshake_Error
+              with "Websocket.Client.Connect: Client_Type has "
+                & "already been Connect'd (state = "
+                & Client_State'Image (Self.Ctl.State)
+                & "); declare a fresh Client per connection";
+      end case;
 
       --  Declared only once admission has succeeded, so a refused
       --  Connect cannot release an admission it never took. From here
@@ -1237,13 +1371,32 @@ package body AHT.Websocket.Client is
 
             --  One session, holding exactly the transport this scheme
             --  needs. Scheme is already narrowed to WS | WSS above.
-            case Parsed.Scheme is
-               when AHT.URL.WSS =>
-                  Attempt.Sess := new Session_Type (Kind => Secure_Transport);
-               when others =>
-                  --  WS (HTTP/HTTPS already rejected above).
-                  Attempt.Sess := new Session_Type (Kind => Plain_Transport);
-            end case;
+            declare
+               --  Callback_Only gets no queue at all rather than an
+               --  unused one, so "does not enqueue" is a property of
+               --  the allocation and not merely of the code path.
+               Cap : constant Ada.Containers.Count_Type :=
+                 (if Lim.Delivery = Callback_Only
+                  then 0 else Lim.Max_Inbox_Messages);
+            begin
+               case Parsed.Scheme is
+                  when AHT.URL.WSS =>
+                     Attempt.Sess := new Session_Type
+                       (Kind              => Secure_Transport,
+                        Inbox_Capacity    => Cap,
+                        Max_Message_Bytes => Lim.Max_Message_Bytes,
+                        Max_Inbox_Bytes   => Lim.Max_Inbox_Bytes,
+                        Delivery          => Lim.Delivery);
+                  when others =>
+                     --  WS (HTTP/HTTPS already rejected above).
+                     Attempt.Sess := new Session_Type
+                       (Kind              => Plain_Transport,
+                        Inbox_Capacity    => Cap,
+                        Max_Message_Bytes => Lim.Max_Message_Bytes,
+                        Max_Inbox_Bytes   => Lim.Max_Inbox_Bytes,
+                        Delivery          => Lim.Delivery);
+               end case;
+            end;
             Attempt.Sess.Generation := Positive (Gen);
 
             case Attempt.Sess.Kind is
@@ -1387,6 +1540,19 @@ package body AHT.Websocket.Client is
          Insecure      => Insecure,
          CA_Path       => CA_Path);
    end Connect;
+
+   procedure Configure (Self : in out Client_Type; L : Limits) is
+      OK : Boolean;
+   begin
+      Self.Ctl.Set_Pending_Limits (L, OK);
+      if not OK then
+         raise AHT.Websocket.Mode_Error
+           with "Websocket.Client.Configure: limits can only be set "
+             & "while fully disconnected (state = "
+             & Client_State'Image (Self.Ctl.State)
+             & "); a session freezes its ceilings when it is created";
+      end if;
+   end Configure;
 
    function Is_Open (Self : Client_Type) return Boolean is
      (Self.Ctl.Is_Open);
@@ -1626,6 +1792,15 @@ package body AHT.Websocket.Client is
          raise AHT.Websocket.Closed_Error
            with "Websocket.Client.Receive: connection closed";
       end if;
+
+      if L.Sess.Delivery = Callback_Only then
+         --  Nothing is ever enqueued in this mode, so blocking here
+         --  would wait on an inbox no one will fill.
+         Msg := (Kind => Binary_Message, Payload => <>);
+         raise AHT.Websocket.Mode_Error
+           with "Websocket.Client.Receive: delivery is Callback_Only; "
+             & "messages are delivered to On_Message, not queued";
+      end if;
       --  Blocked on THIS session's inbox: when it is reclaimed,
       --  Mark_Closed wakes us with Closed_Error, and we can never
       --  observe a later generation's messages.
@@ -1642,9 +1817,17 @@ package body AHT.Websocket.Client is
 
    procedure Set_On_Message
      (Self : in out Client_Type;
-      CB   : On_Message_Callback) is
+      CB   : On_Message_Callback)
+   is
+      OK : Boolean;
    begin
-      Self.Ctl.Set_On_Message (CB);
+      Self.Ctl.Set_On_Message (CB, OK);
+      if not OK then
+         raise AHT.Websocket.Mode_Error
+           with "Websocket.Client.Set_On_Message: cannot clear the "
+             & "callback while a Callback_Only connection is in "
+             & "force; it is that connection's only consumer";
+      end if;
    end Set_On_Message;
 
    procedure Set_On_Close
