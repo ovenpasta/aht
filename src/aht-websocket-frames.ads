@@ -58,7 +58,11 @@ package AHT.Websocket.Frames is
       Fragment  : Fragment_State := Unchecked);
    --  Parses one frame off `Input`. On success `Last` is the
    --  index of the last consumed byte; on "need more bytes" the
-   --  outputs are cleared and `Last := 0`. Same direction-neutral
+   --  outputs are cleared and `Last := 0`. Both are *normal* returns:
+   --  when Decode raises, none of the out parameters is meaningful,
+   --  since copy-back of a scalar out parameter is not guaranteed on
+   --  a propagating call. Callers distinguish "incomplete" from
+   --  "rejected" by the exception, never by inspecting `Last`. Same direction-neutral
    --  philosophy: a masked frame is parsed and unmasked
    --  regardless of who supposedly sent it, with the
    --  "servers MUST NOT mask" rule (RFC §5.1) deferred to the
@@ -89,7 +93,9 @@ package AHT.Websocket.Frames is
    --  entire point: Decode signals "incomplete" until the whole
    --  declared payload is buffered, so a ceiling applied to the
    --  returned frame would have to accumulate the bytes it exists to
-   --  refuse. A peer declaring 4 GB is rejected off two header bytes.
+   --  refuse. Rejection happens as soon as the length field itself is
+   --  parsed — ten bytes for the 64-bit form, four for the 16-bit one
+   --  — rather than after the declared payload has arrived.
    --
    --  Sequencing is checked BEFORE size. A data frame arriving where a
    --  `Continuation` was required is a 1002, and reporting 1009 for it

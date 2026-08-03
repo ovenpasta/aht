@@ -754,9 +754,9 @@ begin
    --
    --  This is the case that distinguishes a decoder-level ceiling from
    --  a check applied to the frame Decode returns. The wire here is
-   --  ten bytes declaring 4 GB and nothing else: with a ceiling in the
-   --  decoder it is refused immediately, while the default path can
-   --  only say "incomplete" and wait for 4 GB that a hostile peer
+   --  ten bytes declaring a gigabyte and nothing else: with a ceiling
+   --  in the decoder it is refused immediately, while the default path
+   --  can only say "incomplete" and wait for a gigabyte a hostile peer
    --  need never send.
    declare
       Wire : constant AHT.Bytes.Byte_Array :=
