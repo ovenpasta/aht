@@ -122,15 +122,30 @@ procedure Test_WS_Limits is
    function Mentions (Haystack, Needle : String) return Boolean is
      (Ada.Strings.Fixed.Index (Haystack, Needle) /= 0);
 
+   --  Ties each case to its own report. Cases run in sequence, so a
+   --  counter is enough; what it buys is that a close arriving late,
+   --  or twice, can never be read as another case's result.
+   Next_Token : Natural := 0;
+
+   function New_Token return String is
+   begin
+      Next_Token := Next_Token + 1;
+      return Ada.Strings.Fixed.Trim
+        (Natural'Image (Next_Token), Ada.Strings.Both);
+   end New_Token;
+
    --  What close code actually reached the peer on the connection
-   --  just torn down. The fixture records it and forgets it on read,
-   --  so a stale value cannot carry one case's result into the next.
-   function Observed_Close return String is
+   --  that used this token.
+   --
+   --  The fixture waits for it rather than sampling: our own Close
+   --  returning proves only that WE finished tearing down, not that
+   --  the peer's reader has parsed the frame we sent on the way out.
+   function Observed_Close (Token : String) return String is
       C   : AHT.Websocket.Client.Client_Type;
       Msg : AHT.Websocket.Client.Message_Type;
    begin
-      AHT.Websocket.Client.Connect (C, Base & "/report");
-      AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
+      AHT.Websocket.Client.Connect (C, Base & "/report/" & Token);
+      AHT.Websocket.Client.Receive (C, Msg, Timeout => 10.0);
       declare
          Text : constant String := AHT.Bytes.To_String (Msg.Payload);
       begin
@@ -139,6 +154,16 @@ procedure Test_WS_Limits is
       end;
    exception
       when E : others =>
+         --  Tear it down even here. A client left open keeps a
+         --  receiver parked in Read, and scope exit waits for that
+         --  task — so returning without this would stall until the
+         --  fixture's hold expires, turning a reported failure into a
+         --  very slow one.
+         begin
+            AHT.Websocket.Client.Close (C, Timeout => 0.0);
+         exception
+            when others => null;
+         end;
          return "unavailable (" & Ada.Exceptions.Exception_Name (E) & ")";
    end Observed_Close;
 
@@ -156,13 +181,14 @@ procedure Test_WS_Limits is
    is
       C : AHT.Websocket.Client.Client_Type;
       Started, Ended : Time;
+      Token : constant String := New_Token;
    begin
       Sink.Reset;
       AHT.Websocket.Client.Set_On_Error (C, On_Error'Unrestricted_Access);
       AHT.Websocket.Client.Configure (C, L);
 
       begin
-         AHT.Websocket.Client.Connect (C, Base & Path);
+         AHT.Websocket.Client.Connect (C, Base & Path & "/" & Token);
       exception
          when E : others =>
             Fail (What & ": Connect raised "
@@ -190,7 +216,7 @@ procedure Test_WS_Limits is
       AHT.Websocket.Client.Close (C, Timeout => 1.0);
 
       declare
-         Seen : constant String := Observed_Close;
+         Seen : constant String := Observed_Close (Token);
       begin
          if Seen /= "close=" & Code then
             Fail (What & ": the peer saw """ & Seen

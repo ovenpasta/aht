@@ -24,14 +24,17 @@ The request path selects the behaviour:
 
   /echo   Ordinary echo, for the cases that need a working peer.
 
-  /report Sends back the close code observed on the previous
-          connection, then forgets it. Without this the tests could
-          only check the client's own diagnostic text, and swapping
-          1008 for 1009 in the client would go unnoticed — the code
-          that actually reaches the peer is the part of the contract
-          worth pinning. Forgetting it after one read is deliberate:
-          a stale value must not let a later case pass on the back of
-          an earlier one.
+  /report/<t>
+          Sends back the close code observed on the connection that
+          used token <t>, waiting a bounded time for it to arrive.
+          Without this the tests could only check the client's own
+          diagnostic text, and swapping 1008 for 1009 in the client
+          would go unnoticed — the code that actually reaches the peer
+          is the part of the contract worth pinning.
+
+Every path may carry a trailing /<token>, which is how a report is
+tied to the connection it describes rather than to whatever happened
+most recently.
 
 After the handshake the connection is held open and inbound frames are
 drained — so a client that fails is failing on its own limits, never
@@ -60,30 +63,42 @@ FRAG_PART = 64 * 1024
 FRAG_PARTS = 512      # 32 MiB total, far past the small ceilings tested
 FLOOD_COUNT = 20_000
 FLOOD_PAYLOAD = b"x" * 256
+REPORT_WAIT = 5.0     # how long /report waits for its token's close
 
 OP_TEXT = 0x1
 OP_BINARY = 0x2
 OP_CONT = 0x0
 OP_CLOSE = 0x8
 
-# The close code seen on the most recent connection, or None. Written
-# by a connection's reader thread, read by a later /report connection.
-_last_close: int | None = None
-_last_close_lock = threading.Lock()
+# Close codes observed, keyed by the token the test put in the path.
+#
+# Keyed rather than "the most recent one", and waited for rather than
+# sampled. A test cannot know when this fixture's reader has parsed the
+# Close frame -- its own Close returning proves only that IT finished
+# -- so a single non-blocking read here would sometimes answer before
+# the frame arrived. The token also means a late or duplicated close
+# can never be mistaken for another case's.
+_closes: dict[str, "int | None"] = {}
+_closes_cv = threading.Condition()
 
 
-def record_close(code: int | None) -> None:
-    global _last_close
-    with _last_close_lock:
-        _last_close = code
+def record_close(token: str, code: int | None) -> None:
+    if not token:
+        return
+    with _closes_cv:
+        # First close per token wins: a client may also send a routine
+        # close while tearing down, and that must not overwrite the
+        # diagnosis under test.
+        if token not in _closes:
+            _closes[token] = code
+            _closes_cv.notify_all()
 
 
-def take_close() -> int | None:
-    """Read and forget, so one case cannot inherit another's result."""
-    global _last_close
-    with _last_close_lock:
-        code, _last_close = _last_close, None
-    return code
+def await_close(token: str, timeout: float) -> "tuple[bool, int | None]":
+    """Wait (bounded) for this token's close, then forget it."""
+    with _closes_cv:
+        found = _closes_cv.wait_for(lambda: token in _closes, timeout)
+        return (found, _closes.pop(token) if found else None)
 
 
 def frame(fin: bool, opcode: int, payload: bytes) -> bytes:
@@ -118,6 +133,12 @@ def read_request(conn: socket.socket) -> str:
         if len(buf) > 65536:
             break
     return buf.decode("latin-1")
+
+
+def token_of(path: str) -> str:
+    """The trailing /<token> segment, or "" if there is none."""
+    parts = [p for p in path.split("/") if p]
+    return parts[1] if len(parts) > 1 else ""
 
 
 def handshake(conn: socket.socket, req: str) -> str:
@@ -188,17 +209,14 @@ def take_frame(buf: bytes) -> tuple[int, bytes, bytes] | None:
 
 
 def drain(
-    conn: socket.socket, stop: threading.Event, publish: bool
+    conn: socket.socket, stop: threading.Event, token: str
 ) -> None:
     """Keep reading so the client's writer never stalls on us, and
     parse what arrives so the Close frame it ends with is recorded.
 
-    Only the FIRST close on a connection is published, and /report
-    connections publish nothing at all. Both matter: a client may send
-    a second, ordinary close while tearing down — and /report's own
-    client certainly does — so recording the last one would let a
-    routine 1000 overwrite the diagnosis under test, or carry into the
-    next case.
+    Publishes under `token`, or not at all when there is none — which
+    is how /report's own client, whose close is of no interest, stays
+    out of the record.
     """
     conn.settimeout(0.25)
     seen_close = False
@@ -219,11 +237,12 @@ def drain(
             if taken is None:
                 break
             opcode, payload, buf = taken
-            if opcode == OP_CLOSE and publish and not seen_close:
+            if opcode == OP_CLOSE and not seen_close:
                 seen_close = True
                 record_close(
+                    token,
                     int.from_bytes(payload[:2], "big")
-                    if len(payload) >= 2 else None
+                    if len(payload) >= 2 else None,
                 )
 
 
@@ -237,7 +256,8 @@ def serve(conn: socket.socket) -> None:
     stop = threading.Event()
     reader = threading.Thread(
         target=drain,
-        args=(conn, stop, not path.startswith("/report")),
+        args=(conn, stop,
+              "" if path.startswith("/report") else token_of(path)),
         daemon=True,
     )
     reader.start()
@@ -258,15 +278,14 @@ def serve(conn: socket.socket) -> None:
                 conn.sendall(frame(True, OP_BINARY, FLOOD_PAYLOAD))
 
         elif path.startswith("/report"):
-            code = take_close()
-            conn.sendall(
-                frame(
-                    True,
-                    OP_TEXT,
-                    (f"close={code}" if code is not None
-                     else "close=none").encode("ascii"),
-                )
-            )
+            found, code = await_close(token_of(path), REPORT_WAIT)
+            if not found:
+                answer = "close=timeout"
+            elif code is None:
+                answer = "close=none"
+            else:
+                answer = f"close={code}"
+            conn.sendall(frame(True, OP_TEXT, answer.encode("ascii")))
 
         elif path.startswith("/echo"):
             pass          # the drain thread is all this one needs
