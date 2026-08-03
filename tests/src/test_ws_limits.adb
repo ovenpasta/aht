@@ -26,7 +26,15 @@
 --       which only happens if the allowance is tracked across parts:
 --       every individual part here is far below the limit.
 --    6. Flooding a client that never drains fails with a *different*
---       diagnosis — backpressure, not size.
+--       diagnosis — backpressure, not size — by message count.
+--    7. The same by queued bytes, with the count limit set beyond the
+--       entire flood so only the byte budget can be what acted.
+--    8. Pull_Only does not fire an installed On_Message.
+--
+--  Every overrun case also checks the close code that reached the
+--  peer, not just the local diagnostic: swapping 1008 for 1009 in the
+--  client is invisible from this side otherwise, and the code is the
+--  half of the contract the peer can see.
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;
@@ -35,6 +43,7 @@ with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Text_IO; use Ada.Text_IO;
 
+with AHT.Bytes;
 with AHT.Websocket;
 with AHT.Websocket.Client;
 
@@ -113,12 +122,36 @@ procedure Test_WS_Limits is
    function Mentions (Haystack, Needle : String) return Boolean is
      (Ada.Strings.Fixed.Index (Haystack, Needle) /= 0);
 
-   --  Drive one overrun scenario and report what the receiver said.
+   --  What close code actually reached the peer on the connection
+   --  just torn down. The fixture records it and forgets it on read,
+   --  so a stale value cannot carry one case's result into the next.
+   function Observed_Close return String is
+      C   : AHT.Websocket.Client.Client_Type;
+      Msg : AHT.Websocket.Client.Message_Type;
+   begin
+      AHT.Websocket.Client.Connect (C, Base & "/report");
+      AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
+      declare
+         Text : constant String := AHT.Bytes.To_String (Msg.Payload);
+      begin
+         AHT.Websocket.Client.Close (C, Timeout => 1.0);
+         return Text;
+      end;
+   exception
+      when E : others =>
+         return "unavailable (" & Ada.Exceptions.Exception_Name (E) & ")";
+   end Observed_Close;
+
+   --  Drive one overrun scenario: check what the receiver reported
+   --  locally AND what it put on the wire. The local text alone would
+   --  not catch the two close codes being swapped, and the code is the
+   --  half of the contract the peer can actually see.
    procedure Expect_Failure
      (What    : String;
       Path    : String;
       L       : AHT.Websocket.Client.Limits;
       Marker  : String;
+      Code    : String;
       Bound   : Duration := 10.0)
    is
       C : AHT.Websocket.Client.Client_Type;
@@ -155,6 +188,15 @@ procedure Test_WS_Limits is
       end if;
 
       AHT.Websocket.Client.Close (C, Timeout => 1.0);
+
+      declare
+         Seen : constant String := Observed_Close;
+      begin
+         if Seen /= "close=" & Code then
+            Fail (What & ": the peer saw """ & Seen
+                  & """, expected ""close=" & Code & """");
+         end if;
+      end;
    end Expect_Failure;
 
 begin
@@ -282,7 +324,8 @@ begin
    begin
       L.Max_Message_Bytes := 64 * 1024;
       Expect_Failure
-        ("huge-header", "/huge", L, "MESSAGE_TOO_BIG", Bound => 5.0);
+        ("huge-header", "/huge", L, "MESSAGE_TOO_BIG", "1009",
+         Bound => 5.0);
    end;
 
    --  Case 5: a fragment sequence crossing the ceiling. Every part is
@@ -293,19 +336,83 @@ begin
    begin
       L.Max_Message_Bytes := 256 * 1024;
       Expect_Failure
-        ("fragment-total", "/frag", L, "MESSAGE_TOO_BIG");
+        ("fragment-total", "/frag", L, "MESSAGE_TOO_BIG", "1009");
    end;
 
-   --  Case 6: backpressure. The frames are small and legal, and the
-   --  ceiling is generous — what fails is that nothing is draining.
+   --  Case 6: backpressure by message count. The frames are small and
+   --  legal, and the size ceiling is generous — what fails is that
+   --  nothing is draining. The byte budget is deliberately far out of
+   --  reach so this case can only be the count limit acting.
    declare
       L : AHT.Websocket.Client.Limits;
    begin
       L.Delivery           := AHT.Websocket.Client.Pull_Only;
       L.Max_Message_Bytes  := 32 * 1024 * 1024;
       L.Max_Inbox_Messages := 16;
-      L.Max_Inbox_Bytes    := 64 * 1024;
-      Expect_Failure ("inbox-flood", "/flood", L, "inbox full");
+      L.Max_Inbox_Bytes    := 32 * 1024 * 1024;
+      Expect_Failure ("inbox-count", "/flood", L, "inbox full", "1008");
+   end;
+
+   --  Case 7: backpressure by queued bytes.
+   --
+   --  The count limit is set beyond the whole flood, so it cannot be
+   --  what acts here — only the byte budget can. That matters: with a
+   --  merely large count the byte check could be deleted and the
+   --  count limit would still fire, later, reporting the same thing.
+   --  This way removing it leaves nothing to refuse the flood at all.
+   declare
+      L : AHT.Websocket.Client.Limits;
+   begin
+      L.Delivery           := AHT.Websocket.Client.Pull_Only;
+      L.Max_Message_Bytes  := 32 * 1024 * 1024;
+      L.Max_Inbox_Messages := 32_768;       --  > the fixture's flood
+      L.Max_Inbox_Bytes    := 4 * 1024;     --  ~16 messages' worth
+      Expect_Failure ("inbox-bytes", "/flood", L, "inbox full", "1008");
+   end;
+
+   --  Case 8: Pull_Only does not fire On_Message. A callback outliving
+   --  a reconfiguration must not start delivering behind the
+   --  application's back, so this installs one and requires silence
+   --  from it while Receive still works.
+   declare
+      C   : AHT.Websocket.Client.Client_Type;
+      L   : AHT.Websocket.Client.Limits;
+      Msg : AHT.Websocket.Client.Message_Type;
+   begin
+      Sink.Reset;
+      L.Delivery := AHT.Websocket.Client.Pull_Only;
+      AHT.Websocket.Client.Configure (C, L);
+      AHT.Websocket.Client.Set_On_Message (C, On_Message'Unrestricted_Access);
+
+      begin
+         AHT.Websocket.Client.Connect (C, Echo);
+      exception
+         when E : others =>
+            Fail ("pull-only: Connect raised "
+                  & Ada.Exceptions.Exception_Name (E));
+            return;
+      end;
+
+      AHT.Websocket.Client.Send_Text (C, "pull me");
+      begin
+         AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
+      exception
+         when E : others =>
+            Fail ("pull-only: Receive raised "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+
+      --  Settle: the callback would fire from the receiver task right
+      --  after the push, so give it every chance to before concluding
+      --  it stayed quiet.
+      delay 0.2;
+      if Sink.Messages /= 0 then
+         Fail ("pull-only: On_Message fired"
+               & Natural'Image (Sink.Messages)
+               & " time(s) under Pull_Only");
+      end if;
+
+      AHT.Websocket.Client.Close (C);
    end;
 
    if Failures = 0 then

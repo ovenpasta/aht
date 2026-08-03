@@ -978,7 +978,14 @@ package body AHT.Websocket.Client is
 
                --  Not reached for a refused push: pull and push
                --  consumers must observe the same accepted set.
-               Fire_On_Message (Msg);
+               --
+               --  Pull_Only means what it says. A callback installed
+               --  before the mode was chosen -- or left installed
+               --  across a reconfiguration -- must not start firing
+               --  again behind the application's back.
+               if S.Delivery /= Pull_Only then
+                  Fire_On_Message (Msg);
+               end if;
             end;
          end Deliver;
 

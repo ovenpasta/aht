@@ -24,9 +24,19 @@ The request path selects the behaviour:
 
   /echo   Ordinary echo, for the cases that need a working peer.
 
-After the handshake the connection is held open, and inbound bytes are
-drained and discarded — so a client that fails is failing on its own
-limits, never because this peer went away or stopped reading.
+  /report Sends back the close code observed on the previous
+          connection, then forgets it. Without this the tests could
+          only check the client's own diagnostic text, and swapping
+          1008 for 1009 in the client would go unnoticed — the code
+          that actually reaches the peer is the part of the contract
+          worth pinning. Forgetting it after one read is deliberate:
+          a stale value must not let a later case pass on the back of
+          an earlier one.
+
+After the handshake the connection is held open and inbound frames are
+drained — so a client that fails is failing on its own limits, never
+because this peer went away or stopped reading. Draining also parses,
+so the Close frame the client sends on its way out is recorded.
 
 Prints `READY wslimits 127.0.0.1:8777` once listening.
 """
@@ -54,6 +64,26 @@ FLOOD_PAYLOAD = b"x" * 256
 OP_TEXT = 0x1
 OP_BINARY = 0x2
 OP_CONT = 0x0
+OP_CLOSE = 0x8
+
+# The close code seen on the most recent connection, or None. Written
+# by a connection's reader thread, read by a later /report connection.
+_last_close: int | None = None
+_last_close_lock = threading.Lock()
+
+
+def record_close(code: int | None) -> None:
+    global _last_close
+    with _last_close_lock:
+        _last_close = code
+
+
+def take_close() -> int | None:
+    """Read and forget, so one case cannot inherit another's result."""
+    global _last_close
+    with _last_close_lock:
+        code, _last_close = _last_close, None
+    return code
 
 
 def frame(fin: bool, opcode: int, payload: bytes) -> bytes:
@@ -118,17 +148,83 @@ def handshake(conn: socket.socket, req: str) -> str:
     return path
 
 
-def drain(conn: socket.socket, stop: threading.Event) -> None:
-    """Keep reading so the client's writer never stalls on us."""
+def take_frame(buf: bytes) -> tuple[int, bytes, bytes] | None:
+    """Split one client frame off `buf`.
+
+    Returns (opcode, payload, rest) or None if `buf` does not yet hold
+    a whole frame. Client frames are always masked (RFC 6455 §5.3), so
+    the mask is not optional here.
+    """
+    if len(buf) < 2:
+        return None
+    b0, b1 = buf[0], buf[1]
+    opcode = b0 & 0x0F
+    masked = bool(b1 & 0x80)
+    n = b1 & 0x7F
+    i = 2
+    if n == 126:
+        if len(buf) < i + 2:
+            return None
+        n = int.from_bytes(buf[i:i + 2], "big")
+        i += 2
+    elif n == 127:
+        if len(buf) < i + 8:
+            return None
+        n = int.from_bytes(buf[i:i + 8], "big")
+        i += 8
+    key = b""
+    if masked:
+        if len(buf) < i + 4:
+            return None
+        key = buf[i:i + 4]
+        i += 4
+    if len(buf) < i + n:
+        return None
+    body = bytearray(buf[i:i + n])
+    if masked:
+        for j in range(n):
+            body[j] ^= key[j % 4]
+    return opcode, bytes(body), buf[i + n:]
+
+
+def drain(
+    conn: socket.socket, stop: threading.Event, publish: bool
+) -> None:
+    """Keep reading so the client's writer never stalls on us, and
+    parse what arrives so the Close frame it ends with is recorded.
+
+    Only the FIRST close on a connection is published, and /report
+    connections publish nothing at all. Both matter: a client may send
+    a second, ordinary close while tearing down — and /report's own
+    client certainly does — so recording the last one would let a
+    routine 1000 overwrite the diagnosis under test, or carry into the
+    next case.
+    """
     conn.settimeout(0.25)
+    seen_close = False
+    buf = b""
     while not stop.is_set():
         try:
-            if not conn.recv(65536):
+            chunk = conn.recv(65536)
+            if not chunk:
                 break
+            buf += chunk
         except TimeoutError:
             continue
         except OSError:
             break
+
+        while True:
+            taken = take_frame(buf)
+            if taken is None:
+                break
+            opcode, payload, buf = taken
+            if opcode == OP_CLOSE and publish and not seen_close:
+                seen_close = True
+                record_close(
+                    int.from_bytes(payload[:2], "big")
+                    if len(payload) >= 2 else None
+                )
 
 
 def serve(conn: socket.socket) -> None:
@@ -139,7 +235,11 @@ def serve(conn: socket.socket) -> None:
         return
 
     stop = threading.Event()
-    reader = threading.Thread(target=drain, args=(conn, stop), daemon=True)
+    reader = threading.Thread(
+        target=drain,
+        args=(conn, stop, not path.startswith("/report")),
+        daemon=True,
+    )
     reader.start()
 
     try:
@@ -157,6 +257,17 @@ def serve(conn: socket.socket) -> None:
             for _ in range(FLOOD_COUNT):
                 conn.sendall(frame(True, OP_BINARY, FLOOD_PAYLOAD))
 
+        elif path.startswith("/report"):
+            code = take_close()
+            conn.sendall(
+                frame(
+                    True,
+                    OP_TEXT,
+                    (f"close={code}" if code is not None
+                     else "close=none").encode("ascii"),
+                )
+            )
+
         elif path.startswith("/echo"):
             pass          # the drain thread is all this one needs
 
@@ -168,7 +279,16 @@ def serve(conn: socket.socket) -> None:
     except OSError:
         pass              # client tore the connection down: expected
     finally:
+        # Let the reader finish on its own before pulling the socket
+        # out from under it. It exits as soon as the peer closes, and
+        # the bytes still in flight at that moment include the Close
+        # frame carrying the diagnosis these tests assert on — closing
+        # here first would race exactly the thing being observed.
+        # Sends can fail long before the client is done talking, so
+        # this cannot be skipped just because the write side broke.
+        reader.join(timeout=5.0)
         stop.set()
+        reader.join(timeout=1.0)
         try:
             conn.close()
         except OSError:

@@ -135,10 +135,19 @@ package AHT.Websocket.Client is
       Msg     : out Message_Type;
       Timeout : Duration := Duration'Last);
 
-   --  Push API: callbacks fire from inside the receiver task on
-   --  every inbound message / close / fatal error. Both modes
-   --  (push + pull) are active simultaneously — Receive still
-   --  sees every message and Closed_Error / timeouts still apply.
+   --  Push API: callbacks fire from inside the receiver task as
+   --  frames arrive.
+   --
+   --  Which of them fire depends on the delivery mode, and only
+   --  On_Message is affected by it: under Both it fires alongside the
+   --  inbox, so Receive still sees every accepted message; under
+   --  Callback_Only it is the sole consumer; under Pull_Only it does
+   --  not fire at all, even if one is installed. On_Close and
+   --  On_Error are not message delivery and fire in every mode.
+   --
+   --  Under Both, a message the inbox refuses is not passed to the
+   --  callback either — pull and push consumers observe exactly the
+   --  same accepted set.
    --
    --  Callbacks run on the receiver task, so they must be
    --  task-safe and must not block: the receiver cannot reclaim a
