@@ -172,6 +172,13 @@ package AHT.Websocket.Client is
 
    function Selected_Subprotocol (Self : Client_Type) return String;
 
+   --  How many connections this client has successfully established:
+   --  0 before the first, then one more on each. Reserved numbers are
+   --  not counted, so a failed attempt does not advance it — which is
+   --  what makes it usable as "am I looking at the same connection I
+   --  was?" across a reconnect.
+   function Generation (Self : Client_Type) return Natural;
+
 private
 
    --  Connection state machine (RFC 6455 §1.4), scoped to ONE
@@ -348,7 +355,9 @@ private
       --  MUST run on every failure after a successful Begin_Connect,
       --  or the client is stranded in Connecting. The attempt was by
       --  definition unpublished, so the client returns to Idle and
-      --  the caller may retry.
+      --  the caller may retry — and that retry now genuinely works,
+      --  because it builds a fresh session rather than re-dialing a
+      --  transport whose single-use latch is already set.
       --
       --  Takes the attempt's reserved generation and does nothing
       --  unless that attempt is still the one in flight. Without that
@@ -421,6 +430,7 @@ private
       --  Queries, answered without a borrow.
       function  Is_Open return Boolean;
       function  State return Client_State;
+      function  Generation return Natural;
       --  Copied out of the session by Publish, so reading it never
       --  races reclamation.
       function  Protocol return String;
@@ -430,9 +440,12 @@ private
       St            : Client_State   := Idle;
       Leases        : Natural := 0;
       Admitting     : Boolean := False;
-      --  Two counters, deliberately: a failed attempt consumes a
-      --  reserved number without publishing it, so Next_Gen has gaps
-      --  while Published_Gen advances only on success.
+      --  Two counters, deliberately, and they count different things.
+      --  Next_Gen is handed out per ATTEMPT and is never reused, so
+      --  it identifies an attempt's cleanup even long after the
+      --  attempt is over; it has gaps wherever an attempt failed.
+      --  Published_Gen counts CONNECTIONS and has none, which is what
+      --  the public Generation reports.
       Next_Gen      : Natural := 0;
       Published_Gen : Natural := 0;
       Done          : Boolean := True;    --  no generation in flight

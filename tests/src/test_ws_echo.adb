@@ -213,24 +213,52 @@ begin
       AHT.Websocket.Client.Close (C);
    end;
 
-   --  Case 6: single-use lifecycle. After Close, a second Connect
-   --  on the same Client_Type must fail upfront with
-   --  Handshake_Error — not silently re-dial and crash inside the
-   --  one-shot Receiver_Task.
+   --  Case 6: a client is reusable after Close.
+   --
+   --  This case used to assert the opposite, and pinned the
+   --  single-use lifecycle: the receiver was a one-shot task, so a
+   --  second Connect had to be refused upfront rather than allowed to
+   --  crash inside it. That restriction is what the per-generation
+   --  session work removed — the receiver persists and the connection
+   --  state is heap-owned per attempt — so the assertion is inverted
+   --  rather than deleted. Generation is what makes "it really
+   --  reconnected" observable: it counts successful connections, so a
+   --  second one must read 2 and not 1.
    declare
       C : AHT.Websocket.Client.Client_Type;
+      Msg : AHT.Websocket.Client.Message_Type;
    begin
       AHT.Websocket.Client.Connect (C, "ws://127.0.0.1:8765/");
+      if AHT.Websocket.Client.Generation (C) /= 1 then
+         Fail ("reuse: first Generation ="
+               & Natural'Image (AHT.Websocket.Client.Generation (C)));
+      end if;
       AHT.Websocket.Client.Close (C);
+
       begin
          AHT.Websocket.Client.Connect (C, "ws://127.0.0.1:8765/");
-         Fail ("reuse: second Connect returned without raising");
       exception
-         when AHT.Websocket.Handshake_Error => null;
          when E : others =>
-            Fail ("reuse: wrong exception "
-                  & Ada.Exceptions.Exception_Name (E));
+            Fail ("reuse: second Connect raised "
+                  & Ada.Exceptions.Exception_Name (E) & ": "
+                  & Ada.Exceptions.Exception_Message (E));
       end;
+
+      if AHT.Websocket.Client.Generation (C) /= 2 then
+         Fail ("reuse: second Generation ="
+               & Natural'Image (AHT.Websocket.Client.Generation (C))
+               & " (expected 2)");
+      end if;
+
+      --  And it is a working connection, not merely an accepted call.
+      AHT.Websocket.Client.Send_Text (C, "second time");
+      AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
+      if To_String (Msg.Payload) /= "second time" then
+         Fail ("reuse: echo on the second connection = """
+               & To_String (Msg.Payload) & """");
+      end if;
+
+      AHT.Websocket.Client.Close (C);
    end;
 
    --  Case 7: callbacks fire from the receiver task. The On_Message

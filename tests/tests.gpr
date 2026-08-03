@@ -48,6 +48,7 @@ project Tests is
       "test_ws_ping.adb",
       "test_ws_send_closed.adb",
       "test_ws_limits.adb",
+      "test_ws_reconnect.adb",
       "test_ws_abort.adb",
       "test_ws_tls.adb",
       "test_tls_version.adb",

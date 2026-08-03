@@ -324,7 +324,15 @@ package body AHT.Websocket.Client is
          --  Every refusal leaves the object exactly as it was. A
          --  rejected Connect must not burn a generation number, move
          --  the state machine, or commit a delivery mode.
-         if St /= Idle then
+         --
+         --  Disconnected is admitted alongside Idle: a client whose
+         --  connection has been fully reclaimed is as ready to dial as
+         --  one that never has. What stays refused is Connecting (an
+         --  attempt is already in flight) and Open or Closing — a live
+         --  connection is never silently dropped to make room for a
+         --  new one; the caller closes it first, or asks for the
+         --  drain-and-redial that Reconnect will provide.
+         if St not in Idle | Disconnected then
             Gen    := 0;
             L      := Pending;
             Result := Wrong_State;
@@ -378,7 +386,15 @@ package body AHT.Websocket.Client is
       procedure Publish (S : Session_Access) is
       begin
          Cur           := S;
-         Published_Gen := S.Generation;
+         --  Counted, not copied from the session's reserved number.
+         --  Those two are different things: reservations are handed
+         --  out per ATTEMPT and have gaps where attempts failed,
+         --  which is exactly what makes them useful for identifying
+         --  an attempt's cleanup. Exposing them would mean a client
+         --  whose first dial was refused reports "generation 2" for
+         --  its first connection, which is not what the number is
+         --  for.
+         Published_Gen := Published_Gen + 1;
          Proto         := S.Selected_Protocol;
          Admitting     := True;
          Forced        := False;
@@ -503,6 +519,8 @@ package body AHT.Websocket.Client is
       function Is_Open return Boolean is (St = Open);
 
       function State return Client_State is (St);
+
+      function Generation return Natural is (Published_Gen);
 
       function Protocol return String is (To_String (Proto));
 
@@ -1566,6 +1584,9 @@ package body AHT.Websocket.Client is
 
    function Selected_Subprotocol (Self : Client_Type) return String is
      (Self.Ctl.Protocol);
+
+   function Generation (Self : Client_Type) return Natural is
+     (Self.Ctl.Generation);
 
    procedure Send_Text
      (Self : in out Client_Type;
