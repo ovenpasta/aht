@@ -352,12 +352,20 @@ package body AHT.Websocket.Client is
             return;
          end if;
 
+         --  The one allocating step goes first. Copying the
+         --  parameters can raise, and it must not be able to do so
+         --  after the state machine has moved: the caller only
+         --  creates the owner that would release admission once this
+         --  has returned Admitted, so a failure past that point would
+         --  strand the client in Connecting with nobody to clear it.
+         Pending_Conn := P;
+
+         --  Nothing below can fail.
          Next_Gen     := Next_Gen + 1;
          Gen          := Next_Gen;
          St           := Connecting;
          L            := Pending;
          Active_Mode  := Pending.Delivery;
-         Pending_Conn := P;
          Result       := Admitted;
       end Begin_Connect;
 
@@ -403,6 +411,22 @@ package body AHT.Websocket.Client is
 
       procedure Publish (S : Session_Access) is
       begin
+         --  Both allocating copies happen before ANY marker moves.
+         --  If either raises, publication simply has not happened:
+         --  the connecting task's owner still sees the session as
+         --  un-handed-off and frees it, and the receiver treats the
+         --  failed rendezvous as no session at all. Doing this after
+         --  setting Cur or Handed_Off_Gen would leave the two sides
+         --  disagreeing about who owns the session, and nobody
+         --  reclaiming it.
+         Proto      := S.Selected_Protocol;
+         --  Promoted here and nowhere else, so what Reconnect repeats
+         --  is the last connect that actually worked rather than the
+         --  last one attempted.
+         Saved_Conn := Pending_Conn;
+
+         --  Nothing below can fail.
+         Has_Saved     := True;
          Cur           := S;
          --  Counted, not copied from the session's reserved number.
          --  Those two are different things: reservations are handed
@@ -413,16 +437,10 @@ package body AHT.Websocket.Client is
          --  its first connection, which is not what the number is
          --  for.
          Published_Gen := Published_Gen + 1;
-         Proto         := S.Selected_Protocol;
          Admitting     := True;
          Forced        := False;
          Done          := False;
          Handed_Off_Gen := S.Generation;
-         --  Promoted here and nowhere else, so what Reconnect repeats
-         --  is the last connect that actually worked rather than the
-         --  last one attempted.
-         Saved_Conn    := Pending_Conn;
-         Has_Saved     := True;
          St            := Open;
       end Publish;
 
@@ -550,7 +568,13 @@ package body AHT.Websocket.Client is
 
       function Generation return Natural is (Published_Gen);
 
-      function Protocol return String is (To_String (Proto));
+      --  Answers only while there is a connection to answer for. The
+      --  value is staged by Publish, and Publish stages before it
+      --  moves any marker, so without this guard a client could
+      --  briefly report the subprotocol of a connection that had not
+      --  been established yet.
+      function Protocol return String is
+        (if St in Open | Closing then To_String (Proto) else "");
 
       procedure Set_Receiver_Id (Id : Ada.Task_Identification.Task_Id) is
       begin
@@ -843,8 +867,9 @@ package body AHT.Websocket.Client is
       --  everything per-connection is local to Run_Session, so a
       --  second generation cannot inherit the first one's terminal
       --  Stop_Loop or a half-assembled fragment.
-      Conn     : Client_Access  := null;
-      Cur_Sess : Session_Access := null;
+      Conn         : Client_Access  := null;
+      Cur_Sess     : Session_Access := null;
+      Took_Session : Boolean        := False;
 
       --  Fire a user-installed callback inside a guard so the
       --  receiver task keeps draining the wire if the callback
@@ -1215,6 +1240,18 @@ package body AHT.Websocket.Client is
                   end if;
                end if;
             exception
+               when AHT.Transport.Aborted_Error =>
+                  --  Split out from the others on purpose. An abort is
+                  --  how a Close or Reconnect stops us, so when the
+                  --  application asked for the teardown this is the
+                  --  mechanism working, not a fault to report. A
+                  --  peer-driven abort still reaches On_Error.
+                  if not Conn.Ctl.Draining_Forced then
+                     Fire_On_Error
+                       ("AHT.TRANSPORT.ABORTED_ERROR: transport I/O "
+                        & "cancelled");
+                  end if;
+                  Stop_Loop := True;
                when E : AHT.Websocket.Message_Too_Big =>
                   --  The peer declared more than this endpoint will
                   --  hold. Nothing malformed happened, so it gets its
@@ -1228,7 +1265,6 @@ package body AHT.Websocket.Client is
                when E : AHT.Websocket.Protocol_Error
                   | AHT.HTTP.Protocol_Error
                   | AHT.Transport.Transport_Error
-                  | AHT.Transport.Aborted_Error
                =>
                   --  Any of these means the connection is unusable.
                   --  Fire On_Error and exit; reclamation below wakes
@@ -1308,37 +1344,58 @@ package body AHT.Websocket.Client is
 
    begin
       loop
-         select
-            accept Start (Owner : Client_Access; Sess : Session_Access) do
-               Conn     := Owner;
-               Cur_Sess := Sess;
-               --  Publishing inside the rendezvous makes it atomic
-               --  with taking ownership, so a receiver that hits
-               --  instant EOF cannot start reclaiming a session the
-               --  controller has not published yet. It is also what
-               --  records the handoff for the connecting task's
-               --  cleanup -- see Attempt_Owner.
-               Conn.Ctl.Publish (Sess);
-               --  Current_Task inside an accept body is the ACCEPTING
-               --  task, so this is the receiver naming itself.
-               Conn.Ctl.Set_Receiver_Id
-                 (Ada.Task_Identification.Current_Task);
-            end Start;
-         or
-            terminate;
-         end select;
+         Took_Session := False;
 
          begin
-            Run_Session (Cur_Sess);
+            select
+               accept Start
+                 (Owner : Client_Access; Sess : Session_Access)
+               do
+                  Conn     := Owner;
+                  Cur_Sess := Sess;
+                  --  Publishing inside the rendezvous makes it atomic
+                  --  with taking ownership, so a receiver that hits
+                  --  instant EOF cannot start reclaiming a session the
+                  --  controller has not published yet. It is also what
+                  --  records the handoff for the connecting task's
+                  --  cleanup -- see Attempt_Owner.
+                  Conn.Ctl.Publish (Sess);
+                  --  Current_Task inside an accept body is the
+                  --  ACCEPTING task, so this is the receiver naming
+                  --  itself.
+                  Conn.Ctl.Set_Receiver_Id
+                    (Ada.Task_Identification.Current_Task);
+               end Start;
+               Took_Session := True;
+            or
+               terminate;
+            end select;
          exception
             when others =>
-               --  Never let a generation kill the task: the client
-               --  outlives its connections.
-               null;
+               --  The rendezvous body failed, so publication did not
+               --  happen -- Publish does everything that can raise
+               --  before it moves a single marker. The session is
+               --  therefore still the connecting task's, and its
+               --  cleanup will free it; touching it here would be a
+               --  double free. Drop it and wait for the next Start
+               --  rather than letting one bad handoff end the task.
+               Cur_Sess     := null;
+               Took_Session := False;
          end;
 
-         Reclaim (Cur_Sess);
-         Cur_Sess := null;
+         if Took_Session then
+            begin
+               Run_Session (Cur_Sess);
+            exception
+               when others =>
+                  --  Never let a generation kill the task: the client
+                  --  outlives its connections.
+                  null;
+            end;
+
+            Reclaim (Cur_Sess);
+            Cur_Sess := null;
+         end if;
       end loop;
    end Receiver_Task;
 
@@ -1373,13 +1430,14 @@ package body AHT.Websocket.Client is
          CA_Path      => To_Unbounded_String (CA_Path));
    begin
       --  Admission. One protected action decides whether an attempt
-      --  may start and reserves this attempt's generation number. A
-      --  client is still single-use once a generation has been
-      --  published: after a close the state is Disconnected, which
-      --  admission refuses. A *failed* attempt returns the client to
-      --  Idle, so retries work — and now really do, because the
-      --  retry gets a fresh session with fresh transports rather than
-      --  re-dialing an already-latched one.
+      --  may start, reserves its generation number and takes the
+      --  snapshot the session will be built from. Idle and
+      --  Disconnected are admitted; Connecting, Open and Closing are
+      --  not, so a live connection is never displaced by a bare
+      --  Connect. A failed attempt returns the client to where
+      --  admission found it, and that retry genuinely works because
+      --  it builds a fresh session with fresh transports rather than
+      --  re-dialing one whose single-use latch is already set.
       Self.Ctl.Begin_Connect (Params, Gen, Lim, Adm);
       case Adm is
          when Admitted =>
@@ -1391,10 +1449,12 @@ package body AHT.Websocket.Client is
                 & "installed; every message would be discarded";
          when Wrong_State =>
             raise AHT.Websocket.Handshake_Error
-              with "Websocket.Client.Connect: Client_Type has "
-                & "already been Connect'd (state = "
+              with "Websocket.Client.Connect: refused in state "
                 & Client_State'Image (Self.Ctl.State)
-                & "); declare a fresh Client per connection";
+                & ". Connect dials only from Idle or Disconnected; a "
+                & "live connection is never displaced silently — "
+                & "Close it first, or use Reconnect, which drains it "
+                & "and redials";
       end case;
 
       --  Declared only once admission has succeeded, so a refused

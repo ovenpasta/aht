@@ -31,6 +31,9 @@
 --    4. Telling Close not to wait for the peer still sends the Close
 --       frame when nothing is in the way. "Do not wait" must not
 --       quietly become "do not try".
+--    5. A teardown the caller asked for is not reported through
+--       On_Error. The abort that ends it is the mechanism, not a
+--       fault; a peer-driven one still reaches the callback.
 --
 --  Not covered: the close frame's own write parking on a full socket
 --  buffer. Reaching it needs a writer that SUCCEEDS while leaving the
@@ -43,6 +46,7 @@ with Ada.Command_Line;
 with Ada.Exceptions;
 with Ada.Text_IO; use Ada.Text_IO;
 
+with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Unchecked_Deallocation;
 
 with AHT.Bytes;
@@ -62,6 +66,37 @@ procedure Test_WS_Teardown is
       Put_Line ("test_ws_teardown: FAIL — " & Msg);
       Failures := Failures + 1;
    end Fail;
+
+   --  Counts what the receiver reports as an error.
+   protected Errors is
+      procedure Note (Message : String);
+      procedure Reset;
+      function  Count return Natural;
+      function  Last return String;
+   private
+      N    : Natural := 0;
+      Text : Unbounded_String;
+   end Errors;
+
+   protected body Errors is
+      procedure Note (Message : String) is
+      begin
+         N    := N + 1;
+         Text := To_Unbounded_String (Message);
+      end Note;
+      procedure Reset is
+      begin
+         N    := 0;
+         Text := Null_Unbounded_String;
+      end Reset;
+      function Count return Natural is (N);
+      function Last return String is (To_String (Text));
+   end Errors;
+
+   procedure On_Error (Message : String) is
+   begin
+      Errors.Note (Message);
+   end On_Error;
 
    --  Lets the test hold a callback inside the receiver for as long
    --  as it needs, and know for a fact that it is in there. The hold
@@ -434,6 +469,45 @@ begin
          Fail ("no-wait-close: raised "
                & Ada.Exceptions.Exception_Name (Err) & ": "
                & Ada.Exceptions.Exception_Message (Err));
+   end;
+
+   --  Case 5: a teardown the caller asked for is not an error.
+   --
+   --  Close stops a parked receiver by aborting its transport I/O, so
+   --  the receiver sees Aborted_Error on the way out. Reporting that
+   --  through On_Error would tell the application its connection
+   --  failed every single time it closed one — the abort is the
+   --  mechanism working, not a fault. A peer-driven abort still
+   --  reaches On_Error; only the caller's own does not.
+   --
+   --  The peer here drains but never echoes a Close, so the handshake
+   --  can only end by the caller aborting it.
+   declare
+      Q : AHT.Websocket.Client.Client_Type;
+   begin
+      Errors.Reset;
+      AHT.Websocket.Client.Set_On_Error (Q, On_Error'Unrestricted_Access);
+
+      begin
+         AHT.Websocket.Client.Connect (Q, Hostile & "/echo/quiet");
+      exception
+         when E : others =>
+            Fail ("forced-abort: Connect raised "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+
+      AHT.Websocket.Client.Close (Q, Timeout => 0.1);
+
+      --  Settle: On_Error would fire from the receiver during the
+      --  teardown, so give it every chance before concluding silence.
+      delay 0.3;
+
+      if Errors.Count /= 0 then
+         Fail ("forced-abort: On_Error fired"
+               & Natural'Image (Errors.Count)
+               & " time(s) for a teardown the caller asked for: "
+               & Errors.Last);
+      end if;
    end;
 
    if Failures = 0 then

@@ -74,12 +74,18 @@ procedure Test_WS_Reconnect is
       --  and that would re-enter the callback forever otherwise.
       procedure Claim (First : out Boolean);
       procedure Note (What : String; Ex : String);
-      function  Ran return Boolean;
+      --  Set once the callback has finished ALL of its checks. The
+      --  main task waits on this rather than on "something was
+      --  recorded": the four calls are made one after another, so a
+      --  reader woken by the first would read a partial report, and
+      --  would go on to Close while the callback was still sending.
+      procedure Note_Complete;
+      function  Done return Boolean;
       function  Report return String;
    private
-      Claimed : Boolean := False;
-      Fired   : Boolean := False;
-      Text    : Unbounded_String;
+      Claimed  : Boolean := False;
+      Finished : Boolean := False;
+      Text     : Unbounded_String;
    end Reentry;
 
    protected body Reentry is
@@ -90,10 +96,13 @@ procedure Test_WS_Reconnect is
       end Claim;
       procedure Note (What : String; Ex : String) is
       begin
-         Fired := True;
          Append (Text, What & "=" & Ex & " ");
       end Note;
-      function Ran return Boolean is (Fired);
+      procedure Note_Complete is
+      begin
+         Finished := True;
+      end Note_Complete;
+      function Done return Boolean is (Finished);
       function Report return String is (To_String (Text));
    end Reentry;
 
@@ -519,6 +528,8 @@ begin
             when E : others =>
                Reentry.Note ("send", Ada.Exceptions.Exception_Name (E));
          end;
+
+         Reentry.Note_Complete;
       end On_Message;
 
       Waited : Duration := 0.0;
@@ -528,14 +539,16 @@ begin
       AHT.Websocket.Client.Connect (Client_Ref, Echo);
       AHT.Websocket.Client.Send_Text (Client_Ref, "provoke");
 
-      while not Reentry.Ran and then Waited < 10.0 loop
+      while not Reentry.Done and then Waited < 10.0 loop
          delay 0.05;
          Waited := Waited + 0.05;
       end loop;
 
-      if not Reentry.Ran then
-         Fail ("reentrancy: the callback never ran, so nothing was "
-               & "called from the receiver and this proved nothing");
+      if not Reentry.Done then
+         Fail ("reentrancy: the callback did not finish its checks ("
+               & Reentry.Report
+               & "), so nothing conclusive was called from the "
+               & "receiver");
       else
          declare
             R : constant String := Reentry.Report;

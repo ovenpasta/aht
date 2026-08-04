@@ -428,10 +428,11 @@ private
       procedure Set_Pending_Limits (L : Limits; OK : out Boolean);
       --  MUST run on every failure after a successful Begin_Connect,
       --  or the client is stranded in Connecting. The attempt was by
-      --  definition unpublished, so the client returns to Idle and
-      --  the caller may retry — and that retry now genuinely works,
-      --  because it builds a fresh session rather than re-dialing a
-      --  transport whose single-use latch is already set.
+      --  definition unpublished, so the client returns to where
+      --  admission found it and the caller may retry — and that retry
+      --  genuinely works, because it builds a fresh session rather
+      --  than re-dialing a transport already latched by the attempt
+      --  that failed.
       --
       --  Takes the attempt's reserved generation and does nothing
       --  unless that attempt is still the one in flight. Without that
