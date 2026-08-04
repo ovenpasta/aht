@@ -15,7 +15,7 @@
 #   8773  corrupted record (integrity failure)
 #   8774  invalid handshake record / 8775 dribbled header
 #   8776  mid-session corruption under concurrency
-#   8777  WebSocket peer that overruns configured ceilings
+#   8777  WebSocket peer that misbehaves (overruns, floods, goes deaf)
 #   8770  go-httpbin, optional — only when a Go toolchain can build it
 #         (see tests/httpbin/get_httpbin.sh); test_httpbin SKIPs otherwise.
 #
@@ -53,7 +53,7 @@ TLSABRUPT_PID=
 TLSCORRUPT_PID=
 TLSBADHS_PID=
 TLSCONC_PID=
-WSLIMITS_PID=
+WSHOSTILE_PID=
 HTTPBIN_PID=
 
 cleanup() {
@@ -97,9 +97,9 @@ cleanup() {
         kill "$TLSCONC_PID" 2>/dev/null || true
         wait "$TLSCONC_PID" 2>/dev/null || true
     fi
-    if [ -n "$WSLIMITS_PID" ]; then
-        kill "$WSLIMITS_PID" 2>/dev/null || true
-        wait "$WSLIMITS_PID" 2>/dev/null || true
+    if [ -n "$WSHOSTILE_PID" ]; then
+        kill "$WSHOSTILE_PID" 2>/dev/null || true
+        wait "$WSHOSTILE_PID" 2>/dev/null || true
     fi
     if [ -n "$HTTPBIN_PID" ]; then
         kill "$HTTPBIN_PID" 2>/dev/null || true
@@ -128,7 +128,7 @@ PY="$VENV"/bin/python3
 echo "==> generating self-signed test cert"
 sh scripts/generate_cert.sh
 
-echo "==> starting HTTP (8764) + WS (8765) + TLS (8766) + stall (8767) + wss (8768) + tlsdeaf (8769) + tlsabrupt (8771) + tlscorrupt (8773) + tlsbadhandshake (8774+8775) + tlsconcurrent (8776) + wslimits (8777) fixtures"
+echo "==> starting HTTP (8764) + WS (8765) + TLS (8766) + stall (8767) + wss (8768) + tlsdeaf (8769) + tlsabrupt (8771) + tlscorrupt (8773) + tlsbadhandshake (8774+8775) + tlsconcurrent (8776) + wshostile (8777) fixtures"
 "$PY" tests/server/server.py          >>"$LOG" 2>&1 &
 HTTP_PID=$!
 "$PY" tests/server/server_ws.py       >>"$LOG" 2>&1 &
@@ -149,8 +149,8 @@ TLSCORRUPT_PID=$!
 TLSBADHS_PID=$!
 "$PY" tests/server/server_tls_concurrent.py >>"$LOG" 2>&1 &
 TLSCONC_PID=$!
-"$PY" tests/server/server_ws_limits.py >>"$LOG" 2>&1 &
-WSLIMITS_PID=$!
+"$PY" tests/server/server_ws_hostile.py >>"$LOG" 2>&1 &
+WSHOSTILE_PID=$!
 
 # Wait for every fixture's READY line (printed once it is listening).
 # 5 s should be plenty; bail out loudly if any never appears so a
@@ -166,13 +166,13 @@ for _ in $(seq 1 50); do
     HAS_TLSCORRUPT=$(grep -c '^READY tlscorrupt ' "$LOG" 2>/dev/null || true)
     HAS_TLSBADHS=$(grep -c '^READY tlsbadhandshake ' "$LOG" 2>/dev/null || true)
     HAS_TLSCONC=$(grep -c '^READY tlsconcurrent ' "$LOG" 2>/dev/null || true)
-    HAS_WSLIMITS=$(grep -c '^READY wslimits ' "$LOG" 2>/dev/null || true)
+    HAS_WSHOSTILE=$(grep -c '^READY wshostile ' "$LOG" 2>/dev/null || true)
     if [ "$HAS_HTTP" -ge 1 ] && [ "$HAS_WS" -ge 1 ] \
        && [ "$HAS_TLS" -ge 1 ] && [ "$HAS_STALL" -ge 1 ] \
        && [ "$HAS_WSS" -ge 1 ] && [ "$HAS_TLSDEAF" -ge 1 ] \
        && [ "$HAS_TLSABRUPT" -ge 1 ] && [ "$HAS_TLSCORRUPT" -ge 1 ] \
        && [ "$HAS_TLSBADHS" -ge 1 ] && [ "$HAS_TLSCONC" -ge 1 ] \
-       && [ "$HAS_WSLIMITS" -ge 1 ]; then
+       && [ "$HAS_WSHOSTILE" -ge 1 ]; then
         break
     fi
     sleep 0.1
@@ -187,19 +187,19 @@ HAS_TLSABRUPT=$(grep -c '^READY tlsabrupt ' "$LOG" 2>/dev/null || echo 0)
 HAS_TLSCORRUPT=$(grep -c '^READY tlscorrupt ' "$LOG" 2>/dev/null || echo 0)
 HAS_TLSBADHS=$(grep -c '^READY tlsbadhandshake ' "$LOG" 2>/dev/null || echo 0)
 HAS_TLSCONC=$(grep -c '^READY tlsconcurrent ' "$LOG" 2>/dev/null || echo 0)
-HAS_WSLIMITS=$(grep -c '^READY wslimits ' "$LOG" 2>/dev/null || echo 0)
+HAS_WSHOSTILE=$(grep -c '^READY wshostile ' "$LOG" 2>/dev/null || echo 0)
 if [ "$HAS_HTTP" -lt 1 ] || [ "$HAS_WS" -lt 1 ] \
    || [ "$HAS_TLS" -lt 1 ] || [ "$HAS_STALL" -lt 1 ] \
    || [ "$HAS_WSS" -lt 1 ] || [ "$HAS_TLSDEAF" -lt 1 ] \
    || [ "$HAS_TLSABRUPT" -lt 1 ] || [ "$HAS_TLSCORRUPT" -lt 1 ] \
    || [ "$HAS_TLSBADHS" -lt 1 ] || [ "$HAS_TLSCONC" -lt 1 ] \
-   || [ "$HAS_WSLIMITS" -lt 1 ]
+   || [ "$HAS_WSHOSTILE" -lt 1 ]
 then
     echo "FATAL: fixtures did not become ready in 5s (http=$HAS_HTTP "
     echo "ws=$HAS_WS tls=$HAS_TLS stall=$HAS_STALL wss=$HAS_WSS"
     echo "tlsdeaf=$HAS_TLSDEAF tlsabrupt=$HAS_TLSABRUPT"
     echo "tlscorrupt=$HAS_TLSCORRUPT tlsbadhs=$HAS_TLSBADHS"
-    echo "tlsconc=$HAS_TLSCONC wslimits=$HAS_WSLIMITS); log follows:"
+    echo "tlsconc=$HAS_TLSCONC wshostile=$HAS_WSHOSTILE); log follows:"
     cat "$LOG"
     exit 2
 fi

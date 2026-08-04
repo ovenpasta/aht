@@ -16,6 +16,16 @@
 --  Cases:
 --    1. With a callback still running, Close reports Timeout_Error
 --       instead of blocking.
+--    3. A writer parked in the transport does not outwait Close.
+--       The close handshake takes the send latch BEFORE it reaches
+--       its timed wait, so taking it unconditionally would let a
+--       stuck writer outlast Timeout without Timeout ever being
+--       consulted — and a WebSocket write carries no deadline of its
+--       own, so a peer that stops reading is all it takes to arrange.
+--    4. Telling Close not to wait for the peer still sends the Close
+--       frame when nothing is in the way. "Do not wait" must not
+--       quietly become "do not try".
+--
 --    2. Nothing was abandoned by that report. The client is still
 --       Closing immediately afterwards — checked, because a timeout
 --       that wrongly marked the generation done would leave every
@@ -28,13 +38,15 @@ with Ada.Command_Line;
 with Ada.Exceptions;
 with Ada.Text_IO; use Ada.Text_IO;
 
+with AHT.Bytes;
 with AHT.Transport;
 with AHT.Websocket;
 with AHT.Websocket.Client;
 
 procedure Test_WS_Teardown is
 
-   Echo : constant String := "ws://127.0.0.1:8765/";
+   Echo    : constant String := "ws://127.0.0.1:8765/";
+   Hostile : constant String := "ws://127.0.0.1:8777";
 
    Failures : Natural := 0;
 
@@ -226,6 +238,148 @@ begin
             & " after reconnecting (expected 2)");
    end if;
    AHT.Websocket.Client.Close (C);
+
+   --  Case 3: a writer stuck in the transport must not be able to
+   --  outwait Close by holding the send latch.
+   declare
+      D : AHT.Websocket.Client.Client_Type;
+
+      --  Far more than the fixture's 4 KiB receive window, so the
+      --  write provably cannot complete while it is not reading. On
+      --  the heap: this would not fit the environment task's stack.
+      type Bulk_Access is access AHT.Bytes.Byte_Array;
+      Bulk : constant Bulk_Access :=
+        new AHT.Bytes.Byte_Array'(1 .. 4 * 1024 * 1024 => 16#5A#);
+
+      protected Writer is
+         procedure Note_Done;
+         function  Done return Boolean;
+      private
+         Finished : Boolean := False;
+      end Writer;
+
+      protected body Writer is
+         procedure Note_Done is
+         begin
+            Finished := True;
+         end Note_Done;
+         function Done return Boolean is (Finished);
+      end Writer;
+
+      --  Gated on an entry: an ungated task activates at this block's
+      --  `begin`, before Connect has run, and its send would raise
+      --  Closed_Error at once — indistinguishable from a write that
+      --  completed.
+      task Stuck_Writer is
+         entry Go;
+      end Stuck_Writer;
+
+      task body Stuck_Writer is
+      begin
+         accept Go;
+         AHT.Websocket.Client.Send_Binary (D, Bulk.all);
+         Writer.Note_Done;
+      exception
+         when others =>
+            Writer.Note_Done;
+      end Stuck_Writer;
+
+      Connected : Boolean := False;
+   begin
+      begin
+         AHT.Websocket.Client.Connect (D, Hostile & "/deaf/stuck");
+         Connected := True;
+      exception
+         when E : others =>
+            Fail ("stuck-writer: Connect raised "
+                  & Ada.Exceptions.Exception_Name (E)
+                  & " (is server_ws_hostile.py running?)");
+      end;
+
+      if Connected then
+         Stuck_Writer.Go;
+      end if;
+      delay 1.0;
+
+      if Connected and then Writer.Done then
+         Fail ("stuck-writer: the bulk write completed against a peer "
+               & "that is not reading, so nothing was holding the "
+               & "send latch — this case proved nothing");
+      elsif Connected then
+         Started := Clock;
+         begin
+            AHT.Websocket.Client.Close
+              (D, Timeout => 0.5, Drain_Timeout => 5.0);
+         exception
+            when AHT.Transport.Timeout_Error =>
+               null;   --  acceptable: bounded either way
+            when E : others =>
+               Fail ("stuck-writer: Close raised "
+                     & Ada.Exceptions.Exception_Name (E));
+         end;
+         Ended := Clock;
+
+         --  The fixture stays deaf for 20s. Anything near that means
+         --  Close waited for the peer to start reading again rather
+         --  than bounding its own acquisition.
+         if Ended - Started > 8.0 then
+            Fail ("stuck-writer: Close took"
+                  & Duration'Image (Ended - Started)
+                  & "s — it waited out the stuck writer instead of "
+                  & "bounding the latch acquisition");
+         end if;
+      end if;
+
+      --  Release the gated task if Connect never happened, and let
+      --  the aborted writer finish either way.
+      if not Connected then
+         abort Stuck_Writer;
+      end if;
+      declare
+         Waited : Duration := 0.0;
+      begin
+         while not Stuck_Writer'Terminated and then Waited < 10.0 loop
+            delay 0.05;
+            Waited := Waited + 0.05;
+         end loop;
+         if not Stuck_Writer'Terminated then
+            Fail ("stuck-writer: the writer never came back");
+            abort Stuck_Writer;
+         end if;
+      end;
+   end;
+
+   --  Case 4: "do not wait for the peer" still means "send the Close
+   --  frame if nothing is in the way". The bounded acquisition takes
+   --  a free latch immediately, so a healthy connection closed with
+   --  Timeout => 0.0 still says goodbye properly.
+   declare
+      E : AHT.Websocket.Client.Client_Type;
+      R : AHT.Websocket.Client.Client_Type;
+      Msg : AHT.Websocket.Client.Message_Type;
+   begin
+      AHT.Websocket.Client.Connect (E, Hostile & "/echo/nowait");
+      AHT.Websocket.Client.Close (E, Timeout => 0.0);
+
+      AHT.Websocket.Client.Connect (R, Hostile & "/report/nowait");
+      AHT.Websocket.Client.Receive (R, Msg, Timeout => 10.0);
+      declare
+         Seen : constant String := AHT.Bytes.To_String (Msg.Payload);
+      begin
+         if Seen /= "close=1000" then
+            Fail ("no-wait-close: the peer saw """ & Seen
+                  & """, expected ""close=1000"" — Timeout => 0.0 "
+                  & "skipped the Close frame instead of taking a "
+                  & "free latch");
+         end if;
+      end;
+      AHT.Websocket.Client.Close (R, Timeout => 1.0);
+   exception
+      when Err : others =>
+         Fail ("no-wait-close: raised "
+               & Ada.Exceptions.Exception_Name (Err) & ": "
+               & Ada.Exceptions.Exception_Message (Err));
+   end;
 
    if Failures = 0 then
       Put_Line ("test_ws_teardown: OK");

@@ -6,7 +6,7 @@
 --  are reported as the different failures they are, and that the
 --  delivery modes mean what they say.
 --
---  Against tests/server/server_ws_limits.py (127.0.0.1:8777), which
+--  Against tests/server/server_ws_hostile.py (127.0.0.1:8777), which
 --  holds every connection open and keeps draining, so a failure here
 --  can only be the client's own limits acting — never the peer going
 --  away or stalling.
@@ -194,7 +194,7 @@ procedure Test_WS_Limits is
             Fail (What & ": Connect raised "
                   & Ada.Exceptions.Exception_Name (E) & ": "
                   & Ada.Exceptions.Exception_Message (E)
-                  & " (is server_ws_limits.py running?)");
+                  & " (is server_ws_hostile.py running?)");
             return;
       end;
 

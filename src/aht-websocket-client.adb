@@ -1737,24 +1737,49 @@ package body AHT.Websocket.Client is
          if Should_Send then
             declare
                Token : Guards.Guard_Token (S.Guard'Unchecked_Access);
+               Got   : Boolean;
             begin
-               Token.Take;
-               begin
-                  Send_Frame
-                    (Active (S).all, S.Guard,
-                     Op      => AHT.Websocket.Close_Op,
-                     FIN     => True,
-                     Payload => Build_Close_Payload (Code, Reason));
-               exception
-                  when others =>
-                     --  Best effort. Continue with the local teardown
-                     --  regardless.
-                     null;
-               end;
-               --  Latch under the guard: a Send_* blocked on Acquire
-               --  will now observe Close_Frame_Sent and raise rather
-               --  than writing a data frame after our Close.
-               S.Guard.Mark_Close_Sent;
+               --  Bounded, because this is reached BEFORE the timed
+               --  wait below. Taking the latch unconditionally would
+               --  let a writer parked in the transport outwait
+               --  Timeout without Timeout ever being consulted --
+               --  WebSocket writes carry no deadline of their own, so
+               --  a peer that stops reading is enough to arrange it.
+               Token.Try_Take (Timeout, Got);
+
+               if Got then
+                  begin
+                     Send_Frame
+                       (Active (S).all, S.Guard,
+                        Op      => AHT.Websocket.Close_Op,
+                        FIN     => True,
+                        Payload => Build_Close_Payload (Code, Reason));
+                  exception
+                     when others =>
+                        --  Best effort. Continue with the local
+                        --  teardown regardless.
+                        null;
+                  end;
+                  --  Latch under the guard: a Send_* blocked on
+                  --  Acquire will now observe Close_Frame_Sent and
+                  --  raise rather than writing a data frame after our
+                  --  Close.
+                  S.Guard.Mark_Close_Sent;
+               else
+                  --  Somebody else is mid-write and stuck. Cancel
+                  --  their I/O so the teardown can proceed, and send
+                  --  no Close at all: a writer interrupted part-way
+                  --  has left a partial frame on the wire, and
+                  --  RFC 6455 §5.5.1 admits nothing after a Close --
+                  --  including the rest of the frame it would be
+                  --  following. A truncated stream with no Close is
+                  --  the honest signal here.
+                  begin
+                     Active (S).Abort_Pending;
+                  exception
+                     when others => null;
+                  end;
+               end if;
             end;
          end if;
 

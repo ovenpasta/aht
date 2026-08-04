@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""WebSocket peer that overruns a client's configured ceilings.
+"""WebSocket peer that misbehaves in ways a client has to survive.
 
 Listens on 127.0.0.1:8777. Raw sockets rather than the `websockets`
 library, because every behaviour here is one that library exists to
 prevent: declaring a payload it never sends, running a fragment
-sequence past a size limit, flooding a reader that is not draining.
+sequence past a size limit, flooding a reader that is not draining,
+or simply stopping reading.
 
 The request path selects the behaviour:
 
@@ -21,6 +22,13 @@ The request path selects the behaviour:
 
   /flood  Many small messages back to back, to outrun a client that
           is not calling Receive.
+
+  /deaf   Stop reading for a long while, with a tiny receive buffer
+          so the client's writer backs up after a few KB rather than
+          after however many megabytes the kernel felt like holding.
+          A WebSocket write carries no deadline of its own, so this
+          is all it takes to park a writer indefinitely — which is
+          how a caller ends up waiting on a latch that writer holds.
 
   /echo   Ordinary echo, for the cases that need a working peer.
 
@@ -41,7 +49,7 @@ drained — so a client that fails is failing on its own limits, never
 because this peer went away or stopped reading. Draining also parses,
 so the Close frame the client sends on its way out is recorded.
 
-Prints `READY wslimits 127.0.0.1:8777` once listening.
+Prints `READY wshostile 127.0.0.1:8777` once listening.
 """
 
 from __future__ import annotations
@@ -64,6 +72,9 @@ FRAG_PARTS = 512      # 32 MiB total, far past the small ceilings tested
 FLOOD_COUNT = 20_000
 FLOOD_PAYLOAD = b"x" * 256
 REPORT_WAIT = 5.0     # how long /report waits for its token's close
+DEAF_SECONDS = 20.0   # /deaf: long enough to outlast any client bound
+                      # that is working, and to be obvious when one is
+                      # not
 
 OP_TEXT = 0x1
 OP_BINARY = 0x2
@@ -209,7 +220,10 @@ def take_frame(buf: bytes) -> tuple[int, bytes, bytes] | None:
 
 
 def drain(
-    conn: socket.socket, stop: threading.Event, token: str
+    conn: socket.socket,
+    stop: threading.Event,
+    token: str,
+    deaf_for: float = 0.0,
 ) -> None:
     """Keep reading so the client's writer never stalls on us, and
     parse what arrives so the Close frame it ends with is recorded.
@@ -218,6 +232,13 @@ def drain(
     is how /report's own client, whose close is of no interest, stays
     out of the record.
     """
+    # Not reading at all is the point of /deaf, but stop must still be
+    # honoured, so the wait is in slices rather than one sleep.
+    waited = 0.0
+    while waited < deaf_for and not stop.is_set():
+        time.sleep(0.1)
+        waited += 0.1
+
     conn.settimeout(0.25)
     seen_close = False
     buf = b""
@@ -253,11 +274,19 @@ def serve(conn: socket.socket) -> None:
         conn.close()
         return
 
+    if path.startswith("/deaf"):
+        # Small receive window, so a writer backs up after a few KB.
+        try:
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        except OSError:
+            pass
+
     stop = threading.Event()
     reader = threading.Thread(
         target=drain,
         args=(conn, stop,
-              "" if path.startswith("/report") else token_of(path)),
+              "" if path.startswith("/report") else token_of(path),
+              DEAF_SECONDS if path.startswith("/deaf") else 0.0),
         daemon=True,
     )
     reader.start()
@@ -286,6 +315,9 @@ def serve(conn: socket.socket) -> None:
             else:
                 answer = f"close={code}"
             conn.sendall(frame(True, OP_TEXT, answer.encode("ascii")))
+
+        elif path.startswith("/deaf"):
+            pass          # the point is what this one does NOT do
 
         elif path.startswith("/echo"):
             pass          # the drain thread is all this one needs
@@ -317,7 +349,7 @@ def serve(conn: socket.socket) -> None:
 def main() -> int:
     lsock = socket.create_server((HOST, PORT), reuse_port=False)
     lsock.listen(16)
-    print(f"READY wslimits {HOST}:{PORT}", flush=True)
+    print(f"READY wshostile {HOST}:{PORT}", flush=True)
 
     while True:
         conn, _ = lsock.accept()

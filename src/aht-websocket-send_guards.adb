@@ -57,6 +57,20 @@ package body AHT.Websocket.Send_Guards is
       T.G.Acquire (T'Address);
    end Take;
 
+   procedure Try_Take
+     (T      : in out Guard_Token;
+      Within : Duration;
+      Taken  : out Boolean) is
+   begin
+      select
+         T.G.Acquire (T'Address);
+         Taken := True;
+      or
+         delay Within;
+         Taken := False;
+      end select;
+   end Try_Take;
+
    overriding procedure Finalize (T : in out Guard_Token) is
    begin
       T.G.Release_If_Owner (T'Address);

@@ -100,6 +100,20 @@ package AHT.Websocket.Send_Guards is
 
    procedure Take (T : in out Guard_Token);
 
+   --  Bounded acquisition, for callers that must not be outwaited by
+   --  whoever currently holds the latch.
+   --
+   --  Taken is False if it could not be had within `Within`, and then
+   --  the token owns nothing: ownership is recorded only by an
+   --  acquisition that completed, so its release is a no-op and it is
+   --  safe to simply not use the latch. `Within` of 0.0 still takes a
+   --  free latch — a timed entry call selects a call it can accept
+   --  immediately — so "do not wait" does not mean "do not try".
+   procedure Try_Take
+     (T      : in out Guard_Token;
+      Within : Duration;
+      Taken  : out Boolean);
+
    overriding procedure Finalize (T : in out Guard_Token);
 
 end AHT.Websocket.Send_Guards;

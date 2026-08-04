@@ -132,7 +132,7 @@ begin
          when E : others =>
             Fail ("receiver-teardown: Connect raised "
                   & Ada.Exceptions.Exception_Name (E)
-                  & " (is server_ws_limits.py running?)");
+                  & " (is server_ws_hostile.py running?)");
             Put_Line ("test_ws_reconnect:" & Failures'Image & " failure(s)");
             Ada.Command_Line.Set_Exit_Status (1);
             return;
