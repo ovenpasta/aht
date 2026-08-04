@@ -377,8 +377,15 @@ package body AHT.Websocket.Client is
          --  Next_Gen is what tells them apart.
          if St = Connecting and then Next_Gen = Gen then
             --  Unpublished by definition, so the client goes back to
-            --  where admission found it and stays retryable.
-            St   := Idle;
+            --  where admission found it and stays retryable. Which
+            --  state that was is not a matter of memory: admission
+            --  only accepts Idle and Disconnected, and those are
+            --  exactly "nothing has ever connected" and "something
+            --  has". Collapsing both to Idle would erase the fact
+            --  that this client has a past — which is what a later
+            --  Reconnect needs in order to know it has parameters
+            --  worth replaying.
+            St   := (if Published_Gen > 0 then Disconnected else Idle);
             Done := True;
          end if;
       end Abandon_Connect;
@@ -470,6 +477,11 @@ package body AHT.Websocket.Client is
       procedure Clear_Published is
       begin
          Cur := null;
+         --  The subprotocol was this connection's, not the client's.
+         --  Leaving it behind would have Selected_Subprotocol answer
+         --  for a session that no longer exists, and keep answering
+         --  until some later connection happened to overwrite it.
+         Proto := Ada.Strings.Unbounded.Null_Unbounded_String;
       end Clear_Published;
 
       procedure Signal_Generation_Done is

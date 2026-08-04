@@ -29,7 +29,11 @@
 --    5. Across transport kinds, wss to ws, checking that the
 --       subprotocol is a property of the connection rather than of
 --       the client — a session carries its own transport variant, so
---       the two generations here are not even the same shape.
+--       the two generations here are not even the same shape. The
+--       subprotocol is checked after Close and after a failed
+--       attempt, not just after the next success: "overwritten by
+--       whatever connects next" is not the same as "gone with the
+--       connection".
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -139,9 +143,25 @@ begin
          Fail ("receiver-teardown: the connection never went down");
       end if;
 
+      --  Is_Open goes false the moment admission stops, which is the
+      --  FIRST step of reclamation — the session is not yet freed and
+      --  the client is still Closing. Close joins that teardown and
+      --  returns once it has completed, which is what makes the
+      --  reconfigure below deterministic rather than a race against
+      --  the receiver. Timeout => 0.0 because there is no handshake
+      --  left to wait for; this is a join, not a close.
+      AHT.Websocket.Client.Close (C, Timeout => 0.0);
+
       --  Between connections, so the limits may be changed again.
-      AHT.Websocket.Client.Configure
-        (C, AHT.Websocket.Client.Limits'(others => <>));
+      begin
+         AHT.Websocket.Client.Configure
+           (C, AHT.Websocket.Client.Limits'(others => <>));
+      exception
+         when E : others =>
+            Fail ("receiver-teardown: Configure after the teardown "
+                  & "raised " & Ada.Exceptions.Exception_Name (E)
+                  & " — reclamation had not finished");
+      end;
 
       begin
          AHT.Websocket.Client.Connect (C, Echo);
@@ -233,6 +253,9 @@ begin
                   & Ada.Exceptions.Exception_Name (E));
       end;
       Expect_Generation ("while-open", C, 1);
+      --  Refusing the second Connect is only half of it: the first
+      --  connection has to come through untouched.
+      Expect_Echo ("while-open", C, "still mine");
       AHT.Websocket.Client.Close (C);
    end;
 
@@ -268,6 +291,30 @@ begin
       end if;
       Expect_Echo ("across-kinds", C, "secure hello");
       AHT.Websocket.Client.Close (C);
+
+      --  Gone with the connection it belonged to, not merely
+      --  overwritten by whatever connects next.
+      if AHT.Websocket.Client.Selected_Subprotocol (C) /= "" then
+         Fail ("across-kinds: Selected_Subprotocol = """
+               & AHT.Websocket.Client.Selected_Subprotocol (C)
+               & """ after Close, with no session to speak for");
+      end if;
+
+      --  And a failed attempt does not resurrect it either.
+      begin
+         AHT.Websocket.Client.Connect (C, Closed);
+         Fail ("across-kinds: the closed-port dial succeeded");
+      exception
+         when AHT.Transport.Transport_Error => null;
+         when E : others =>
+            Fail ("across-kinds: closed-port dial raised "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+      if AHT.Websocket.Client.Selected_Subprotocol (C) /= "" then
+         Fail ("across-kinds: Selected_Subprotocol = """
+               & AHT.Websocket.Client.Selected_Subprotocol (C)
+               & """ after a failed attempt");
+      end if;
 
       begin
          AHT.Websocket.Client.Connect (C, Echo);
