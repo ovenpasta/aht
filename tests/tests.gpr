@@ -21,7 +21,8 @@ project Tests is
    --  it that hung would stop it running at all, which is the failure
    --  mode it exists to catch.
    for Main use
-     ("test_ws_send_guard.adb",
+     ("test_ws_budgets.adb",
+      "test_ws_send_guard.adb",
       "test_bytes_buffer.adb",
       "test_url.adb",
       "test_url_encoding.adb",

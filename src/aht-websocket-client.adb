@@ -13,6 +13,7 @@ with AHT.HTTP.Methods;
 with AHT.HTTP.Request;
 with AHT.HTTP.Response;
 with AHT.URL;
+with AHT.Websocket.Budgets;
 with AHT.Websocket.Frames;
 with AHT.Websocket.UTF8;
 
@@ -26,16 +27,6 @@ package body AHT.Websocket.Client is
 
    WS_GUID : constant String := "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-   --  What the close frame's write gets when Timeout is exactly zero,
-   --  and only then. A deadline of zero does not mean "try once" to a
-   --  transport -- it means "fail before parking", so even a frame
-   --  going straight into an empty socket buffer would be refused.
-   --  Timeout => 0.0 says not to wait for the PEER's echo; it does
-   --  not say to skip saying goodbye. Applying this as a floor under
-   --  every Timeout would be worse than not having it: a caller
-   --  asking for 0.05 would get 0.25, and a budget already spent on
-   --  the latch would be topped back up.
-   Close_Frame_Grace : constant Duration := 0.25;
 
    function To_Lower (S : String) return String renames
      Ada.Characters.Handling.To_Lower;
@@ -1760,18 +1751,7 @@ package body AHT.Websocket.Client is
               Ada.Real_Time.To_Duration
                 (Ada.Real_Time.Clock - Phase_Start);
          begin
-            --  Duration'Last is the "no bound" sentinel the transport
-            --  understands, and it has to survive this arithmetic
-            --  intact: Duration'Last minus a microsecond is not a
-            --  sentinel any more, it is an enormous finite deadline
-            --  that overflows when turned into a point in time.
-            if Timeout = Duration'Last then
-               return Duration'Last;
-            elsif Spent >= Timeout then
-               return 0.0;
-            else
-               return Timeout - Spent;
-            end if;
+            return AHT.Websocket.Budgets.Remaining (Timeout, Spent);
          end Remaining;
       begin
          --  RFC 6455 §1.4 close: send our Close (if we haven't yet),
@@ -1801,18 +1781,14 @@ package body AHT.Websocket.Client is
                   --  Drain_Timeout able to reach it, since both are
                   --  already behind us.
                   --
-                  --  The grace is for Timeout => 0.0 alone, and only
-                  --  because a zero deadline means "fail before
-                  --  parking" rather than "try once" -- without it,
-                  --  asking not to wait for the peer's echo would also
-                  --  stop the frame being sent. Every positive Timeout
-                  --  gets exactly what is left of it, including none,
-                  --  so the budget stays a compound bound rather than
-                  --  something each phase can top up.
+                  --  See AHT.Websocket.Budgets for why a budget of
+                  --  exactly zero is the only one that gets a grace,
+                  --  and why every positive one gets what is left of
+                  --  it and no more.
                   begin
                      Active (S).Set_Write_Deadline
-                       (if Timeout = 0.0
-                        then Close_Frame_Grace else Remaining);
+                       (AHT.Websocket.Budgets.Close_Frame_Budget
+                          (Timeout, Remaining));
                   exception
                      when others => null;
                   end;
