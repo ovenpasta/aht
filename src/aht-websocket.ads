@@ -83,4 +83,14 @@ package AHT.Websocket is
    --  protocol fault, so none is a Protocol_Error.
    Mode_Error : exception;
 
+   --  An operation that waits for the receiver was called FROM the
+   --  receiver -- that is, from inside a callback. Close and Reconnect
+   --  wait for a teardown only the receiver can complete, and Receive
+   --  waits for a message only the receiver can deliver, so each would
+   --  be waiting on the task that is currently blocked making the
+   --  call. Refusing is strictly better than the deadlock it replaces.
+   --  Send_* stay legal from callbacks: they do not wait on anything
+   --  the receiver owes them.
+   Reentrant_Error : exception;
+
 end AHT.Websocket;

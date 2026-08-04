@@ -1,4 +1,5 @@
 with Ada.Containers;
+with Ada.Task_Identification;
 with Ada.Containers.Bounded_Doubly_Linked_Lists;
 with Ada.Strings.Unbounded;
 
@@ -147,6 +148,35 @@ package AHT.Websocket.Client is
    --
    --  The synthetic codes 1005/1006/1015 are ruled out by the
    --  Valid_Close_Code subtype so they cannot be sent on the wire.
+
+   --  Re-establish the connection this client last had, using the
+   --  parameters of its last SUCCESSFUL Connect. Reconnect therefore
+   --  always means "the connection I had", never "the one I last
+   --  asked for" — a failed attempt does not become the thing that
+   --  gets replayed.
+   --
+   --    Idle          raises Handshake_Error: nothing to repeat.
+   --    Disconnected  redials.
+   --    Connecting    raises Handshake_Error: an attempt is already
+   --                  in flight, and this would race it.
+   --    Open/Closing  drains the current connection first, then
+   --                  redials. This is the one operation that will
+   --                  displace a live connection, and it does so
+   --                  explicitly rather than silently — Connect
+   --                  refuses instead.
+   --
+   --  The bounds are Close's, and mean the same things: Timeout for
+   --  the peer, Drain_Timeout for our own receiver. If the drain does
+   --  not finish in time this raises Timeout_Error WITHOUT redialing,
+   --  leaving the teardown to continue; a later Reconnect joins it.
+   --
+   --  Raises Reentrant_Error from inside a callback, for the same
+   --  reason Close does.
+   procedure Reconnect
+     (Self          : in out Client_Type;
+      Timeout       : Duration := 5.0;
+      Drain_Timeout : Duration := Default_Drain_Timeout);
+
 
    --  Blocking pull API: blocks up to Timeout for the next decoded message.
    --  Raises Closed_Error if the connection has been closed, and
@@ -344,6 +374,18 @@ private
    --  silently discarding is not an option the caller could detect.
    type Admission_Result is (Admitted, Wrong_State, No_Callback);
 
+   --  Everything a Reconnect needs to repeat a connect, deep-copied
+   --  so a caller mutating its own buffers afterwards cannot change
+   --  what gets redialed.
+   type Connect_Params is record
+      URL          : Ada.Strings.Unbounded.Unbounded_String;
+      Extra        : AHT.HTTP.Headers.Map;
+      Subprotocols : Ada.Strings.Unbounded.Unbounded_String;
+      Origin       : Ada.Strings.Unbounded.Unbounded_String;
+      Insecure     : Boolean := False;
+      CA_Path      : Ada.Strings.Unbounded.Unbounded_String;
+   end record;
+
    --  Snapshot of the installed callbacks. The receiver takes one per
    --  event so it never runs user code while holding the lock.
    type Callbacks is record
@@ -375,9 +417,13 @@ private
       --  Configure would race the state check and Set_On_Message
       --  (null) would race the callback check.
       procedure Begin_Connect
-        (Gen    : out Natural;
+        (P      : Connect_Params;
+         Gen    : out Natural;
          L      : out Limits;
          Result : out Admission_Result);
+      --  The parameters of the last connect that actually succeeded.
+      --  OK is False before there has been one.
+      procedure Saved_Params (P : out Connect_Params; OK : out Boolean);
       --  Public Configure. OK is False unless fully disconnected.
       procedure Set_Pending_Limits (L : Limits; OK : out Boolean);
       --  MUST run on every failure after a successful Begin_Connect,
@@ -462,6 +508,12 @@ private
       --  Copied out of the session by Publish, so reading it never
       --  races reclamation.
       function  Protocol return String;
+      --  Whether the caller IS the receiver. The identity is recorded
+      --  once the receiver has a client to belong to; before that
+      --  nobody can be it.
+      procedure Set_Receiver_Id (Id : Ada.Task_Identification.Task_Id);
+      function  Is_Receiver
+        (Id : Ada.Task_Identification.Task_Id) return Boolean;
 
    private
       Cur           : Session_Access := null;
@@ -489,6 +541,14 @@ private
       --  before any session exists -- and through Closing, while the
       --  receiver may still be dispatching.
       Active_Mode   : Delivery_Mode := Both;
+      Rx            : Ada.Task_Identification.Task_Id :=
+                        Ada.Task_Identification.Null_Task_Id;
+      --  Pending is what the attempt in flight is using; Saved is
+      --  what last worked. Publish promotes one to the other, so a
+      --  failed attempt never becomes what Reconnect repeats.
+      Pending_Conn  : Connect_Params;
+      Saved_Conn    : Connect_Params;
+      Has_Saved     : Boolean := False;
    end Lifecycle_Controller;
 
    --  Persistent per-client task: it outlives any single connection,

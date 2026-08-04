@@ -26,6 +26,14 @@
 --    3. After a dial that never connected at all.
 --    4. Connect is still refused while a connection is live. Widening
 --       admission to Disconnected must not have widened it to Open.
+--    6. Reconnect repeats the last connect that WORKED, not the last
+--       one attempted.
+--    8. Close, Reconnect and Receive refuse to be called from inside
+--       a callback, where they would wait on the task making the
+--       call; Send_* stay legal there.
+--    7. Reconnect displaces a live connection — the one thing Connect
+--       refuses to do — draining it first.
+--
 --    5. Across transport kinds, wss to ws, checking that the
 --       subprotocol is a property of the connection rather than of
 --       the client — a session carries its own transport variant, so
@@ -38,6 +46,8 @@
 with Ada.Command_Line;
 with Ada.Exceptions;
 with Ada.Text_IO; use Ada.Text_IO;
+
+with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 
 with AHT.Bytes;
 with AHT.HTTP.Headers;
@@ -54,6 +64,38 @@ procedure Test_WS_Reconnect is
    Closed : constant String := "ws://127.0.0.1:1/";
 
    Failures : Natural := 0;
+
+   --  Records what the reentrancy callback observed. It runs on the
+   --  receiver task, so it reports through a protected object rather
+   --  than touching Failures.
+   protected Reentry is
+      --  First is True for exactly one caller. The callback sends a
+      --  message as part of what it checks, the fixture echoes it,
+      --  and that would re-enter the callback forever otherwise.
+      procedure Claim (First : out Boolean);
+      procedure Note (What : String; Ex : String);
+      function  Ran return Boolean;
+      function  Report return String;
+   private
+      Claimed : Boolean := False;
+      Fired   : Boolean := False;
+      Text    : Unbounded_String;
+   end Reentry;
+
+   protected body Reentry is
+      procedure Claim (First : out Boolean) is
+      begin
+         First   := not Claimed;
+         Claimed := True;
+      end Claim;
+      procedure Note (What : String; Ex : String) is
+      begin
+         Fired := True;
+         Append (Text, What & "=" & Ex & " ");
+      end Note;
+      function Ran return Boolean is (Fired);
+      function Report return String is (To_String (Text));
+   end Reentry;
 
    procedure Fail (Msg : String) is
    begin
@@ -333,6 +375,182 @@ begin
       end if;
       Expect_Echo ("across-kinds", C, "plain hello");
       AHT.Websocket.Client.Close (C);
+   end;
+
+   --  Case 6: Reconnect repeats the last connect that WORKED.
+   --
+   --  A failed attempt in between must not become the thing that gets
+   --  replayed — otherwise "reconnect" would mean "retry whatever I
+   --  last asked for", and a typo would be permanent.
+   declare
+      C : AHT.Websocket.Client.Client_Type;
+      No_Extras : AHT.HTTP.Headers.Map;
+   begin
+      --  Nothing to repeat yet.
+      begin
+         AHT.Websocket.Client.Reconnect (C);
+         Fail ("saved-params: Reconnect succeeded before any Connect");
+      exception
+         when AHT.Websocket.Handshake_Error => null;
+         when E : others =>
+            Fail ("saved-params: expected Handshake_Error, got "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+
+      AHT.Websocket.Client.Connect
+        (Self          => C,
+         URL           => Secure,
+         Extra_Headers => No_Extras,
+         Subprotocols  => "chat",
+         Insecure      => True);
+      Expect_Generation ("saved-params", C, 1);
+      AHT.Websocket.Client.Close (C);
+
+      --  A failed attempt between the good one and the Reconnect.
+      begin
+         AHT.Websocket.Client.Connect (C, Closed);
+         Fail ("saved-params: the closed-port dial succeeded");
+      exception
+         when AHT.Transport.Transport_Error => null;
+         when E : others =>
+            Fail ("saved-params: closed-port dial raised "
+                  & Ada.Exceptions.Exception_Name (E));
+      end;
+
+      --  Repeats the wss connect, subprotocol and all — not the
+      --  closed port that was tried more recently.
+      begin
+         AHT.Websocket.Client.Reconnect (C);
+      exception
+         when E : others =>
+            Fail ("saved-params: Reconnect raised "
+                  & Ada.Exceptions.Exception_Name (E) & ": "
+                  & Ada.Exceptions.Exception_Message (E));
+      end;
+      Expect_Generation ("saved-params", C, 2);
+      if AHT.Websocket.Client.Selected_Subprotocol (C) /= "chat" then
+         Fail ("saved-params: Selected_Subprotocol = """
+               & AHT.Websocket.Client.Selected_Subprotocol (C)
+               & """ — the offered subprotocol was not replayed");
+      end if;
+      Expect_Echo ("saved-params", C, "replayed");
+      AHT.Websocket.Client.Close (C);
+   end;
+
+   --  Case 7: Reconnect displaces a LIVE connection, which is the one
+   --  thing Connect refuses to do. It drains first, so the generation
+   --  advances exactly once.
+   declare
+      C : AHT.Websocket.Client.Client_Type;
+   begin
+      AHT.Websocket.Client.Connect (C, Echo);
+      Expect_Generation ("live-redial", C, 1);
+      Expect_Echo ("live-redial", C, "first");
+
+      begin
+         AHT.Websocket.Client.Reconnect (C);
+      exception
+         when E : others =>
+            Fail ("live-redial: Reconnect over a live connection "
+                  & "raised " & Ada.Exceptions.Exception_Name (E));
+      end;
+      Expect_Generation ("live-redial", C, 2);
+      Expect_Echo ("live-redial", C, "second");
+      AHT.Websocket.Client.Close (C);
+   end;
+   --  Case 8: the operations that wait for the receiver refuse to be
+   --  called FROM it.
+   --
+   --  Each of these would otherwise wait on the very task making the
+   --  call: Close and Reconnect for a teardown only the receiver can
+   --  complete, Receive for a message only the receiver can deliver.
+   --  Send_* wait for nothing the receiver owes them and stay legal,
+   --  which is what keeps echo-from-On_Message working.
+   declare
+      Client_Ref : aliased AHT.Websocket.Client.Client_Type;
+
+      procedure On_Message (Msg : AHT.Websocket.Client.Message_Type) is
+         pragma Unreferenced (Msg);
+         Got   : AHT.Websocket.Client.Message_Type;
+         First : Boolean;
+      begin
+         Reentry.Claim (First);
+         if not First then
+            return;   --  our own echo coming back
+         end if;
+
+         begin
+            AHT.Websocket.Client.Close (Client_Ref);
+            Reentry.Note ("close", "returned");
+         exception
+            when AHT.Websocket.Reentrant_Error =>
+               Reentry.Note ("close", "refused");
+            when E : others =>
+               Reentry.Note ("close", Ada.Exceptions.Exception_Name (E));
+         end;
+
+         begin
+            AHT.Websocket.Client.Reconnect (Client_Ref);
+            Reentry.Note ("reconnect", "returned");
+         exception
+            when AHT.Websocket.Reentrant_Error =>
+               Reentry.Note ("reconnect", "refused");
+            when E : others =>
+               Reentry.Note
+                 ("reconnect", Ada.Exceptions.Exception_Name (E));
+         end;
+
+         begin
+            AHT.Websocket.Client.Receive (Client_Ref, Got, Timeout => 1.0);
+            Reentry.Note ("receive", "returned");
+         exception
+            when AHT.Websocket.Reentrant_Error =>
+               Reentry.Note ("receive", "refused");
+            when E : others =>
+               Reentry.Note ("receive", Ada.Exceptions.Exception_Name (E));
+         end;
+
+         --  Still legal, and the reason the rule is per-operation
+         --  rather than "no client calls from callbacks".
+         begin
+            AHT.Websocket.Client.Send_Text (Client_Ref, "echoed back");
+            Reentry.Note ("send", "ok");
+         exception
+            when E : others =>
+               Reentry.Note ("send", Ada.Exceptions.Exception_Name (E));
+         end;
+      end On_Message;
+
+      Waited : Duration := 0.0;
+   begin
+      AHT.Websocket.Client.Set_On_Message
+        (Client_Ref, On_Message'Unrestricted_Access);
+      AHT.Websocket.Client.Connect (Client_Ref, Echo);
+      AHT.Websocket.Client.Send_Text (Client_Ref, "provoke");
+
+      while not Reentry.Ran and then Waited < 10.0 loop
+         delay 0.05;
+         Waited := Waited + 0.05;
+      end loop;
+
+      if not Reentry.Ran then
+         Fail ("reentrancy: the callback never ran, so nothing was "
+               & "called from the receiver and this proved nothing");
+      else
+         declare
+            R : constant String := Reentry.Report;
+         begin
+            if R /= "close=refused reconnect=refused receive=refused "
+                    & "send=ok "
+            then
+               Fail ("reentrancy: got """ & R
+                     & """, expected close/reconnect/receive refused "
+                     & "and send ok");
+            end if;
+         end;
+      end if;
+
+      AHT.Websocket.Client.Close (Client_Ref);
    end;
 
    if Failures = 0 then

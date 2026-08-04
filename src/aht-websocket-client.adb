@@ -320,7 +320,8 @@ package body AHT.Websocket.Client is
    protected body Lifecycle_Controller is
 
       procedure Begin_Connect
-        (Gen    : out Natural;
+        (P      : Connect_Params;
+         Gen    : out Natural;
          L      : out Limits;
          Result : out Admission_Result) is
       begin
@@ -351,13 +352,20 @@ package body AHT.Websocket.Client is
             return;
          end if;
 
-         Next_Gen    := Next_Gen + 1;
-         Gen         := Next_Gen;
-         St          := Connecting;
-         L           := Pending;
-         Active_Mode := Pending.Delivery;
-         Result      := Admitted;
+         Next_Gen     := Next_Gen + 1;
+         Gen          := Next_Gen;
+         St           := Connecting;
+         L            := Pending;
+         Active_Mode  := Pending.Delivery;
+         Pending_Conn := P;
+         Result       := Admitted;
       end Begin_Connect;
+
+      procedure Saved_Params (P : out Connect_Params; OK : out Boolean) is
+      begin
+         P  := Saved_Conn;
+         OK := Has_Saved;
+      end Saved_Params;
 
       procedure Set_Pending_Limits (L : Limits; OK : out Boolean) is
       begin
@@ -410,6 +418,11 @@ package body AHT.Websocket.Client is
          Forced        := False;
          Done          := False;
          Handed_Off_Gen := S.Generation;
+         --  Promoted here and nowhere else, so what Reconnect repeats
+         --  is the last connect that actually worked rather than the
+         --  last one attempted.
+         Saved_Conn    := Pending_Conn;
+         Has_Saved     := True;
          St            := Open;
       end Publish;
 
@@ -538,6 +551,20 @@ package body AHT.Websocket.Client is
       function Generation return Natural is (Published_Gen);
 
       function Protocol return String is (To_String (Proto));
+
+      procedure Set_Receiver_Id (Id : Ada.Task_Identification.Task_Id) is
+      begin
+         Rx := Id;
+      end Set_Receiver_Id;
+
+      function Is_Receiver
+        (Id : Ada.Task_Identification.Task_Id) return Boolean
+      is
+         use type Ada.Task_Identification.Task_Id;
+      begin
+         return Rx /= Ada.Task_Identification.Null_Task_Id
+           and then Id = Rx;
+      end Is_Receiver;
 
    end Lifecycle_Controller;
 
@@ -1292,6 +1319,10 @@ package body AHT.Websocket.Client is
                --  records the handoff for the connecting task's
                --  cleanup -- see Attempt_Owner.
                Conn.Ctl.Publish (Sess);
+               --  Current_Task inside an accept body is the ACCEPTING
+               --  task, so this is the receiver naming itself.
+               Conn.Ctl.Set_Receiver_Id
+                 (Ada.Task_Identification.Current_Task);
             end Start;
          or
             terminate;
@@ -1329,6 +1360,17 @@ package body AHT.Websocket.Client is
       Gen : Natural;
       Adm : Admission_Result;
       Lim : Limits;
+
+      --  Deep copies by construction: Unbounded_String and the header
+      --  map both own their storage, so a caller reusing its buffers
+      --  after this cannot change what a later Reconnect dials.
+      Params : constant Connect_Params :=
+        (URL          => To_Unbounded_String (URL),
+         Extra        => Extra_Headers,
+         Subprotocols => To_Unbounded_String (Subprotocols),
+         Origin       => To_Unbounded_String (Origin),
+         Insecure     => Insecure,
+         CA_Path      => To_Unbounded_String (CA_Path));
    begin
       --  Admission. One protected action decides whether an attempt
       --  may start and reserves this attempt's generation number. A
@@ -1338,7 +1380,7 @@ package body AHT.Websocket.Client is
       --  Idle, so retries work — and now really do, because the
       --  retry gets a fresh session with fresh transports rather than
       --  re-dialing an already-latched one.
-      Self.Ctl.Begin_Connect (Gen, Lim, Adm);
+      Self.Ctl.Begin_Connect (Params, Gen, Lim, Adm);
       case Adm is
          when Admitted =>
             null;
@@ -1581,6 +1623,21 @@ package body AHT.Websocket.Client is
          CA_Path       => CA_Path);
    end Connect;
 
+   --  Called by every operation that would wait on the receiver.
+   --  From anywhere else this is free; from a callback it is the
+   --  difference between an exception and a deadlock, since the task
+   --  being waited on is the one making the call.
+   procedure Refuse_If_Receiver (Self : Client_Type; Op : String) is
+   begin
+      if Self.Ctl.Is_Receiver (Ada.Task_Identification.Current_Task) then
+         raise AHT.Websocket.Reentrant_Error
+           with "Websocket.Client." & Op & ": called from inside a "
+             & "callback, which runs on the receiver task — it would "
+             & "be waiting for itself. Send_* are safe here; anything "
+             & "that waits is not";
+      end if;
+   end Refuse_If_Receiver;
+
    procedure Configure (Self : in out Client_Type; L : Limits) is
       OK : Boolean;
    begin
@@ -1593,6 +1650,43 @@ package body AHT.Websocket.Client is
              & "); a session freezes its ceilings when it is created";
       end if;
    end Configure;
+
+   procedure Reconnect
+     (Self          : in out Client_Type;
+      Timeout       : Duration := 5.0;
+      Drain_Timeout : Duration := Default_Drain_Timeout)
+   is
+      P  : Connect_Params;
+      OK : Boolean;
+   begin
+      Refuse_If_Receiver (Self, "Reconnect");
+
+      Self.Ctl.Saved_Params (P, OK);
+      if not OK then
+         raise AHT.Websocket.Handshake_Error
+           with "Websocket.Client.Reconnect: this client has never "
+             & "connected, so there is nothing to repeat; use Connect";
+      end if;
+
+      --  Drain whatever is in place first. Close is the whole of that
+      --  step: it already picks a winner, lets everyone else join, and
+      --  bounds both halves. With nothing in place it returns at once,
+      --  which is exactly right for a redial from Disconnected.
+      --
+      --  If it raises, the redial does NOT happen. A teardown that has
+      --  not finished still owns the session, and dialing a second one
+      --  over it is the one thing this must never do.
+      Close (Self, Timeout => Timeout, Drain_Timeout => Drain_Timeout);
+
+      Connect
+        (Self          => Self,
+         URL           => To_String (P.URL),
+         Extra_Headers => P.Extra,
+         Subprotocols  => To_String (P.Subprotocols),
+         Origin        => To_String (P.Origin),
+         Insecure      => P.Insecure,
+         CA_Path       => To_String (P.CA_Path));
+   end Reconnect;
 
    function Is_Open (Self : Client_Type) return Boolean is
      (Self.Ctl.Is_Open);
@@ -1867,6 +1961,8 @@ package body AHT.Websocket.Client is
       end Close_Handshake;
 
    begin
+      Refuse_If_Receiver (Self, "Close");
+
       --  The pin takes the teardown borrow on declaration and gives it
       --  back on scope exit, so no exit -- not a raise, not an abort of
       --  this task mid-handshake -- can leave the borrow count above
@@ -1925,6 +2021,8 @@ package body AHT.Websocket.Client is
    is
       L : Lease (Self.Ctl'Unchecked_Access);
    begin
+      Refuse_If_Receiver (Self, "Receive");
+
       if not L.Held then
          Msg := (Kind => Binary_Message, Payload => <>);
          raise AHT.Websocket.Closed_Error
