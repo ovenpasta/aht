@@ -107,6 +107,9 @@ _traffic_cv = threading.Condition()
 
 
 def record_traffic(token: str) -> None:
+    """Record once. Callers hold a per-connection flag as well, so a
+    connection that keeps sending cannot re-create evidence a reader
+    has already consumed -- which would make consuming it pointless."""
     if not token:
         return
     with _traffic_cv:
@@ -269,6 +272,11 @@ def drain(
     is how /report's own client, whose close is of no interest, stays
     out of the record.
     """
+    # Declared before the deaf loop below, which reads it: a name
+    # bound only afterwards would raise UnboundLocalError on the first
+    # peek and take this thread down without a word.
+    seen_traffic = False
+
     # Not reading at all is the point of /deaf, but stop must still be
     # honoured, so the wait is in slices rather than one sleep. Each
     # slice peeks: peeking reports what has arrived without removing
@@ -279,7 +287,8 @@ def drain(
         conn.settimeout(0.05)
     while waited < deaf_for and not stop.is_set():
         try:
-            if conn.recv(1, socket.MSG_PEEK):
+            if not seen_traffic and conn.recv(1, socket.MSG_PEEK):
+                seen_traffic = True
                 record_traffic(token)
         except (TimeoutError, OSError):
             pass
@@ -305,7 +314,9 @@ def drain(
             if taken is None:
                 break
             opcode, payload, buf = taken
-            record_traffic(token)
+            if not seen_traffic:
+                seen_traffic = True
+                record_traffic(token)
             if opcode == OP_CLOSE and not seen_close:
                 seen_close = True
                 record_close(

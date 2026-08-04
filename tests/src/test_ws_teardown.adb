@@ -13,28 +13,30 @@
 --  caller can, which is why "callbacks must not block" is a contract
 --  and not advice.
 --
---  Cases:
+--  Cases, in the order they run:
 --    1. With a callback still running, Close reports Timeout_Error
 --       instead of blocking.
---    3. A writer parked in the transport does not outwait Close.
---       The close handshake takes the send latch BEFORE it reaches
---       its timed wait, so taking it unconditionally would let a
---       stuck writer outlast Timeout without Timeout ever being
---       consulted — and a WebSocket write carries no deadline of its
---       own, so a peer that stops reading is all it takes to arrange.
---    4. Telling Close not to wait for the peer still sends the Close
---       frame when nothing is in the way.
---    5. The close frame's own write is bounded, not just the wait for
---       the latch — reached by aborting a writer mid-write, which
---       hands the latch over with the socket buffer still full. "Do not wait" must not
---       quietly become "do not try".
---
 --    2. Nothing was abandoned by that report. The client is still
 --       Closing immediately afterwards — checked, because a timeout
 --       that wrongly marked the generation done would leave every
 --       later assertion here passing anyway — and once the callback
 --       returns, a later Close finds the same teardown, completes it,
 --       and the client is reusable.
+--    3. A writer parked in the transport does not outwait Close. The
+--       close handshake takes the send latch BEFORE it reaches its
+--       timed wait, so taking it unconditionally would let a stuck
+--       writer outlast Timeout without Timeout ever being consulted —
+--       and a WebSocket write carries no deadline of its own, so a
+--       peer that stops reading is all it takes to arrange that.
+--    4. Telling Close not to wait for the peer still sends the Close
+--       frame when nothing is in the way. "Do not wait" must not
+--       quietly become "do not try".
+--
+--  Not covered: the close frame's own write parking on a full socket
+--  buffer. Reaching it needs a writer that SUCCEEDS while leaving the
+--  buffer exactly full — interrupting one instead poisons the
+--  transport by design, so the next write fails fast rather than
+--  parking — and that could not be arranged deterministically here.
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;

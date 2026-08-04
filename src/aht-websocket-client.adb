@@ -26,13 +26,15 @@ package body AHT.Websocket.Client is
 
    WS_GUID : constant String := "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-   --  Floor under the close frame's write deadline. A deadline of
-   --  zero does not mean "try once" to a transport -- it means "fail
-   --  before parking", so even a frame that would go straight into an
-   --  empty socket buffer would be refused. Timeout => 0.0 says not
-   --  to wait for the PEER's echo; it does not say to skip saying
-   --  goodbye. This is the grace that keeps those two apart, and it
-   --  is far too small to matter against any real bound.
+   --  What the close frame's write gets when Timeout is exactly zero,
+   --  and only then. A deadline of zero does not mean "try once" to a
+   --  transport -- it means "fail before parking", so even a frame
+   --  going straight into an empty socket buffer would be refused.
+   --  Timeout => 0.0 says not to wait for the PEER's echo; it does
+   --  not say to skip saying goodbye. Applying this as a floor under
+   --  every Timeout would be worse than not having it: a caller
+   --  asking for 0.05 would get 0.25, and a budget already spent on
+   --  the latch would be topped back up.
    Close_Frame_Grace : constant Duration := 0.25;
 
    function To_Lower (S : String) return String renames
@@ -1792,15 +1794,25 @@ package body AHT.Websocket.Client is
 
                if Got then
                   --  The write needs bounding too, or the budget only
-                  --  ever bounded the WAITING. A previous writer can
-                  --  put the latch down while leaving the socket
-                  --  buffer full -- being aborted mid-write does
-                  --  exactly that -- and this write would then park
-                  --  with neither Remaining nor Drain_Timeout able to
-                  --  reach it, since both are already behind us.
+                  --  ever bounded the WAITING. A writer that completes
+                  --  while leaving the socket buffer full puts the
+                  --  latch down on a healthy transport, and this write
+                  --  would then park with neither Remaining nor
+                  --  Drain_Timeout able to reach it, since both are
+                  --  already behind us.
+                  --
+                  --  The grace is for Timeout => 0.0 alone, and only
+                  --  because a zero deadline means "fail before
+                  --  parking" rather than "try once" -- without it,
+                  --  asking not to wait for the peer's echo would also
+                  --  stop the frame being sent. Every positive Timeout
+                  --  gets exactly what is left of it, including none,
+                  --  so the budget stays a compound bound rather than
+                  --  something each phase can top up.
                   begin
                      Active (S).Set_Write_Deadline
-                       (Duration'Max (Remaining, Close_Frame_Grace));
+                       (if Timeout = 0.0
+                        then Close_Frame_Grace else Remaining);
                   exception
                      when others => null;
                   end;
