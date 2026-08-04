@@ -970,8 +970,12 @@ package body AHT.Transport.TLS is
       if Deadline = Duration'Last then
          Self.Has_Read_Deadline := False;
       else
-         Self.Has_Read_Deadline := True;
-         Self.Read_Deadline := Clock + To_Time_Span (Deadline);
+         declare
+            At_Time : constant Time := Clock + To_Time_Span (Deadline);
+         begin
+            Self.Read_Deadline     := At_Time;
+            Self.Has_Read_Deadline := True;
+         end;
       end if;
       if Self.State /= null and then Self.State.TCP /= null then
          Self.State.TCP.Set_Read_Deadline (Deadline);
@@ -987,8 +991,12 @@ package body AHT.Transport.TLS is
       if Deadline = Duration'Last then
          Self.Has_Write_Deadline := False;
       else
-         Self.Has_Write_Deadline := True;
-         Self.Write_Deadline := Clock + To_Time_Span (Deadline);
+         declare
+            At_Time : constant Time := Clock + To_Time_Span (Deadline);
+         begin
+            Self.Write_Deadline     := At_Time;
+            Self.Has_Write_Deadline := True;
+         end;
       end if;
       if Self.State /= null and then Self.State.TCP /= null then
          Self.State.TCP.Set_Write_Deadline (Deadline);

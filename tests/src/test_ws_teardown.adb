@@ -23,7 +23,10 @@
 --       consulted — and a WebSocket write carries no deadline of its
 --       own, so a peer that stops reading is all it takes to arrange.
 --    4. Telling Close not to wait for the peer still sends the Close
---       frame when nothing is in the way. "Do not wait" must not
+--       frame when nothing is in the way.
+--    5. The close frame's own write is bounded, not just the wait for
+--       the latch — reached by aborting a writer mid-write, which
+--       hands the latch over with the socket buffer still full. "Do not wait" must not
 --       quietly become "do not try".
 --
 --    2. Nothing was abandoned by that report. The client is still
@@ -344,9 +347,6 @@ begin
                & "that is not reading, so nothing was holding the "
                & "send latch — this case proved nothing");
       elsif Connected then
-         --  Timeout is deliberately generous relative to the drain:
-         --  it is what both handshake phases share, and a Timeout
-         --  spent twice over shows up here as roughly double.
          Started := Clock;
          begin
             AHT.Websocket.Client.Close

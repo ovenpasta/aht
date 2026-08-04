@@ -657,8 +657,15 @@ package body AHT.Transport.TCP is
       if Deadline = Duration'Last then
          Self.Has_Deadline := False;
       else
-         Self.Has_Deadline := True;
-         Self.Deadline_At := Clock + To_Time_Span (Deadline);
+         --  Same ordering as the write side: compute first, so an
+         --  absurd Deadline cannot leave the flag set over a value
+         --  that was never assigned.
+         declare
+            At_Time : constant Time := Clock + To_Time_Span (Deadline);
+         begin
+            Self.Deadline_At  := At_Time;
+            Self.Has_Deadline := True;
+         end;
       end if;
    end Set_Read_Deadline;
 
@@ -670,8 +677,17 @@ package body AHT.Transport.TCP is
       if Deadline = Duration'Last then
          Self.Has_Write_Deadline := False;
       else
-         Self.Has_Write_Deadline := True;
-         Self.Write_Deadline_At := Clock + To_Time_Span (Deadline);
+         --  Compute before assigning either field. Converting an
+         --  absurd Deadline raises, and doing it after setting the
+         --  flag would leave the transport claiming a deadline it
+         --  never computed -- whose stale value is in the past, so
+         --  every later write would fail instantly.
+         declare
+            At_Time : constant Time := Clock + To_Time_Span (Deadline);
+         begin
+            Self.Write_Deadline_At  := At_Time;
+            Self.Has_Write_Deadline := True;
+         end;
       end if;
    end Set_Write_Deadline;
 

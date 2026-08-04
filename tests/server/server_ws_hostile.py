@@ -23,11 +23,6 @@ The request path selects the behaviour:
   /flood  Many small messages back to back, to outrun a client that
           is not calling Receive.
 
-  /briefdeaf
-          As /deaf, but only briefly: reading resumes part way through
-          a typical caller's timeout, handing the latch over near the
-          deadline rather than never.
-
   /deaf   Stop reading for a long while, with a tiny receive buffer
           so the client's writer backs up after a few KB rather than
           after however many megabytes the kernel felt like holding.
@@ -87,15 +82,6 @@ REPORT_WAIT = 5.0     # how long /report waits for its token's close
 DEAF_SECONDS = 20.0   # /deaf: long enough to outlast any client bound
                       # that is working, and to be obvious when one is
                       # not
-BRIEF_DEAF_SECONDS = 1.5
-                      # /briefdeaf: deaf for a while and then not, so a
-                      # blocked writer is released PART WAY through a
-                      # caller's budget. That is the shape that
-                      # exposes a budget spent once per phase rather
-                      # than once per operation -- with a peer that
-                      # stays deaf, the caller gives up on the latch
-                      # and aborts, and the second phase then finishes
-                      # at once instead of running its own full wait.
 
 OP_TEXT = 0x1
 OP_BINARY = 0x2
@@ -130,8 +116,18 @@ def record_traffic(token: str) -> None:
 
 
 def await_traffic(token: str, timeout: float) -> bool:
+    """Wait for this token's first traffic, then forget it.
+
+    Consumed on read for the same reason close codes are: a token that
+    answered yes forever would let a later run -- or a backout run
+    against the same fixture -- pass without anything having been
+    written at all.
+    """
     with _traffic_cv:
-        return _traffic_cv.wait_for(lambda: token in _traffic, timeout)
+        found = _traffic_cv.wait_for(lambda: token in _traffic, timeout)
+        if found:
+            _traffic.pop(token, None)
+        return found
 
 
 def record_close(token: str, code: int | None) -> None:
@@ -326,7 +322,7 @@ def serve(conn: socket.socket) -> None:
         conn.close()
         return
 
-    if path.startswith("/deaf") or path.startswith("/briefdeaf"):
+    if path.startswith("/deaf"):
         # Small receive window, so a writer backs up after a few KB.
         try:
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -341,9 +337,7 @@ def serve(conn: socket.socket) -> None:
               if path.startswith("/report")
               or path.startswith("/traffic")
               else token_of(path),
-              DEAF_SECONDS if path.startswith("/deaf")
-              else BRIEF_DEAF_SECONDS if path.startswith("/briefdeaf")
-              else 0.0),
+              DEAF_SECONDS if path.startswith("/deaf") else 0.0),
         daemon=True,
     )
     reader.start()
@@ -380,8 +374,8 @@ def serve(conn: socket.socket) -> None:
                 answer = f"close={code}"
             conn.sendall(frame(True, OP_TEXT, answer.encode("ascii")))
 
-        elif path.startswith("/deaf") or path.startswith("/briefdeaf"):
-            pass          # the point is what these do NOT do
+        elif path.startswith("/deaf"):
+            pass          # the point is what this one does NOT do
 
         elif path.startswith("/echo"):
             pass          # the drain thread is all this one needs

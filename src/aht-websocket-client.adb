@@ -26,6 +26,15 @@ package body AHT.Websocket.Client is
 
    WS_GUID : constant String := "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+   --  Floor under the close frame's write deadline. A deadline of
+   --  zero does not mean "try once" to a transport -- it means "fail
+   --  before parking", so even a frame that would go straight into an
+   --  empty socket buffer would be refused. Timeout => 0.0 says not
+   --  to wait for the PEER's echo; it does not say to skip saying
+   --  goodbye. This is the grace that keeps those two apart, and it
+   --  is far too small to matter against any real bound.
+   Close_Frame_Grace : constant Duration := 0.25;
+
    function To_Lower (S : String) return String renames
      Ada.Characters.Handling.To_Lower;
 
@@ -1749,7 +1758,18 @@ package body AHT.Websocket.Client is
               Ada.Real_Time.To_Duration
                 (Ada.Real_Time.Clock - Phase_Start);
          begin
-            return (if Spent >= Timeout then 0.0 else Timeout - Spent);
+            --  Duration'Last is the "no bound" sentinel the transport
+            --  understands, and it has to survive this arithmetic
+            --  intact: Duration'Last minus a microsecond is not a
+            --  sentinel any more, it is an enormous finite deadline
+            --  that overflows when turned into a point in time.
+            if Timeout = Duration'Last then
+               return Duration'Last;
+            elsif Spent >= Timeout then
+               return 0.0;
+            else
+               return Timeout - Spent;
+            end if;
          end Remaining;
       begin
          --  RFC 6455 §1.4 close: send our Close (if we haven't yet),
@@ -1771,6 +1791,20 @@ package body AHT.Websocket.Client is
                Token.Try_Take (Remaining, Got);
 
                if Got then
+                  --  The write needs bounding too, or the budget only
+                  --  ever bounded the WAITING. A previous writer can
+                  --  put the latch down while leaving the socket
+                  --  buffer full -- being aborted mid-write does
+                  --  exactly that -- and this write would then park
+                  --  with neither Remaining nor Drain_Timeout able to
+                  --  reach it, since both are already behind us.
+                  begin
+                     Active (S).Set_Write_Deadline
+                       (Duration'Max (Remaining, Close_Frame_Grace));
+                  exception
+                     when others => null;
+                  end;
+
                   begin
                      Send_Frame
                        (Active (S).all, S.Guard,
@@ -1782,6 +1816,15 @@ package body AHT.Websocket.Client is
                         --  Best effort. Continue with the local
                         --  teardown regardless.
                         null;
+                  end;
+
+                  --  Put it back: reclamation still has a transport
+                  --  Close to do, and it should not inherit a
+                  --  deadline that belonged to this frame.
+                  begin
+                     Active (S).Set_Write_Deadline (Duration'Last);
+                  exception
+                     when others => null;
                   end;
                   --  Latch under the guard: a Send_* blocked on
                   --  Acquire will now observe Close_Frame_Sent and
