@@ -607,9 +607,16 @@ begin
       C        : AHT.Websocket.Client.Client_Type;
       Headers  : AHT.HTTP.Headers.Map;
    begin
+      --  Held open on purpose. The negotiated subprotocol belongs to
+      --  the connection, so it is only answerable while there is one:
+      --  a fixture that drops the socket the moment it has sent the
+      --  101 leaves the receiver racing to reclaim, and the
+      --  assertion racing the receiver. Holding removes the race
+      --  rather than hiding it behind whichever side usually wins.
       Server.Configure
         (Extra_Headers => "Sec-WebSocket-Protocol: aht.echo.v1",
-         Post_Bytes    => AHT.Bytes.Byte_Array'(1 .. 0 => 0));
+         Post_Bytes    => AHT.Bytes.Byte_Array'(1 .. 0 => 0),
+         Hold_Seconds  => 2.0);
       Server.Get_Port (Port, Setup_Err);
       if Length (Setup_Err) > 0 then
          Fail ("proto-good: server setup: "
@@ -627,14 +634,9 @@ begin
                      & Ada.Exceptions.Exception_Name (E) & ": "
                      & Ada.Exceptions.Exception_Message (E));
          end;
-         Server.Wait_Done (Run_Err);
-         --  Is_Open is not a stable post-Connect predicate
-         --  against the fake server: it closes the TCP
-         --  connection right after sending the 101, so the
-         --  receiver task races to mark State => Closed.
-         --  Selected_Subprotocol is set during Connect (before
-         --  the receiver starts) and is the meaningful
-         --  assertion for this case.
+
+         --  Asserted while the connection is still up, which is the
+         --  only time the question has an answer.
          if AHT.Websocket.Client.Selected_Subprotocol (C)
             /= "aht.echo.v1"
          then
@@ -642,7 +644,9 @@ begin
                   & AHT.Websocket.Client.Selected_Subprotocol (C)
                   & """");
          end if;
-         AHT.Websocket.Client.Close (C);
+
+         AHT.Websocket.Client.Close (C, Timeout => 0.1);
+         Server.Wait_Done (Run_Err);
       end if;
    end;
 

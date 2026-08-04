@@ -96,11 +96,16 @@ package AHT.Websocket.Client is
      (Self    : in out Client_Type;
       Payload : AHT.Bytes.Byte_Array := []);
 
+   --  How long a caller waits for its own receiver to finish
+   --  reclaiming a connection, once the peer is out of the picture.
+   Default_Drain_Timeout : constant Duration := 5.0;
+
    procedure Close
-     (Self    : in out Client_Type;
-      Code    : Valid_Close_Code := 1000;
-      Reason  : String := "";
-      Timeout : Duration := 5.0);
+     (Self          : in out Client_Type;
+      Code          : Valid_Close_Code := 1000;
+      Reason        : String := "";
+      Timeout       : Duration := 5.0;
+      Drain_Timeout : Duration := Default_Drain_Timeout);
    --  Runs the RFC 6455 §1.4 close handshake: send our Close frame
    --  (if we haven't already), then wait up to `Timeout` seconds
    --  for the peer's echo before forcing the receiver out via
@@ -109,8 +114,11 @@ package AHT.Websocket.Client is
    --  session — and Close returns only once that has completed, so
    --  it is synchronous with respect to receiver exit and callbacks.
    --
-   --  Timeout knobs (they bound the *close handshake*, not the
-   --  reclamation that follows it):
+   --  The two bounds measure different things, which is why they are
+   --  separate knobs rather than one.
+   --
+   --  `Timeout` bounds the PEER: how long to wait for its Close echo
+   --  before giving up on the handshake and forcing the receiver out.
    --    * Default 5.0 s — safe for a cooperating peer on a LAN
    --      / loopback.
    --    * Duration'Last — wait indefinitely (only sensible when
@@ -118,6 +126,21 @@ package AHT.Websocket.Client is
    --    * 0.0 — don't wait at all; tear the receiver out via
    --      Abort_Pending immediately. Useful when the caller
    --      already knows the peer is unresponsive.
+   --
+   --  `Drain_Timeout` bounds US: how long to wait for our own
+   --  receiver to finish reclaiming the session afterwards. Telling
+   --  Close not to wait for an unresponsive peer says nothing about
+   --  how long our own cleanup may take, so a single knob would make
+   --  `Timeout => 0.0` mean "and fail if reclamation is not already
+   --  finished", which is not what anyone asking for it wants.
+   --
+   --  On expiry Close raises `Timeout_Error`. Nothing is abandoned:
+   --  the client stays Closing, reclamation continues, and a later
+   --  Close joins the same completion. What the bound reports is a
+   --  liveness problem, not a safety decision — most often a callback
+   --  that has not returned, since the receiver cannot reclaim a
+   --  connection while it is inside user code. That is why "callbacks
+   --  must not block" is a contract and not advice.
    --
    --  Concurrent Close calls are safe: one drives the teardown and
    --  the others simply wait for the same completion.
@@ -170,6 +193,11 @@ package AHT.Websocket.Client is
    procedure Set_On_Close   (Self : in out Client_Type; CB : On_Close_Callback);
    procedure Set_On_Error   (Self : in out Client_Type; CB : On_Error_Callback);
 
+   --  What the peer selected for the connection currently in place,
+   --  or "" if there is none. It belongs to the connection, not to
+   --  the client, so it stops answering once that connection has been
+   --  reclaimed rather than lingering until some later one overwrites
+   --  it — read it while the connection is up.
    function Selected_Subprotocol (Self : Client_Type) return String;
 
    --  How many connections this client has successfully established:

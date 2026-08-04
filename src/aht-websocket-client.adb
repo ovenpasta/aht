@@ -1715,10 +1715,11 @@ package body AHT.Websocket.Client is
    end Send_Ping;
 
    procedure Close
-     (Self    : in out Client_Type;
-      Code    : AHT.Websocket.Valid_Close_Code := 1000;
-      Reason  : String := "";
-      Timeout : Duration := 5.0)
+     (Self          : in out Client_Type;
+      Code          : AHT.Websocket.Valid_Close_Code := 1000;
+      Reason        : String := "";
+      Timeout       : Duration := 5.0;
+      Drain_Timeout : Duration := Default_Drain_Timeout)
    is
       --  Runs only for the caller that won the teardown, on the
       --  session its borrow pins, so S cannot be freed under it.
@@ -1816,8 +1817,26 @@ package body AHT.Websocket.Client is
 
       --  Synchronous with respect to receiver exit and callbacks: the
       --  transport is closed and the session freed by the time this
-      --  returns.
-      Self.Ctl.Wait_Generation_Done;
+      --  returns normally. Bounded, and the joiner path above lands
+      --  here too, so joining a stalled teardown reports rather than
+      --  blocks.
+      select
+         Self.Ctl.Wait_Generation_Done;
+      or
+         delay Drain_Timeout;
+         --  Nothing is abandoned here and nothing leaks. The receiver
+         --  still owns the session and is still reclaiming it; what
+         --  has run out is this caller's patience, and a later Close
+         --  or Reconnect joins the very same completion. The usual
+         --  cause is a callback that has not returned, which no
+         --  receiver-side mechanism can detect -- Abort_Pending
+         --  cancels transport I/O, not user code.
+         raise AHT.Transport.Timeout_Error
+           with "Websocket.Client.Close: the connection was not "
+             & "reclaimed within" & Duration'Image (Drain_Timeout)
+             & "s; teardown continues in the background (is a "
+             & "callback still running?)";
+      end select;
    end Close;
 
    procedure Receive
