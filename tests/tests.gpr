@@ -19,10 +19,12 @@ project Tests is
    --  leaves the write latch held -- shows up everywhere else as a
    --  hang. The runner walks this list in order, so anything ahead of
    --  it that hung would stop it running at all, which is the failure
-   --  mode it exists to catch.
+   --  mode it exists to catch. Nothing goes above it, however
+   --  harmless that thing looks today: the ordering is an invariant,
+   --  not an observation about the current tests.
    for Main use
-     ("test_ws_budgets.adb",
-      "test_ws_send_guard.adb",
+     ("test_ws_send_guard.adb",
+      "test_ws_budgets.adb",
       "test_bytes_buffer.adb",
       "test_url.adb",
       "test_url_encoding.adb",
