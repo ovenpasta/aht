@@ -440,8 +440,11 @@ begin
       end;
    end;
 
-   --  Case 6: calling Connect a second time on an already-open
-   --  Client raises (single-use).
+   --  Case 6: Connect on an already-open Client raises. Not because
+   --  the client is single-use — it is not, since the per-generation
+   --  session work — but because a live connection is never silently
+   --  displaced to make room for a new one. Admission accepts Idle
+   --  and Disconnected; Open is refused, and the caller closes first.
    declare
       C : AHT.Websocket.Client.Client_Type;
    begin

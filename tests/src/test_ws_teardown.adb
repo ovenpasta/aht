@@ -16,9 +16,12 @@
 --  Cases:
 --    1. With a callback still running, Close reports Timeout_Error
 --       instead of blocking.
---    2. Nothing was abandoned by that report: once the callback
---       returns, a later Close finds the same teardown and completes
---       it, and the client is reusable afterwards.
+--    2. Nothing was abandoned by that report. The client is still
+--       Closing immediately afterwards — checked, because a timeout
+--       that wrongly marked the generation done would leave every
+--       later assertion here passing anyway — and once the callback
+--       returns, a later Close finds the same teardown, completes it,
+--       and the client is reusable.
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;
@@ -147,10 +150,40 @@ begin
                & ", expected Timeout_Error");
    end;
 
+   --  Bounded on both sides. Too slow means the bound was not
+   --  honoured; too fast means it was not waited on at all, and an
+   --  implementation that raised Timeout_Error the moment it was
+   --  asked would satisfy an upper bound alone.
    if Reported and then Ended - Started > 3.0 then
       Fail ("Close took" & Duration'Image (Ended - Started)
             & "s to report a 1.0s drain bound");
    end if;
+   if Reported and then Ended - Started < 0.5 then
+      Fail ("Close reported after only"
+            & Duration'Image (Ended - Started)
+            & "s against a 1.0s drain bound — it did not wait");
+   end if;
+
+   --  The report was a liveness complaint, not a conclusion. If the
+   --  timeout had marked the generation done, or abandoned the
+   --  session, the client would read as Disconnected here and
+   --  everything below would still pass. Configure answers that
+   --  without blocking: it is refused anywhere but Idle and
+   --  Disconnected, so Mode_Error here means the client is still
+   --  Closing and the teardown is still somebody's business.
+   begin
+      AHT.Websocket.Client.Configure
+        (C, AHT.Websocket.Client.Limits'(others => <>));
+      Fail ("Configure was accepted after the drain timeout — the "
+            & "client is no longer Closing, so the teardown was "
+            & "abandoned rather than left running");
+   exception
+      when AHT.Websocket.Mode_Error => null;
+      when E : others =>
+         Fail ("Configure after the drain timeout raised "
+               & Ada.Exceptions.Exception_Name (E)
+               & ", expected Mode_Error");
+   end;
 
    --  Case 2: the report was not an abandonment. The receiver still
    --  owns the session and is still reclaiming it, so releasing the
