@@ -38,6 +38,8 @@ with Ada.Command_Line;
 with Ada.Exceptions;
 with Ada.Text_IO; use Ada.Text_IO;
 
+with Ada.Unchecked_Deallocation;
+
 with AHT.Bytes;
 with AHT.Transport;
 with AHT.Websocket;
@@ -96,6 +98,31 @@ procedure Test_WS_Teardown is
          delay 30.0;   --  backstop; the test releases long before
       end select;
    end On_Message;
+
+   --  Asks the peer whether the connection using this token has put
+   --  anything on the wire. The peer peeks rather than reads, so
+   --  asking does not unblock a writer that is deliberately stuck.
+   function Peer_Saw_Traffic (Token : String) return Boolean is
+      Q   : AHT.Websocket.Client.Client_Type;
+      Msg : AHT.Websocket.Client.Message_Type;
+   begin
+      AHT.Websocket.Client.Connect (Q, Hostile & "/traffic/" & Token);
+      AHT.Websocket.Client.Receive (Q, Msg, Timeout => 10.0);
+      declare
+         Answer : constant String := AHT.Bytes.To_String (Msg.Payload);
+      begin
+         AHT.Websocket.Client.Close (Q, Timeout => 1.0);
+         return Answer = "traffic=yes";
+      end;
+   exception
+      when others =>
+         begin
+            AHT.Websocket.Client.Close (Q, Timeout => 0.0);
+         exception
+            when others => null;
+         end;
+         return False;
+   end Peer_Saw_Traffic;
 
    function Await_In_Callback (Bound : Duration) return Boolean is
       Waited : Duration := 0.0;
@@ -248,6 +275,8 @@ begin
       --  write provably cannot complete while it is not reading. On
       --  the heap: this would not fit the environment task's stack.
       type Bulk_Access is access AHT.Bytes.Byte_Array;
+      procedure Free_Bulk is new Ada.Unchecked_Deallocation
+        (AHT.Bytes.Byte_Array, Bulk_Access);
       Bulk : constant Bulk_Access :=
         new AHT.Bytes.Byte_Array'(1 .. 4 * 1024 * 1024 => 16#5A#);
 
@@ -299,17 +328,29 @@ begin
       if Connected then
          Stuck_Writer.Go;
       end if;
-      delay 1.0;
 
-      if Connected and then Writer.Done then
+      --  Positive confirmation, not an inference from a delay. The
+      --  peer reports (by peeking, so it stays deaf and the writer
+      --  stays blocked) that bytes really arrived; combined with the
+      --  send not having returned, that puts the writer inside the
+      --  transport holding the latch. A bare "it has not finished
+      --  yet" would equally describe a task that had not started.
+      if Connected and then not Peer_Saw_Traffic ("stuck") then
+         Fail ("stuck-writer: the peer never saw any of the write, so "
+               & "nothing was holding the send latch — this case "
+               & "proved nothing");
+      elsif Connected and then Writer.Done then
          Fail ("stuck-writer: the bulk write completed against a peer "
                & "that is not reading, so nothing was holding the "
                & "send latch — this case proved nothing");
       elsif Connected then
+         --  Timeout is deliberately generous relative to the drain:
+         --  it is what both handshake phases share, and a Timeout
+         --  spent twice over shows up here as roughly double.
          Started := Clock;
          begin
             AHT.Websocket.Client.Close
-              (D, Timeout => 0.5, Drain_Timeout => 5.0);
+              (D, Timeout => 2.0, Drain_Timeout => 5.0);
          exception
             when AHT.Transport.Timeout_Error =>
                null;   --  acceptable: bounded either way
@@ -319,14 +360,14 @@ begin
          end;
          Ended := Clock;
 
-         --  The fixture stays deaf for 20s. Anything near that means
-         --  Close waited for the peer to start reading again rather
-         --  than bounding its own acquisition.
-         if Ended - Started > 8.0 then
+         --  The fixture stays deaf for 20s, so waiting it out is
+         --  unmistakable against a 2.0s budget.
+         if Ended - Started > 3.5 then
             Fail ("stuck-writer: Close took"
                   & Duration'Image (Ended - Started)
-                  & "s — it waited out the stuck writer instead of "
-                  & "bounding the latch acquisition");
+                  & "s against a 2.0s handshake budget — it waited "
+                  & "out the stuck writer instead of bounding the "
+                  & "latch acquisition");
          end if;
       end if;
 
@@ -347,6 +388,18 @@ begin
             abort Stuck_Writer;
          end if;
       end;
+
+      --  Only once the task that was writing from it is provably
+      --  gone: freeing it while the write is still in flight would be
+      --  a use-after-free, and freeing it not at all leaks 4 MiB per
+      --  run of this case.
+      if Stuck_Writer'Terminated then
+         declare
+            Owned : Bulk_Access := Bulk;
+         begin
+            Free_Bulk (Owned);
+         end;
+      end if;
    end;
 
    --  Case 4: "do not wait for the peer" still means "send the Close

@@ -23,6 +23,11 @@ The request path selects the behaviour:
   /flood  Many small messages back to back, to outrun a client that
           is not calling Receive.
 
+  /briefdeaf
+          As /deaf, but only briefly: reading resumes part way through
+          a typical caller's timeout, handing the latch over near the
+          deadline rather than never.
+
   /deaf   Stop reading for a long while, with a tiny receive buffer
           so the client's writer backs up after a few KB rather than
           after however many megabytes the kernel felt like holding.
@@ -31,6 +36,13 @@ The request path selects the behaviour:
           how a caller ends up waiting on a latch that writer holds.
 
   /echo   Ordinary echo, for the cases that need a working peer.
+
+  /traffic/<t>
+          Waits until the connection using token <t> has actually put
+          bytes on the wire, and answers. Detected by PEEKING, so the
+          bytes are not consumed and a /deaf peer stays deaf — which
+          matters, because the point of asking is usually to confirm a
+          writer is blocked, and reading would unblock it.
 
   /report/<t>
           Sends back the close code observed on the connection that
@@ -75,6 +87,15 @@ REPORT_WAIT = 5.0     # how long /report waits for its token's close
 DEAF_SECONDS = 20.0   # /deaf: long enough to outlast any client bound
                       # that is working, and to be obvious when one is
                       # not
+BRIEF_DEAF_SECONDS = 1.5
+                      # /briefdeaf: deaf for a while and then not, so a
+                      # blocked writer is released PART WAY through a
+                      # caller's budget. That is the shape that
+                      # exposes a budget spent once per phase rather
+                      # than once per operation -- with a peer that
+                      # stays deaf, the caller gives up on the latch
+                      # and aborts, and the second phase then finishes
+                      # at once instead of running its own full wait.
 
 OP_TEXT = 0x1
 OP_BINARY = 0x2
@@ -91,6 +112,26 @@ OP_CLOSE = 0x8
 # can never be mistaken for another case's.
 _closes: dict[str, "int | None"] = {}
 _closes_cv = threading.Condition()
+
+
+# Whether a connection has sent anything, keyed the same way. Peeked
+# rather than read, so asking does not change the answer.
+_traffic: dict[str, bool] = {}
+_traffic_cv = threading.Condition()
+
+
+def record_traffic(token: str) -> None:
+    if not token:
+        return
+    with _traffic_cv:
+        if token not in _traffic:
+            _traffic[token] = True
+            _traffic_cv.notify_all()
+
+
+def await_traffic(token: str, timeout: float) -> bool:
+    with _traffic_cv:
+        return _traffic_cv.wait_for(lambda: token in _traffic, timeout)
 
 
 def record_close(token: str, code: int | None) -> None:
@@ -233,9 +274,19 @@ def drain(
     out of the record.
     """
     # Not reading at all is the point of /deaf, but stop must still be
-    # honoured, so the wait is in slices rather than one sleep.
+    # honoured, so the wait is in slices rather than one sleep. Each
+    # slice peeks: peeking reports what has arrived without removing
+    # it, so the client's writer stays blocked exactly as intended
+    # while the test still gets told it really is writing.
     waited = 0.0
+    if deaf_for > 0.0:
+        conn.settimeout(0.05)
     while waited < deaf_for and not stop.is_set():
+        try:
+            if conn.recv(1, socket.MSG_PEEK):
+                record_traffic(token)
+        except (TimeoutError, OSError):
+            pass
         time.sleep(0.1)
         waited += 0.1
 
@@ -258,6 +309,7 @@ def drain(
             if taken is None:
                 break
             opcode, payload, buf = taken
+            record_traffic(token)
             if opcode == OP_CLOSE and not seen_close:
                 seen_close = True
                 record_close(
@@ -274,7 +326,7 @@ def serve(conn: socket.socket) -> None:
         conn.close()
         return
 
-    if path.startswith("/deaf"):
+    if path.startswith("/deaf") or path.startswith("/briefdeaf"):
         # Small receive window, so a writer backs up after a few KB.
         try:
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -285,8 +337,13 @@ def serve(conn: socket.socket) -> None:
     reader = threading.Thread(
         target=drain,
         args=(conn, stop,
-              "" if path.startswith("/report") else token_of(path),
-              DEAF_SECONDS if path.startswith("/deaf") else 0.0),
+              ""
+              if path.startswith("/report")
+              or path.startswith("/traffic")
+              else token_of(path),
+              DEAF_SECONDS if path.startswith("/deaf")
+              else BRIEF_DEAF_SECONDS if path.startswith("/briefdeaf")
+              else 0.0),
         daemon=True,
     )
     reader.start()
@@ -306,6 +363,13 @@ def serve(conn: socket.socket) -> None:
             for _ in range(FLOOD_COUNT):
                 conn.sendall(frame(True, OP_BINARY, FLOOD_PAYLOAD))
 
+        elif path.startswith("/traffic"):
+            seen = await_traffic(token_of(path), REPORT_WAIT)
+            conn.sendall(
+                frame(True, OP_TEXT,
+                      (b"traffic=yes" if seen else b"traffic=no"))
+            )
+
         elif path.startswith("/report"):
             found, code = await_close(token_of(path), REPORT_WAIT)
             if not found:
@@ -316,8 +380,8 @@ def serve(conn: socket.socket) -> None:
                 answer = f"close={code}"
             conn.sendall(frame(True, OP_TEXT, answer.encode("ascii")))
 
-        elif path.startswith("/deaf"):
-            pass          # the point is what this one does NOT do
+        elif path.startswith("/deaf") or path.startswith("/briefdeaf"):
+            pass          # the point is what these do NOT do
 
         elif path.startswith("/echo"):
             pass          # the drain thread is all this one needs

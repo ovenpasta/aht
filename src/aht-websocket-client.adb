@@ -1,4 +1,5 @@
 with Ada.Characters.Handling;
+with Ada.Real_Time;
 with Ada.Exceptions;
 with Ada.Finalization;
 with Ada.Strings;
@@ -1728,6 +1729,28 @@ package body AHT.Websocket.Client is
       procedure Close_Handshake (S : Session_Access) is
          Should_Send    : Boolean;
          Already_Closed : Boolean;
+
+         Phase_Start : constant Ada.Real_Time.Time := Ada.Real_Time.Clock;
+
+         --  Timeout is a budget for the whole handshake, not an
+         --  allowance renewed per phase. Both phases are "waiting for
+         --  somebody else" -- another writer to put the latch down,
+         --  then the peer to echo -- and a caller that asked for T
+         --  must not be able to spend 2T because the first phase
+         --  nearly exhausted it and the second started afresh.
+         --
+         --  Computed by subtracting elapsed rather than from an
+         --  absolute deadline, so Duration'Last stays usable: adding
+         --  it to a clock reading would overflow, while subtracting a
+         --  small elapsed span from it does not.
+         function Remaining return Duration is
+            use type Ada.Real_Time.Time;
+            Spent : constant Duration :=
+              Ada.Real_Time.To_Duration
+                (Ada.Real_Time.Clock - Phase_Start);
+         begin
+            return (if Spent >= Timeout then 0.0 else Timeout - Spent);
+         end Remaining;
       begin
          --  RFC 6455 §1.4 close: send our Close (if we haven't yet),
          --  then wait for the receiver to see the peer's echo.
@@ -1745,7 +1768,7 @@ package body AHT.Websocket.Client is
                --  Timeout without Timeout ever being consulted --
                --  WebSocket writes carry no deadline of their own, so
                --  a peer that stops reading is enough to arrange it.
-               Token.Try_Take (Timeout, Got);
+               Token.Try_Take (Remaining, Got);
 
                if Got then
                   begin
@@ -1793,7 +1816,7 @@ package body AHT.Websocket.Client is
             select
                S.State.Wait_Closed;
             or
-               delay Timeout;
+               delay Remaining;
                --  The bound fired; kick the receiver out now rather
                --  than waiting for the pin's Finalize to do it, so a
                --  silent peer costs exactly Timeout.
