@@ -52,6 +52,8 @@ project Tests is
       "test_ws_send_closed.adb",
       "test_ws_limits.adb",
       "test_ws_reconnect.adb",
+      "test_ws_reconnect_blocked_callback.adb",
+      "test_ws_reconnect_concurrency.adb",
       "test_ws_reconnect_fragment.adb",
       "test_ws_reconnect_isolation.adb",
       "test_ws_reconnect_leak.adb",
