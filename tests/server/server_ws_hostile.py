@@ -48,6 +48,17 @@ The request path selects the behaviour:
           complete the RFC handshake and has to abort the receiver,
           which is exactly why some tests want it.
 
+  /deafping/<t>
+          Like /deaf, but sends a Ping once this connection has been
+          OBSERVED writing -- detected by the same peek /traffic uses,
+          so the bytes are not consumed and the peer stays deaf. Only
+          then is a writer really in the transport holding the send
+          guard, so only then does the client's receiver find itself
+          queued behind one in order to answer with a Pong. Sleeping a
+          fixed time instead would sometimes send the Ping before any
+          writer had started, and the receiver-side gate would not be
+          exercised at all.
+
   /pong/<t>
           Sends back whether a Pong was seen on the connection using
           token <t>, waiting a bounded time for it. Frames are
@@ -406,7 +417,7 @@ def serve(conn: socket.socket) -> None:
 
     route = route_of(path)
 
-    if route == "deaf":
+    if route in ("deaf", "deafping"):
         # Small receive window, so a writer backs up after a few KB.
         try:
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -420,7 +431,7 @@ def serve(conn: socket.socket) -> None:
               ""
               if route in ("report", "traffic", "pong")
               else token_of(path),
-              DEAF_SECONDS if route == "deaf" else 0.0),
+              DEAF_SECONDS if route in ("deaf", "deafping") else 0.0),
         daemon=True,
     )
     reader.start()
@@ -479,6 +490,22 @@ def serve(conn: socket.socket) -> None:
 
         elif route == "deaf":
             pass          # the point is what this one does NOT do
+
+        elif route == "deafping":
+            # Wait for evidence that this connection is actually
+            # writing before pinging. The drain thread peeks rather
+            # than reads, so asking does not unblock the writer -- the
+            # whole point is that it stays parked.
+            #
+            # A fixed sleep was wrong here: it sends the Ping whether
+            # or not a writer ever started, so the receiver could
+            # answer with the guard free and the contention this route
+            # exists to create would never happen.
+            if await_traffic(token_of(path), REPORT_WAIT):
+                try:
+                    conn.sendall(frame(True, OP_PING, b"gate"))
+                except OSError:
+                    pass
 
         elif route == "echo":
             pass          # the drain thread is all this one needs
