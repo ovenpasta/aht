@@ -20,6 +20,16 @@ The request path selects the behaviour:
           this is only refused if the limit is tracked across the
           logical message rather than per frame.
 
+  /fragstall
+          Send the FIRST fragment of a text message — FIN = 0, so the
+          message is explicitly not over — and then nothing at all,
+          holding the socket open. The client is left holding
+          reassembly state for a message that will never complete,
+          which is the state a reconnect has to discard. The payload
+          is recognisable on purpose: if it ever survives into the
+          next generation, it arrives prepended to that generation's
+          first message and says exactly where it came from.
+
   /flood  Many small messages back to back, to outrun a client that
           is not calling Receive.
 
@@ -78,6 +88,11 @@ FRAG_PART = 64 * 1024
 FRAG_PARTS = 512      # 32 MiB total, far past the small ceilings tested
 FLOOD_COUNT = 20_000
 FLOOD_PAYLOAD = b"x" * 256
+
+# /fragstall's opening fragment. Distinctive rather than arbitrary: a
+# test that finds these bytes in a later generation's message knows
+# what leaked and from where, which "aaaa" would not tell it.
+FRAGSTALL_PART = b"STALE-FRAGMENT-"
 REPORT_WAIT = 5.0     # how long /report waits for its token's close
 DEAF_SECONDS = 20.0   # /deaf: long enough to outlast any client bound
                       # that is working, and to be obvious when one is
@@ -190,6 +205,20 @@ def token_of(path: str) -> str:
     """The trailing /<token> segment, or "" if there is none."""
     parts = [p for p in path.split("/") if p]
     return parts[1] if len(parts) > 1 else ""
+
+
+def route_of(path: str) -> str:
+    """The leading path segment, matched exactly.
+
+    Exactly, and not by prefix: `/fragstall` starts with `/frag`, so a
+    startswith dispatch silently routed it to the fragment flood and
+    the test that depended on it failed with a close code from a
+    behaviour it never asked for. Every route here is one segment, and
+    anything after it is the token, so there is nothing a prefix match
+    buys that this does not.
+    """
+    parts = [p for p in path.split("/") if p]
+    return parts[0] if parts else ""
 
 
 def handshake(conn: socket.socket, req: str) -> str:
@@ -333,7 +362,9 @@ def serve(conn: socket.socket) -> None:
         conn.close()
         return
 
-    if path.startswith("/deaf"):
+    route = route_of(path)
+
+    if route == "deaf":
         # Small receive window, so a writer backs up after a few KB.
         try:
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
@@ -344,38 +375,38 @@ def serve(conn: socket.socket) -> None:
     reader = threading.Thread(
         target=drain,
         args=(conn, stop,
-              ""
-              if path.startswith("/report")
-              or path.startswith("/traffic")
-              else token_of(path),
-              DEAF_SECONDS if path.startswith("/deaf") else 0.0),
+              "" if route in ("report", "traffic") else token_of(path),
+              DEAF_SECONDS if route == "deaf" else 0.0),
         daemon=True,
     )
     reader.start()
 
     try:
-        if path.startswith("/huge"):
+        if route == "huge":
             conn.sendall(lying_header(1024 * 1024 * 1024))
 
-        elif path.startswith("/frag"):
+        elif route == "frag":
             part = b"f" * FRAG_PART
             conn.sendall(frame(False, OP_BINARY, part))
             for _ in range(FRAG_PARTS - 1):
                 conn.sendall(frame(False, OP_CONT, part))
             conn.sendall(frame(True, OP_CONT, part))
 
-        elif path.startswith("/flood"):
+        elif route == "fragstall":
+            conn.sendall(frame(False, OP_TEXT, FRAGSTALL_PART))
+
+        elif route == "flood":
             for _ in range(FLOOD_COUNT):
                 conn.sendall(frame(True, OP_BINARY, FLOOD_PAYLOAD))
 
-        elif path.startswith("/traffic"):
+        elif route == "traffic":
             seen = await_traffic(token_of(path), REPORT_WAIT)
             conn.sendall(
                 frame(True, OP_TEXT,
                       (b"traffic=yes" if seen else b"traffic=no"))
             )
 
-        elif path.startswith("/report"):
+        elif route == "report":
             found, code = await_close(token_of(path), REPORT_WAIT)
             if not found:
                 answer = "close=timeout"
@@ -385,10 +416,10 @@ def serve(conn: socket.socket) -> None:
                 answer = f"close={code}"
             conn.sendall(frame(True, OP_TEXT, answer.encode("ascii")))
 
-        elif path.startswith("/deaf"):
+        elif route == "deaf":
             pass          # the point is what this one does NOT do
 
-        elif path.startswith("/echo"):
+        elif route == "echo":
             pass          # the drain thread is all this one needs
 
         # Hold the connection open so a client that fails is failing on
