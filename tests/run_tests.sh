@@ -177,17 +177,26 @@ for _ in $(seq 1 50); do
     fi
     sleep 0.1
 done
-HAS_HTTP=$(grep -c    '^READY http '    "$LOG" 2>/dev/null || echo 0)
-HAS_WS=$(grep -c      '^READY ws '      "$LOG" 2>/dev/null || echo 0)
-HAS_TLS=$(grep -c     '^READY tls '     "$LOG" 2>/dev/null || echo 0)
-HAS_STALL=$(grep -c   '^READY stall '   "$LOG" 2>/dev/null || echo 0)
-HAS_WSS=$(grep -c     '^READY wss '     "$LOG" 2>/dev/null || echo 0)
-HAS_TLSDEAF=$(grep -c '^READY tlsdeaf ' "$LOG" 2>/dev/null || echo 0)
-HAS_TLSABRUPT=$(grep -c '^READY tlsabrupt ' "$LOG" 2>/dev/null || echo 0)
-HAS_TLSCORRUPT=$(grep -c '^READY tlscorrupt ' "$LOG" 2>/dev/null || echo 0)
-HAS_TLSBADHS=$(grep -c '^READY tlsbadhandshake ' "$LOG" 2>/dev/null || echo 0)
-HAS_TLSCONC=$(grep -c '^READY tlsconcurrent ' "$LOG" 2>/dev/null || echo 0)
-HAS_WSHOSTILE=$(grep -c '^READY wshostile ' "$LOG" 2>/dev/null || echo 0)
+# Re-read for the verdict. `|| true` and NOT `|| echo 0`: grep -c
+# already prints 0 when nothing matched, it just exits non-zero, so
+# adding an echo produced a two-line "0\n0". Every numeric test below
+# then failed with "integer expected" -- and because they sit inside
+# an `if` condition, set -e does not see it, so the runner sailed past
+# its own fixture check and ran the suite against whatever happened to
+# be listening on those ports. A stale fixture from an earlier run
+# would have been used silently. The polling loop above always had
+# this right; only the verdict did not.
+HAS_HTTP=$(grep -c    '^READY http '    "$LOG" 2>/dev/null || true)
+HAS_WS=$(grep -c      '^READY ws '      "$LOG" 2>/dev/null || true)
+HAS_TLS=$(grep -c     '^READY tls '     "$LOG" 2>/dev/null || true)
+HAS_STALL=$(grep -c   '^READY stall '   "$LOG" 2>/dev/null || true)
+HAS_WSS=$(grep -c     '^READY wss '     "$LOG" 2>/dev/null || true)
+HAS_TLSDEAF=$(grep -c '^READY tlsdeaf ' "$LOG" 2>/dev/null || true)
+HAS_TLSABRUPT=$(grep -c '^READY tlsabrupt ' "$LOG" 2>/dev/null || true)
+HAS_TLSCORRUPT=$(grep -c '^READY tlscorrupt ' "$LOG" 2>/dev/null || true)
+HAS_TLSBADHS=$(grep -c '^READY tlsbadhandshake ' "$LOG" 2>/dev/null || true)
+HAS_TLSCONC=$(grep -c '^READY tlsconcurrent ' "$LOG" 2>/dev/null || true)
+HAS_WSHOSTILE=$(grep -c '^READY wshostile ' "$LOG" 2>/dev/null || true)
 if [ "$HAS_HTTP" -lt 1 ] || [ "$HAS_WS" -lt 1 ] \
    || [ "$HAS_TLS" -lt 1 ] || [ "$HAS_STALL" -lt 1 ] \
    || [ "$HAS_WSS" -lt 1 ] || [ "$HAS_TLSDEAF" -lt 1 ] \

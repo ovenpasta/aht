@@ -7,7 +7,7 @@
 --  where hand-written cleanup fails and controlled finalization has
 --  to carry the invariant instead.
 --
---  Four cases, in the order they run. How firmly each lands on the
+--  Five cases, in the order they run. How firmly each lands on the
 --  state it means to test differs, so that is stated per case rather
 --  than claimed uniformly.
 --
@@ -47,6 +47,14 @@
 --       would block on it forever. Two senders are aborted together:
 --       one parked in Write provably holding the guard, one still on
 --       its entry queue, covering the holder and cancellation paths.
+--
+--    5. Abort across ADMISSION, then redial. Admission and the
+--       creation of the object responsible for releasing it must
+--       happen in one protected action; if they do not, an abort
+--       between them leaves the client admitted and unowned, and
+--       every later Connect is refused forever. The window cannot be
+--       steered into, so this guards the consequence rather than the
+--       race -- see the note on the case itself.
 --
 --  The guard's own ownership protocol is exercised separately, by
 --  test_ws_send_guard: those cases leave a latch permanently held if
@@ -523,13 +531,48 @@ begin
    begin
       --  How long a clean handshake takes, so the sweep brackets the
       --  handoff instead of guessing at it.
+      --
+      --  Measured as the FASTEST of several, after warming up, and not
+      --  as one cold sample. A first connect pays for page faults, the
+      --  fixture's own accept path and whatever else is cold, and comes
+      --  out several times slower than steady state -- and since every
+      --  deadline below is a multiple of this number, an inflated
+      --  reading puts the whole sweep past the point where the
+      --  connect has already finished. Nothing is torn, and the case
+      --  fails reporting that it did not bracket the handshake. That
+      --  was a real intermittent failure, about one run in six.
+      --
+      --  The minimum is the right statistic precisely because the
+      --  sweep has to reach BELOW the quickest connect it will race;
+      --  an average would be dragged up by exactly the slow samples
+      --  that caused the problem.
       declare
-         C     : AHT.Websocket.Client.Client_Type;
-         Start : constant Time := Clock;
+         Warm : constant := 3;
+         Runs : constant := 5;
       begin
-         AHT.Websocket.Client.Connect (C, Echo_URL);
-         Calibrate := Clock - Start;
-         AHT.Websocket.Client.Close (C);
+         for I in 1 .. Warm loop
+            declare
+               C : AHT.Websocket.Client.Client_Type;
+            begin
+               AHT.Websocket.Client.Connect (C, Echo_URL);
+               AHT.Websocket.Client.Close (C);
+            end;
+         end loop;
+
+         for I in 1 .. Runs loop
+            declare
+               C     : AHT.Websocket.Client.Client_Type;
+               Start : constant Time := Clock;
+               Took  : Duration;
+            begin
+               AHT.Websocket.Client.Connect (C, Echo_URL);
+               Took := Clock - Start;
+               AHT.Websocket.Client.Close (C);
+               if Calibrate = 0.0 or else Took < Calibrate then
+                  Calibrate := Took;
+               end if;
+            end;
+         end loop;
       exception
          when E : others =>
             Fail ("handoff-sweep: calibration Connect raised "
@@ -541,11 +584,15 @@ begin
       if Calibrate > 0.0 then
          for I in 1 .. Samples loop
             declare
-               --  Across roughly half to one-and-a-half of a
-               --  handshake, so the abort lands everywhere from the
-               --  dial to just past the rendezvous.
+               --  From a tenth of a handshake to one and a half, so
+               --  the abort lands everywhere from early in the dial to
+               --  just past the rendezvous. The span starts far below
+               --  the calibrated time on purpose: connect duration
+               --  varies run to run, and a sweep that began at half of
+               --  one reading could sit entirely above a connect that
+               --  happened to be quick.
                Fraction : constant Float :=
-                 0.5 + Float (I) / Float (Samples);
+                 0.1 + 1.4 * Float (I) / Float (Samples);
                When_To_Abort : constant Duration :=
                  Duration (Float (Calibrate) * Fraction);
                C   : AHT.Websocket.Client.Client_Type;
@@ -878,13 +925,21 @@ begin
          Fail ("admission-sweep: no sample was torn, so the abort "
                & "never landed anywhere near admission and the "
                & "retries checked nothing");
+      elsif Admitted /= Torn then
+         --  Every torn sample must have been redialled successfully.
+         --  Anything else means a retry neither raised Handshake_Error
+         --  nor got in, which the loop above would not otherwise
+         --  account for.
+         Fail ("admission-sweep:" & Torn'Image & " samples torn but"
+               & Admitted'Image & " readmitted — the difference is"
+               & " unaccounted for");
       end if;
    end;
 
    if Failures = 0 then
       Put_Line ("test_ws_abort: OK (teardown winner, connect attempt,"
-                & " handoff sweep and senders around the guard all"
-                & " survive being aborted)");
+                & " handoff sweep, senders around the guard and"
+                & " admission all survive being aborted)");
       Ada.Command_Line.Set_Exit_Status (0);
    else
       Put_Line ("test_ws_abort:" & Failures'Image & " failure(s)");

@@ -40,6 +40,7 @@
 with Ada.Command_Line;
 with Ada.Exceptions;
 with Ada.Strings.Fixed;
+with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Text_IO; use Ada.Text_IO;
 
 with AHT.Bytes;
@@ -74,22 +75,62 @@ procedure Test_WS_Reconnect_Fragment is
 
    --  Ask the fixture whether the connection tagged `Token` produced a
    --  Pong. It answers on a second, ordinary connection.
-   function Saw_Pong (Token : String) return Boolean is
+   --
+   --  Q is closed on EVERY path, including the failing ones. Simply
+   --  returning would leave its receiver task parked on a socket this
+   --  fixture holds open for thirty seconds, and Ada waits for
+   --  dependent tasks at scope exit — so a failed report would stall
+   --  the test for half a minute rather than reporting promptly.
+   --  Close is itself wrapped, because by then the connection may
+   --  already be gone and its failure must not displace the original
+   --  diagnosis.
+   procedure Saw_Pong
+     (Token : String;
+      Seen  : out Boolean;
+      Why   : out Unbounded_String)
+   is
       Q   : AHT.Websocket.Client.Client_Type;
       Msg : AHT.Websocket.Client.Message_Type;
-   begin
-      AHT.Websocket.Client.Connect
-        (Q, "ws://127.0.0.1:8777/pong/" & Token);
-      AHT.Websocket.Client.Receive (Q, Msg, Timeout => 8.0);
-      declare
-         Answer : constant String := To_String (Msg.Payload);
+
+      procedure Shut_Down is
       begin
          AHT.Websocket.Client.Close (Q, Timeout => 1.0);
-         return Answer = "pong=yes";
+      exception
+         when others => null;
+      end Shut_Down;
+   begin
+      Seen := False;
+      Why  := Null_Unbounded_String;
+
+      AHT.Websocket.Client.Connect
+        (Q, "ws://127.0.0.1:8777/pong/" & Token);
+      begin
+         AHT.Websocket.Client.Receive (Q, Msg, Timeout => 8.0);
+         declare
+            Answer : constant String := To_String (Msg.Payload);
+         begin
+            Seen := Answer = "pong=yes";
+            if not Seen then
+               Why := To_Unbounded_String
+                 ("the fixture answered """ & Answer & """");
+            end if;
+         end;
+      exception
+         when E : others =>
+            Why := To_Unbounded_String
+              ("reading the report raised "
+               & Ada.Exceptions.Exception_Name (E) & ": "
+               & Ada.Exceptions.Exception_Message (E));
       end;
+      Shut_Down;
    exception
-      when others =>
-         return False;
+      when E : others =>
+         --  Could not even reach the fixture to ask.
+         Why := To_Unbounded_String
+           ("the report connection raised "
+            & Ada.Exceptions.Exception_Name (E) & ": "
+            & Ada.Exceptions.Exception_Message (E));
+         Shut_Down;
    end Saw_Pong;
 
    --  Confirm the client really is holding an incomplete message.
@@ -127,12 +168,18 @@ procedure Test_WS_Reconnect_Fragment is
             return;
       end;
 
-      if not Saw_Pong (Token) then
-         Fail (What & ": the fixture never saw a Pong, so the "
-               & "fragment was never consumed — nothing was being "
-               & "held, and the silence above proves nothing about "
-               & "reassembly state");
-      end if;
+      declare
+         Seen : Boolean;
+         Why  : Unbounded_String;
+      begin
+         Saw_Pong (Token, Seen, Why);
+         if not Seen then
+            Fail (What & ": the fixture never saw a Pong, so the "
+                  & "fragment was never consumed — nothing was being "
+                  & "held, and the silence above proves nothing about "
+                  & "reassembly state (" & To_String (Why) & ")");
+         end if;
+      end;
    end Expect_Held_Incomplete;
 
    --  Round-trip on a connection that is expected to be clean, and
@@ -233,9 +280,14 @@ begin
       --  Generation two is mid-fragment in its own right: one
       --  accumulator was discarded and a fresh one started, rather
       --  than the old one being carried forward and topped up.
-      --  Generation two is mid-fragment in its own right, and the
-      --  token differs, so this Pong cannot be the previous
-      --  generation's answer arriving late.
+      --
+      --  Deliberately the SAME token as generation one, and safe
+      --  because await_pong consumes its record: the first
+      --  generation's Pong was already taken by the check above, so
+      --  the fixture has nothing left to answer with and a "yes" here
+      --  can only come from a Pong this generation produced. A stale
+      --  answer would report the fragment as consumed when this
+      --  connection had never received one.
       Expect_Held_Incomplete ("reconnect", C, "b1");
 
       AHT.Websocket.Client.Close (C);

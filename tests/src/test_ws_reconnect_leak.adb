@@ -23,7 +23,15 @@
 --       receiver task is persistent here — it outlives every session
 --       it runs — so anything this finds is per-session: a transport
 --       not closed, a session not freed, an fd left behind by
---       reclamation, or a saved-parameter copy that accumulates.
+--       reclamation.
+--
+--       Note what running that path does NOT buy. Reconnect copies
+--       the saved parameters on every redial, and a copy that
+--       accumulated would be ordinary heap growth — invisible to
+--       both counters here, since neither a descriptor nor a thread
+--       is involved. The path is exercised, and a leak of anything
+--       the OS accounts for is caught; plain memory is not, and this
+--       test should not be read as covering it.
 --
 --    2. Many clients, one generation each. Here the receiver task
 --       itself is created and terminated every cycle, so this is the
