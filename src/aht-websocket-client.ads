@@ -416,11 +416,23 @@ private
       --  Callback_Only-has-a-callback check. Split into a sequence,
       --  Configure would race the state check and Set_On_Message
       --  (null) would race the callback check.
+      --
+      --  Owner_Gen points at the admission owner's own generation
+      --  field, and this writes the reserved generation through it
+      --  from inside the protected action. That is the record of "an
+      --  admission is outstanding, and this object is responsible for
+      --  it", and it has to be made HERE rather than by the caller
+      --  afterwards: abort is deferred inside a protected action and
+      --  takes effect the moment one ends, so anything the caller
+      --  does on the next line can be skipped. An `out` parameter is
+      --  not good enough for the same reason — the copy-back is not
+      --  delivered to an aborted caller.
       procedure Begin_Connect
-        (P      : Connect_Params;
-         Gen    : out Natural;
-         L      : out Limits;
-         Result : out Admission_Result);
+        (P         : Connect_Params;
+         Owner_Gen : access Natural;
+         Gen       : out Natural;
+         L         : out Limits;
+         Result    : out Admission_Result);
       --  The parameters of the last connect that actually succeeded.
       --  OK is False before there has been one.
       procedure Saved_Params (P : out Connect_Params; OK : out Boolean);

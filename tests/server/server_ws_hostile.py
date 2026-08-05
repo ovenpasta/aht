@@ -40,7 +40,19 @@ The request path selects the behaviour:
           is all it takes to park a writer indefinitely — which is
           how a caller ends up waiting on a latch that writer holds.
 
-  /echo   Ordinary echo, for the cases that need a working peer.
+  /echo   Drains whatever it is sent and holds the socket open, and
+          sends NOTHING -- not even a Close in answer to one. The name
+          is historical; it is a silent peer, not an echo, and tests
+          that need a real echo use the ordinary fixture on 8765.
+          Tearing a connection to this peer down therefore cannot
+          complete the RFC handshake and has to abort the receiver,
+          which is exactly why some tests want it.
+
+  /pong/<t>
+          Sends back whether a Pong was seen on the connection using
+          token <t>, waiting a bounded time for it. Frames are
+          processed in order, so this reports that everything the
+          fixture sent before its Ping was consumed.
 
   /traffic/<t>
           Waits until the connection using token <t> has actually put
@@ -102,6 +114,8 @@ OP_TEXT = 0x1
 OP_BINARY = 0x2
 OP_CONT = 0x0
 OP_CLOSE = 0x8
+OP_PING = 0x9
+OP_PONG = 0xA
 
 # Close codes observed, keyed by the token the test put in the path.
 #
@@ -119,6 +133,32 @@ _closes_cv = threading.Condition()
 # rather than read, so asking does not change the answer.
 _traffic: dict[str, bool] = {}
 _traffic_cv = threading.Condition()
+
+
+# Pongs observed, keyed by token. A Pong proves the client's receiver
+# processed the frames ahead of it, which is the only way a test can
+# tell "holding an incomplete message" apart from "never received
+# anything".
+_pongs: dict[str, bool] = {}
+_pongs_cv = threading.Condition()
+
+
+def record_pong(token: str) -> None:
+    if not token:
+        return
+    with _pongs_cv:
+        if token not in _pongs:
+            _pongs[token] = True
+            _pongs_cv.notify_all()
+
+
+def await_pong(token: str, timeout: float) -> bool:
+    """Wait (bounded) for this token's Pong, then forget it."""
+    with _pongs_cv:
+        found = _pongs_cv.wait_for(lambda: token in _pongs, timeout)
+        if found:
+            _pongs.pop(token, None)
+        return found
 
 
 def record_traffic(token: str) -> None:
@@ -346,6 +386,8 @@ def drain(
             if not seen_traffic:
                 seen_traffic = True
                 record_traffic(token)
+            if opcode == OP_PONG:
+                record_pong(token)
             if opcode == OP_CLOSE and not seen_close:
                 seen_close = True
                 record_close(
@@ -375,7 +417,9 @@ def serve(conn: socket.socket) -> None:
     reader = threading.Thread(
         target=drain,
         args=(conn, stop,
-              "" if route in ("report", "traffic") else token_of(path),
+              ""
+              if route in ("report", "traffic", "pong")
+              else token_of(path),
               DEAF_SECONDS if route == "deaf" else 0.0),
         daemon=True,
     )
@@ -394,6 +438,16 @@ def serve(conn: socket.socket) -> None:
 
         elif route == "fragstall":
             conn.sendall(frame(False, OP_TEXT, FRAGSTALL_PART))
+            # Then a Ping, and nothing else ever.
+            #
+            # Frames are processed in order, so a Pong coming back
+            # proves the fragment ahead of it was consumed -- which a
+            # test cannot otherwise establish. Without this, "nothing
+            # was delivered" is equally consistent with the client
+            # holding an incomplete message and with the fixture
+            # having sent nothing at all, and the anti-vacuity check
+            # is itself vacuous.
+            conn.sendall(frame(True, OP_PING, token_of(path).encode()))
 
         elif route == "flood":
             for _ in range(FLOOD_COUNT):
@@ -404,6 +458,13 @@ def serve(conn: socket.socket) -> None:
             conn.sendall(
                 frame(True, OP_TEXT,
                       (b"traffic=yes" if seen else b"traffic=no"))
+            )
+
+        elif route == "pong":
+            seen = await_pong(token_of(path), REPORT_WAIT)
+            conn.sendall(
+                frame(True, OP_TEXT,
+                      (b"pong=yes" if seen else b"pong=no"))
             )
 
         elif route == "report":

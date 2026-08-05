@@ -125,6 +125,38 @@ procedure Test_WS_Reconnect_Isolation is
    function Parked_Done return Boolean is (Parked.Done);
 
    ---------------------------------------------------------------
+   --  Case 2 plumbing
+   ---------------------------------------------------------------
+
+   Backlog_Size : constant := 3;
+
+   --  Counts echoes as they arrive, so case 2 can wait for the whole
+   --  backlog to exist before it consumes any of it.
+   protected Arrived is
+      procedure Note;
+      function  Count return Natural;
+   private
+      N : Natural := 0;
+   end Arrived;
+
+   protected body Arrived is
+      procedure Note is
+      begin
+         N := N + 1;
+      end Note;
+      function Count return Natural is (N);
+   end Arrived;
+
+   procedure Count_Backlog (Msg : AHT.Websocket.Client.Message_Type) is
+      pragma Unreferenced (Msg);
+   begin
+      Arrived.Note;
+   end Count_Backlog;
+
+   function Backlog_Arrived return Boolean is
+     (Arrived.Count >= Backlog_Size);
+
+   ---------------------------------------------------------------
    --  Case 3 plumbing
    ---------------------------------------------------------------
 
@@ -267,19 +299,35 @@ begin
       C   : AHT.Websocket.Client.Client_Type;
       Msg : AHT.Websocket.Client.Message_Type;
    begin
+      --  Delivery is Both by default, so the callback counts arrivals
+      --  while the inbox keeps them. That is what makes the wait
+      --  below exact instead of a guess.
+      AHT.Websocket.Client.Set_On_Message
+        (C, Count_Backlog'Unrestricted_Access);
       AHT.Websocket.Client.Connect (C, Echo);
 
       --  Queue several and read none of them.
-      for I in 1 .. 3 loop
+      for I in 1 .. Backlog_Size loop
          AHT.Websocket.Client.Send_Text (C, "backlog" & Integer'Image (I));
       end loop;
 
-      --  Give the echoes time to arrive and be queued. Without this
-      --  the case could pass because nothing was ever in the inbox,
-      --  which would prove nothing about discarding it.
-      delay 0.5;
+      --  Wait for ALL of them, rather than sleeping and hoping.
+      --
+      --  A fixed delay was not good enough: it establishes only that
+      --  at least one arrived, and taking that one would then leave
+      --  nothing unread — so the "new connection's inbox is empty"
+      --  check below would pass with no backlog to discard, proving
+      --  nothing. The case needs a backlog that outlives the message
+      --  it consumes.
+      if not Await (Backlog_Arrived'Unrestricted_Access, 10.0) then
+         Fail ("backlog: only" & Natural'Image (Arrived.Count) & " of"
+               & Natural'Image (Backlog_Size)
+               & " echoes arrived, so there is no unread backlog and "
+               & "discarding it proves nothing");
+      end if;
 
-      --  Prove the backlog is really there, by taking one. Two remain.
+      --  Take exactly one. The rest stay unread, and are what the
+      --  reconnect below has to discard.
       begin
          AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
       exception

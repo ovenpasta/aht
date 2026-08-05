@@ -50,7 +50,12 @@ with AHT.Websocket.Client;
 procedure Test_WS_Reconnect_Fragment is
 
    Echo   : constant String := "ws://127.0.0.1:8765/";
-   Stall  : constant String := "ws://127.0.0.1:8777/fragstall";
+
+   --  Tokenised, so the Pong that proves consumption is tied to the
+   --  connection that produced it rather than to whatever happened
+   --  most recently on the fixture.
+   function Stall (Token : String) return String is
+     ("ws://127.0.0.1:8777/fragstall/" & Token);
 
    --  What the fixture leaves in the accumulator. Kept in step with
    --  FRAGSTALL_PART in server_ws_hostile.py.
@@ -67,30 +72,68 @@ procedure Test_WS_Reconnect_Fragment is
    function To_String (V : AHT.Bytes.Buffer) return String is
      (AHT.Bytes.To_String (V));
 
+   --  Ask the fixture whether the connection tagged `Token` produced a
+   --  Pong. It answers on a second, ordinary connection.
+   function Saw_Pong (Token : String) return Boolean is
+      Q   : AHT.Websocket.Client.Client_Type;
+      Msg : AHT.Websocket.Client.Message_Type;
+   begin
+      AHT.Websocket.Client.Connect
+        (Q, "ws://127.0.0.1:8777/pong/" & Token);
+      AHT.Websocket.Client.Receive (Q, Msg, Timeout => 8.0);
+      declare
+         Answer : constant String := To_String (Msg.Payload);
+      begin
+         AHT.Websocket.Client.Close (Q, Timeout => 1.0);
+         return Answer = "pong=yes";
+      end;
+   exception
+      when others =>
+         return False;
+   end Saw_Pong;
+
    --  Confirm the client really is holding an incomplete message.
    --
-   --  Without this the test could pass for the wrong reason: if the
-   --  fragment never arrived, there would be no reassembly state to
-   --  survive, and a client that carries such state forward would
-   --  still look clean. Nothing may be delivered here — the message
-   --  has no FIN — so a Receive that returns is itself the failure.
-   procedure Expect_Nothing_Deliverable
-     (What : String;
-      C    : in out AHT.Websocket.Client.Client_Type)
+   --  Two things have to be true, and checking only the first is what
+   --  makes this kind of check quietly useless: nothing may be
+   --  delivered (the message has no FIN), AND the fragment must
+   --  actually have been received. A timeout alone cannot tell those
+   --  apart — a fixture that sent nothing at all produces exactly the
+   --  same silence, and then a client that DOES carry reassembly
+   --  state forward would still look clean here.
+   --
+   --  So the fixture sends a Ping after the fragment. Frames are
+   --  processed in order, so the Pong coming back proves the fragment
+   --  ahead of it was consumed.
+   procedure Expect_Held_Incomplete
+     (What  : String;
+      C     : in out AHT.Websocket.Client.Client_Type;
+      Token : String)
    is
       Msg : AHT.Websocket.Client.Message_Type;
    begin
-      AHT.Websocket.Client.Receive (C, Msg, Timeout => 1.0);
-      Fail (What & ": Receive delivered """ & To_String (Msg.Payload)
-            & """ from a message that has no final frame");
-   exception
-      when AHT.Transport.Timeout_Error =>
-         null;   --  correct: incomplete, so nothing to deliver
-      when E : others =>
-         Fail (What & ": waiting on the incomplete message raised "
-               & Ada.Exceptions.Exception_Name (E) & ": "
-               & Ada.Exceptions.Exception_Message (E));
-   end Expect_Nothing_Deliverable;
+      begin
+         AHT.Websocket.Client.Receive (C, Msg, Timeout => 1.0);
+         Fail (What & ": Receive delivered """ & To_String (Msg.Payload)
+               & """ from a message that has no final frame");
+         return;
+      exception
+         when AHT.Transport.Timeout_Error =>
+            null;   --  correct: incomplete, so nothing to deliver
+         when E : others =>
+            Fail (What & ": waiting on the incomplete message raised "
+                  & Ada.Exceptions.Exception_Name (E) & ": "
+                  & Ada.Exceptions.Exception_Message (E));
+            return;
+      end;
+
+      if not Saw_Pong (Token) then
+         Fail (What & ": the fixture never saw a Pong, so the "
+               & "fragment was never consumed — nothing was being "
+               & "held, and the silence above proves nothing about "
+               & "reassembly state");
+      end if;
+   end Expect_Held_Incomplete;
 
    --  Round-trip on a connection that is expected to be clean, and
    --  say precisely what went wrong when it is not.
@@ -134,7 +177,7 @@ begin
       C : AHT.Websocket.Client.Client_Type;
    begin
       begin
-         AHT.Websocket.Client.Connect (C, Stall);
+         AHT.Websocket.Client.Connect (C, Stall ("a1"));
       exception
          when E : others =>
             Fail ("close-then-connect: Connect raised "
@@ -146,7 +189,7 @@ begin
             return;
       end;
 
-      Expect_Nothing_Deliverable ("close-then-connect", C);
+      Expect_Held_Incomplete ("close-then-connect", C, "a1");
       AHT.Websocket.Client.Close (C);
 
       begin
@@ -169,8 +212,8 @@ begin
    declare
       C : AHT.Websocket.Client.Client_Type;
    begin
-      AHT.Websocket.Client.Connect (C, Stall);
-      Expect_Nothing_Deliverable ("reconnect", C);
+      AHT.Websocket.Client.Connect (C, Stall ("b1"));
+      Expect_Held_Incomplete ("reconnect", C, "b1");
 
       begin
          AHT.Websocket.Client.Reconnect (C);
@@ -190,7 +233,10 @@ begin
       --  Generation two is mid-fragment in its own right: one
       --  accumulator was discarded and a fresh one started, rather
       --  than the old one being carried forward and topped up.
-      Expect_Nothing_Deliverable ("reconnect", C);
+      --  Generation two is mid-fragment in its own right, and the
+      --  token differs, so this Pong cannot be the previous
+      --  generation's answer arriving late.
+      Expect_Held_Incomplete ("reconnect", C, "b1");
 
       AHT.Websocket.Client.Close (C);
       AHT.Websocket.Client.Connect (C, Echo);

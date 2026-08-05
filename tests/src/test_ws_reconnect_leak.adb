@@ -14,10 +14,16 @@
 --
 --  Two shapes, because they leak differently:
 --
---    1. One client, many generations. The receiver task is persistent
---       here — it outlives every session it runs — so anything this
---       finds is per-session: a transport not closed, a session not
---       freed, an fd left behind by reclamation.
+--    1. One client, many generations, driven by Reconnect — which is
+--       the operation the plan asked to be cycled. The connection is
+--       never closed in between: each Reconnect drains the live one
+--       and redials from the saved parameters. That covers the
+--       drain-and-redial path and the parameter copying that goes
+--       with it, neither of which a Connect/Close loop reaches. The
+--       receiver task is persistent here — it outlives every session
+--       it runs — so anything this finds is per-session: a transport
+--       not closed, a session not freed, an fd left behind by
+--       reclamation, or a saved-parameter copy that accumulates.
 --
 --    2. Many clients, one generation each. Here the receiver task
 --       itself is created and terminated every cycle, so this is the
@@ -116,22 +122,47 @@ procedure Test_WS_Reconnect_Leak is
    --  round-trip matters — a Connect that returned without a usable
    --  connection would allocate less, and could hide a leak by never
    --  reaching the code that leaks.
-   procedure Cycle
+   procedure Round_Trip
      (What : String;
       C    : in out AHT.Websocket.Client.Client_Type;
       Text : String)
    is
       Msg : AHT.Websocket.Client.Message_Type;
    begin
-      AHT.Websocket.Client.Connect (C, Echo);
       AHT.Websocket.Client.Send_Text (C, Text);
       AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
       if To_String (Msg.Payload) /= Text then
          Fail (What & ": echoed """ & To_String (Msg.Payload)
                & """, expected """ & Text & """");
       end if;
+   end Round_Trip;
+
+   --  One full connection, dialled and torn down. Used by shape 2,
+   --  where the point is that the client itself comes and goes.
+   procedure Cycle
+     (What : String;
+      C    : in out AHT.Websocket.Client.Client_Type;
+      Text : String)
+   is
+   begin
+      AHT.Websocket.Client.Connect (C, Echo);
+      Round_Trip (What, C, Text);
       AHT.Websocket.Client.Close (C);
    end Cycle;
+
+   --  One generation replaced by the next, with no Close in between.
+   --  The round-trip matters as much as the redial: it proves the new
+   --  connection is real, so a Reconnect that quietly did nothing
+   --  cannot pass for a clean cycle.
+   procedure Redial
+     (What : String;
+      C    : in out AHT.Websocket.Client.Client_Type;
+      Text : String)
+   is
+   begin
+      AHT.Websocket.Client.Reconnect (C);
+      Round_Trip (What, C, Text);
+   end Redial;
 
    procedure Check
      (What     : String;
@@ -167,8 +198,13 @@ begin
       Task_Before, Task_After : Natural;
    begin
       begin
+         --  One Connect, and from here on nothing but Reconnect: the
+         --  connection stays live across every sample and is closed
+         --  only after the final one.
+         AHT.Websocket.Client.Connect (C, Echo);
+         Round_Trip ("one-client warmup", C, "warm0");
          for I in 1 .. Warmup loop
-            Cycle ("one-client warmup", C, "warm" & Integer'Image (I));
+            Redial ("one-client warmup", C, "warm" & Integer'Image (I));
          end loop;
       exception
          when E : others =>
@@ -186,10 +222,13 @@ begin
       Task_Before := Count_Entries ("/proc/self/task");
 
       for I in 1 .. Cycles loop
-         Cycle ("one-client", C, "cycle" & Integer'Image (I));
+         Redial ("one-client", C, "cycle" & Integer'Image (I));
          exit when Failures > 0;
       end loop;
 
+      --  Sampled while the last connection is still OPEN, so the one
+      --  live session is present in the baseline and in this reading
+      --  alike and does not show up as growth.
       FD_After   := Count_Entries ("/proc/self/fd");
       Task_After := Count_Entries ("/proc/self/task");
 
@@ -201,9 +240,9 @@ begin
          Got : constant Natural :=
            AHT.Websocket.Client.Generation (C);
       begin
-         if Got /= Warmup + Cycles then
+         if Got /= 1 + Warmup + Cycles then
             Fail ("one-client: Generation =" & Natural'Image (Got)
-                  & " after" & Natural'Image (Warmup + Cycles)
+                  & " after" & Natural'Image (1 + Warmup + Cycles)
                   & " connections — the cycles did not all run, so the "
                   & "counts below mean nothing");
          end if;
@@ -211,6 +250,8 @@ begin
 
       Check ("one-client", FD_Before, FD_After, "open descriptors");
       Check ("one-client", Task_Before, Task_After, "live threads");
+
+      AHT.Websocket.Client.Close (C);
    end;
 
    --  Shape 2: a fresh client per cycle, so the receiver task is

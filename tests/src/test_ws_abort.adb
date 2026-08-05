@@ -769,6 +769,118 @@ begin
       Server.Wait_Done;
    end;
 
+   --  Case 5: abort across ADMISSION, and then insist the client is
+   --  still usable.
+   --
+   --  Admission runs in one protected action at the very top of
+   --  Connect: it moves the client to Connecting and makes the
+   --  attempt owner responsible for taking it back out again. Abort
+   --  is deferred inside that action and takes effect the instant it
+   --  ends — so if the two halves are not both inside it, an abort
+   --  landing exactly there leaves the client Connecting with nobody
+   --  able to clear it. Nothing about that is visible at the time.
+   --  The attempt looks like any other torn attempt; the damage only
+   --  shows on the NEXT Connect, which is refused forever.
+   --
+   --  So the check is the retry, not the abort. Case 3 sweeps a
+   --  similar span but starts half a handshake in — past admission
+   --  entirely — and never redials a torn sample, which is why this
+   --  is separate rather than folded into it.
+   --
+   --  What this does and does not pin, plainly.
+   --
+   --  The window is a few instructions wide, at the top of Connect,
+   --  and a timed abort cannot be steered into it: backing the fix
+   --  out — moving the record from inside the protected action to the
+   --  statement after it — leaves this case passing. So it does NOT
+   --  catch that regression, and nothing in the suite does.
+   --
+   --  It is still worth running. What it guards is the CONSEQUENCE,
+   --  which is permanent and silent: whatever the reason a client
+   --  ends up admitted-but-unowned, every later Connect is refused
+   --  forever, and this is the only case that would notice. That is
+   --  the same split already recorded for the Send_Guard flag shape
+   --  in docs/reconnect.md — the design rests on the structural
+   --  argument that there is no interval, and the suite guards what
+   --  would follow if there were.
+   declare
+      Samples  : constant := 60;
+      Torn     : Natural := 0;
+      Admitted : Natural := 0;
+      Stranded : Natural := 0;
+   begin
+      for I in 1 .. Samples loop
+         declare
+            --  Clustered where admission happens: the first sample
+            --  aborts before Connect has run at all, and the last is
+            --  still inside the dial on loopback.
+            When_To_Abort : constant Duration :=
+              Duration (I - 1) * 0.000_05;
+            C : AHT.Websocket.Client.Client_Type;
+         begin
+            begin
+               select
+                  delay When_To_Abort;
+               then abort
+                  AHT.Websocket.Client.Connect (C, Echo_URL);
+               end select;
+            exception
+               when AHT.Websocket.Handshake_Error
+                  | AHT.Transport.Transport_Error =>
+                  null;   --  ordinary failure of a torn attempt
+               when E : others =>
+                  Fail ("admission-sweep: sample" & I'Image
+                        & " raised "
+                        & Ada.Exceptions.Exception_Name (E) & ": "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+
+            if AHT.Websocket.Client.Is_Open (C) then
+               --  Got all the way through despite the abort.
+               AHT.Websocket.Client.Close (C, Timeout => 2.0);
+            else
+               Torn := Torn + 1;
+
+               --  The whole point. A client whose admission was
+               --  orphaned is stuck in Connecting, and every later
+               --  Connect is refused with Wrong_State — permanently,
+               --  because the owner that would have called
+               --  Abandon_Connect never existed.
+               begin
+                  AHT.Websocket.Client.Connect (C, Echo_URL);
+                  Admitted := Admitted + 1;
+                  AHT.Websocket.Client.Close (C, Timeout => 2.0);
+               exception
+                  when AHT.Websocket.Handshake_Error =>
+                     Stranded := Stranded + 1;
+                     Fail ("admission-sweep: sample" & I'Image
+                           & " (aborted at"
+                           & Duration'Image (When_To_Abort)
+                           & "s) left the client refusing every later "
+                           & "Connect — admission was taken and never "
+                           & "released, so it is stuck in Connecting");
+                  when E : others =>
+                     Fail ("admission-sweep: sample" & I'Image
+                           & " retry raised "
+                           & Ada.Exceptions.Exception_Name (E) & ": "
+                           & Ada.Exceptions.Exception_Message (E));
+               end;
+            end if;
+         end;
+
+         exit when Stranded > 0;   --  one is proof; sixty is noise
+      end loop;
+
+      --  A sweep where nothing was ever torn never reached the window
+      --  and is not sampling admission at all — in which case the
+      --  clean retries above prove nothing.
+      if Torn = 0 then
+         Fail ("admission-sweep: no sample was torn, so the abort "
+               & "never landed anywhere near admission and the "
+               & "retries checked nothing");
+      end if;
+   end;
+
    if Failures = 0 then
       Put_Line ("test_ws_abort: OK (teardown winner, connect attempt,"
                 & " handoff sweep and senders around the guard all"

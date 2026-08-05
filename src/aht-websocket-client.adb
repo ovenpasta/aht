@@ -320,10 +320,11 @@ package body AHT.Websocket.Client is
    protected body Lifecycle_Controller is
 
       procedure Begin_Connect
-        (P      : Connect_Params;
-         Gen    : out Natural;
-         L      : out Limits;
-         Result : out Admission_Result) is
+        (P         : Connect_Params;
+         Owner_Gen : access Natural;
+         Gen       : out Natural;
+         L         : out Limits;
+         Result    : out Admission_Result) is
       begin
          --  Every refusal leaves the object exactly as it was. A
          --  rejected Connect must not burn a generation number, move
@@ -354,14 +355,23 @@ package body AHT.Websocket.Client is
 
          --  The one allocating step goes first. Copying the
          --  parameters can raise, and it must not be able to do so
-         --  after the state machine has moved: the caller only
-         --  creates the owner that would release admission once this
-         --  has returned Admitted, so a failure past that point would
-         --  strand the client in Connecting with nobody to clear it.
+         --  after the state machine has moved: the owner is only
+         --  made responsible for the admission below, so a failure
+         --  past that point would strand the client in Connecting
+         --  with nobody to clear it.
          Pending_Conn := P;
 
          --  Nothing below can fail.
          Next_Gen     := Next_Gen + 1;
+
+         --  The owner becomes responsible for this admission in the
+         --  same protected action that grants it, and before the
+         --  state moves. Both orderings matter: recording it after
+         --  St := Connecting would leave a state change no owner had
+         --  accepted yet, and recording it outside this action at all
+         --  would leave the gap an abort slips through.
+         Owner_Gen.all := Next_Gen;
+
          Gen          := Next_Gen;
          St           := Connecting;
          L            := Pending;
@@ -650,18 +660,47 @@ package body AHT.Websocket.Client is
    --  published, reclaimed AND a fresh Connect admitted, and this
    --  cleanup must not release an admission belonging to that newer
    --  attempt.
+   --  Gen is a mutable component and NOT a discriminant, which is
+   --  what lets this object exist before admission is asked for.
+   --
+   --  As a discriminant it could only be elaborated once
+   --  Begin_Connect had returned the generation — so between the end
+   --  of that protected action and the elaboration of the owner there
+   --  was a window with the client already in Connecting and nobody
+   --  able to take it back out. A pending abort takes effect at
+   --  exactly that point (the end of a protected action, before the
+   --  statement that follows), and one landing there stranded the
+   --  client in Connecting permanently: no owner, so no
+   --  Abandon_Connect, so no later Connect ever admitted again.
+   --
+   --  Now the owner is declared first and Begin_Connect records the
+   --  generation into it from INSIDE its own protected action, which
+   --  is abort-deferred. There is no window: either the record was
+   --  made and Finalize releases the admission, or it was not and
+   --  Gen is still 0, meaning this owner never held one. Same shape
+   --  as Send_Guard.Acquire, and for the same reason.
    type Attempt_Owner
-     (Ctl : access Lifecycle_Controller;
-      Gen : Positive) is
+     (Ctl : access Lifecycle_Controller) is
      new Ada.Finalization.Limited_Controlled with record
-        Sess : Session_Access := null;
+        Sess : Session_Access  := null;
+        Gen  : aliased Natural := 0;
      end record;
 
    overriding procedure Finalize (A : in out Attempt_Owner);
 
    overriding procedure Finalize (A : in out Attempt_Owner) is
    begin
-      if A.Ctl.Attempt_Handed_Off (A.Gen) then
+      --  Admission was never granted — the state check refused, the
+      --  parameter copy raised, or an abort landed before the record
+      --  could be made. In every one of those the client was left
+      --  exactly as admission found it, so there is nothing to
+      --  release and releasing anyway would clear an admission
+      --  belonging to somebody else.
+      if A.Gen = 0 then
+         return;
+      end if;
+
+      if A.Ctl.Attempt_Handed_Off (Positive (A.Gen)) then
          --  The receiver owns it now and will reclaim it.
          A.Sess := null;
          return;
@@ -681,7 +720,7 @@ package body AHT.Websocket.Client is
          end;
       end if;
       --  A no-op unless THIS attempt is the one still in flight.
-      A.Ctl.Abandon_Connect (A.Gen);
+      A.Ctl.Abandon_Connect (Positive (A.Gen));
    end Finalize;
 
    --  Holds the teardown borrow for whoever wins it. Taking the borrow
@@ -1428,6 +1467,13 @@ package body AHT.Websocket.Client is
          Origin       => To_Unbounded_String (Origin),
          Insecure     => Insecure,
          CA_Path      => To_Unbounded_String (CA_Path));
+
+      --  Declared BEFORE admission is asked for, so that there is no
+      --  instant at which the client is Connecting and no object is
+      --  responsible for taking it back out. It holds nothing until
+      --  Begin_Connect records a generation into it, so a refused
+      --  Connect still cannot release an admission it never took.
+      Attempt : Attempt_Owner (Self.Ctl'Unchecked_Access);
    begin
       --  Admission. One protected action decides whether an attempt
       --  may start, reserves its generation number and takes the
@@ -1438,7 +1484,8 @@ package body AHT.Websocket.Client is
       --  admission found it, and that retry genuinely works because
       --  it builds a fresh session with fresh transports rather than
       --  re-dialing one whose single-use latch is already set.
-      Self.Ctl.Begin_Connect (Params, Gen, Lim, Adm);
+      Self.Ctl.Begin_Connect
+        (Params, Attempt.Gen'Unchecked_Access, Gen, Lim, Adm);
       case Adm is
          when Admitted =>
             null;
@@ -1457,14 +1504,11 @@ package body AHT.Websocket.Client is
                 & "and redials";
       end case;
 
-      --  Declared only once admission has succeeded, so a refused
-      --  Connect cannot release an admission it never took. From here
-      --  the attempt owns the session outright: nothing else can
-      --  reach it, and its cleanup runs on every exit.
+      --  From here the attempt owns the session outright: nothing
+      --  else can reach it, and its cleanup runs on every exit. The
+      --  owner itself is declared further up, before admission — see
+      --  the note there.
       declare
-         Attempt : Attempt_Owner
-           (Self.Ctl'Unchecked_Access, Positive (Gen));
-
          Key_Bytes : AHT.Bytes.Byte_Array (1 .. 16);
          Req       : AHT.HTTP.Request.Request_Type;
          Resp      : AHT.HTTP.Response.Response_Type;
