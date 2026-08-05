@@ -1,9 +1,10 @@
 --  Reconnecting many times over, watching the process rather than the
 --  client.
 --
---  Every generation allocates a session, a pair of transports and the
---  file descriptors under them, and every generation is supposed to
---  give all of it back. Nothing in the client's own API can show that
+--  Every generation allocates a session, the one transport its
+--  discriminant selects — plain or secure, never both — and the file
+--  descriptors under it, and every generation is supposed to give all
+--  of it back. Nothing in the client's own API can show that
 --  it does: Generation counts connections, not resources, and a client
 --  that leaked one descriptor per cycle would keep answering every
 --  question correctly right up until the process ran out.
@@ -70,12 +71,19 @@ procedure Test_WS_Reconnect_Leak is
 
    --  What the counts are allowed to move by.
    --
-   --  Not zero, and not a guess. A live session costs about five
-   --  descriptors — measured, by backing out the receiver's Free and
-   --  watching this test report 250 across 50 cycles — so a single
-   --  session still winding down when the sample is taken moves the
-   --  count by that much on its own. Anything at or below two such
-   --  stragglers is therefore not evidence of a leak.
+   --  Not zero, and not a guess, though not for the reason it might
+   --  look. A session costs about five descriptors — measured, by
+   --  backing out the receiver's Free and watching this test report
+   --  250 across 50 cycles. That figure sets the SCALE, not a
+   --  straggler allowance: both Reconnect and Close finish
+   --  reclamation before they return, so there is no session still
+   --  winding down when a sample is taken, and each reading sees
+   --  exactly the one live connection its counterpart saw.
+   --
+   --  What is left to absorb is ordinary runtime jitter, which is
+   --  small and unrelated to sessions. The bound is set at a couple
+   --  of sessions' worth simply because that is a scale known to be
+   --  well clear of it.
    --
    --  What separates the two cases is the factor of Cycles: a leak of
    --  one session per iteration lands at 250, twenty times this bound.

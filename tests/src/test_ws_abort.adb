@@ -48,13 +48,17 @@
 --       one parked in Write provably holding the guard, one still on
 --       its entry queue, covering the holder and cancellation paths.
 --
---    5. Abort across ADMISSION, then redial. Admission and the
---       creation of the object responsible for releasing it must
---       happen in one protected action; if they do not, an abort
---       between them leaves the client admitted and unowned, and
---       every later Connect is refused forever. The window cannot be
---       steered into, so this guards the consequence rather than the
---       race -- see the note on the case itself.
+--    5. Abort across ADMISSION, then redial. The owner is created
+--       BEFORE admission is asked for; what has to happen inside the
+--       protected action is the recording of the generation, which is
+--       what makes that owner responsible for releasing the admission.
+--       That distinction is the whole safety argument: an object that
+--       merely exists cannot be told to release anything, and a
+--       record made after the action has ended can be skipped by an
+--       abort landing there. Get it wrong and the client is admitted
+--       and unowned, and every later Connect is refused forever. The
+--       window cannot be steered into, so this guards the consequence
+--       rather than the race -- see the note on the case itself.
 --
 --  The guard's own ownership protocol is exercised separately, by
 --  test_ws_send_guard: those cases leave a latch permanently held if
