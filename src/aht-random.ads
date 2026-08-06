@@ -87,12 +87,17 @@ package AHT.Random is
    --  included. Named for what it measures rather than for what a
    --  reader might hope it measures.
    --
-   --  Draws alone cannot say WHICH caller drew: a missing call and a
-   --  compensating extra call balance. Paired with this, they can.
-   --  The two callers ask for different widths — 4 bytes for a frame
-   --  mask, 16 for a handshake nonce — so calls and bytes form two
-   --  equations in two unknowns and a test can solve for each
-   --  population exactly rather than checking an aggregate.
+   --  Draws alone cannot separate requests of different sizes: a
+   --  missing call and a compensating extra call balance. Paired with
+   --  this they can, because the two callers ask for different widths
+   --  — 4 bytes for a frame mask, 16 for a handshake nonce — so calls
+   --  and bytes form two equations in two unknowns and a test can
+   --  recover how many requests of each WIDTH were made.
+   --
+   --  Width populations, not caller identity. A missing 4-byte
+   --  request and an unrelated extra 4-byte request still balance;
+   --  what the pair rules out is a deficit in one width being paid
+   --  for by a surplus in the other.
    function Bytes_Requested return Natural;
 
 end AHT.Random;

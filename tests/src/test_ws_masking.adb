@@ -625,15 +625,16 @@ begin
       --  as a surplus of draws rather than silently financing a
       --  missing one.
       if Drew_During /= Expected then
-         Fail ("the entropy source was consulted"
-               & Natural'Image (Drew_During) & " time(s) while"
+         Fail (Natural'Image (Drew_During)
+               & " entropy requests were made while"
                & Natural'Image (Wire.Mask_Count)
                & " masked frames and" & Natural'Image (Connections)
                & " handshakes went out — exactly"
                & Natural'Image (Expected)
-               & " draws were expected, so either a mask or a nonce "
-               & "came from somewhere else, or the peer did not "
-               & "observe every frame that was sent");
+               & " were expected. The request totals and the wire "
+               & "observations disagree: either a request is missing "
+               & "or surplus, or the peer did not observe every frame "
+               & "that was sent");
       end if;
    end;
 
@@ -683,8 +684,9 @@ begin
    if Failures = 0 then
       Put_Line ("test_ws_masking: OK ("
                 & Natural'Image (Wire.Mask_Count)
-                & " wire masks and" & Natural'Image (Wire.Nonce_Count)
-                & " nonces observed; entropy requested for each)");
+                & " wire masks," & Natural'Image (Wire.Nonce_Count)
+                & " nonces; matching entropy-request populations "
+                & "observed)");
       Ada.Command_Line.Set_Exit_Status (0);
    else
       Put_Line ("test_ws_masking:" & Failures'Image & " failure(s)");
