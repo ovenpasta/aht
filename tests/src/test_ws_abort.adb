@@ -851,7 +851,7 @@ begin
    --  ends up admitted-but-unowned, every later Connect is refused
    --  forever, and this is the only case that would notice. That is
    --  the same split already recorded for the Send_Guard flag shape
-   --  in docs/reconnect.md — the design rests on the structural
+   --  in docs/websocket.md — the design rests on the structural
    --  argument that there is no interval, and the suite guards what
    --  would follow if there were.
    declare

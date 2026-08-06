@@ -5,11 +5,28 @@ Packages under `AHT.Websocket`:
 - `AHT.Websocket` — shared types.
 - `AHT.Websocket.Frames` — the frame codec.
 - `AHT.Websocket.Client` — the client, `ws://` and `wss://`.
+- `AHT.Websocket.Send_Guards` — the per-connection write latch and its
+  scope guard. Separate because its correctness argument is about
+  abort, and an abort-safety claim tested against a hand-written
+  replica is not tested at all.
+- `AHT.Websocket.UTF8` — text validation (RFC §8.1).
+- `AHT.Websocket.Budgets` — the close-budget arithmetic, extracted so
+  it can be checked without a socket.
 
-Common exception: `AHT.Websocket.Handshake_Error` — raised by
-`Client.Connect` when the HTTP upgrade does not yield `101 Switching
-Protocols` (e.g. `401`, `403`, `404`) or when the `Sec-WebSocket-Accept`
-header is missing or wrong.
+Exceptions, all declared in `AHT.Websocket`:
+
+| Exception | Means |
+|---|---|
+| `Handshake_Error` | the HTTP upgrade did not yield `101` (e.g. `401`, `403`, `404`), `Sec-WebSocket-Accept` was missing or wrong, or the call was refused in the client's current state |
+| `Protocol_Error` | the peer put something malformed on the wire. The receiver fires `On_Error` and tears the connection down; it does **not** send a close frame on this path (see *Failure codes*) |
+| `Closed_Error` | there is no connection to act on, or the one being waited on went away |
+| `Message_Too_Big` | the peer declared more than the configured ceiling allows. Not a protocol fault: nothing malformed happened, the peer just asked for more than this endpoint will hold — closes with 1009 |
+| `Mode_Error` | the operation is not available in this configuration — `Receive` under `Callback_Only`, connecting `Callback_Only` with no callback, clearing that callback while such a connection is live, or reconfiguring limits once a session exists |
+| `Reentrant_Error` | an operation that waits for the receiver was called *from* the receiver, i.e. from inside a callback |
+
+`AHT.Transport.Timeout_Error` and `AHT.Transport.Aborted_Error` also
+surface here: the first when a bound expires, the second when I/O is
+cancelled by a teardown.
 
 ## `AHT.Websocket` — shared types
 
@@ -57,9 +74,10 @@ subtype Valid_Close_Code is Any_Close_Code
     and then Valid_Close_Code /= 1015; -- "TLS handshake failure"
 ```
 
-`Client.Close` takes `Valid_Close_Code := 1000`; the compiler therefore
-rejects `Client.Close (1006, ...)` at call sites that use a literal, and
-the dynamic check catches variables at runtime.
+`Client.Close` takes `Valid_Close_Code := 1000`. Both subtypes use
+`Dynamic_Predicate`, so this is a **runtime** check, not a compile-time
+one: `Client.Close (1006, ...)` raises rather than failing to compile,
+though GNAT will warn on a literal it can see through.
 
 ### No-code close
 
@@ -105,12 +123,38 @@ Pure codec — no socket I/O, so unit-testable in isolation.
 function Encode
   (Hdr     : Frame_Header;
    Payload : Byte_Array) return Byte_Array;
+
+type Fragment_State is (Unchecked, No_Message, In_Message);
+
 procedure Decode
-  (Input   : Byte_Array;
-   Hdr     : out Frame_Header;
-   Payload : out Buffer;
-   Last    : out Natural);
+  (Input     : Byte_Array;
+   Hdr       : out Frame_Header;
+   Payload   : out Buffer;
+   Last      : out Natural;
+   Allowance : Natural        := Natural'Last;
+   Fragment  : Fragment_State := Unchecked);
 ```
+
+`Allowance` is the size ceiling, and it lives here rather than one
+layer up for a reason that decides the design: `Decode` reports
+"incomplete" until the whole declared payload is buffered, so a limit
+applied to a *returned* frame would first have to accumulate the very
+bytes it exists to refuse. A peer that declares a gigabyte and then
+sends nothing would be answered only after the gigabyte arrived —
+which it never does. Checking at header-parse time rejects it after
+ten bytes. Exceeding it raises `AHT.Websocket.Message_Too_Big`, which
+is distinct from `Protocol_Error` because nothing malformed happened:
+the peer asked for more than this endpoint will hold. The client
+closes with 1009 on this path.
+
+`Fragment` lets `Decode` apply the §5.4 opcode sequencing rules at
+header-parse time. `Unchecked` is the default and has to be — the
+contract is that `Decode` handles any single frame in isolation, and
+callers holding no message state (the codec tests among them) decode a
+standalone `Continuation` and expect it to work. A receiver that does
+track the sequence passes the real state. Sequencing is checked
+*before* size, so a frame that is both out of order and oversized
+reports the protocol fault.
 
 The codec is **direction-neutral** on masking: `Encode` honours
 `Hdr.Masked` / `Hdr.Mask_Key` as given, and `Decode` parses
@@ -145,8 +189,9 @@ These checks live in the codec and raise
   status code + optional UTF-8 reason).
 - `Close` code outside the valid wire range:
   - Encode requires `Valid_Close_Code` (1000..1015 ∪ 3000..4999
-    excluding the synthetic 1005 / 1006 / 1015 that must never
-    appear on the wire).
+    excluding 1004, which is reserved with no defined meaning, and
+    the synthetic 1005 / 1006 / 1015 that must never appear on the
+    wire).
   - Decode requires `Any_Close_Code` (the full range including
     1005 / 1006 / 1015, since a peer might wrongly send them
     and we want the Client layer to see them rather than
@@ -158,11 +203,17 @@ These checks live in the codec and raise
 - 64-bit ext length with the top bit set (RFC §5.2) or
   overflowing `Natural`.
 
-A `Random_Mask : Byte_Array (1 .. 4)` helper backed by
-`Ada.Numerics.Discrete_Random` is exposed on the Client layer
-(not the codec — the codec is happy to take any caller-supplied
-mask); the mask isn't cryptographic and the RFC doesn't require
-it to be.
+The codec also exposes `Frame_Header`, and
+`Classify_Inbound_Close` / `Inbound_Close_Status` for interpreting a
+received Close payload — which is where the 1007 cases come from: a
+Close whose reason is not valid UTF-8 is answered with **1007**, per
+§8.1, rather than 1002.
+
+Masking is *not* generated here. `Random_Mask` is a protected
+procedure of `Send_Guard` (`AHT.Websocket.Send_Guards`), drawn under
+the latch specifically so concurrent senders cannot share generator
+state; the codec is happy to take any caller-supplied mask. The mask
+is not cryptographic and the RFC does not require it to be.
 
 ## `AHT.Websocket.Client`
 
@@ -188,12 +239,14 @@ procedure Connect
    Insecure : Boolean := False;
    CA_Path  : String := "");
 
-procedure Send_Text   (Self : in out Client_Type; Text : String)
-  with Pre => Is_Open (Self);
-procedure Send_Binary (Self : in out Client_Type; Data : Byte_Array)
-  with Pre => Is_Open (Self);
-procedure Send_Ping   (Self : in out Client_Type; Payload : Byte_Array := [])
-  with Pre => Is_Open (Self);
+procedure Reconnect
+  (Self          : in out Client_Type;
+   Timeout       : Duration := 5.0;
+   Drain_Timeout : Duration := Default_Drain_Timeout);
+
+procedure Send_Text   (Self : in out Client_Type; Text : String);
+procedure Send_Binary (Self : in out Client_Type; Data : Byte_Array);
+procedure Send_Ping   (Self : in out Client_Type; Payload : Byte_Array := []);
 
 procedure Receive
   (Self    : in out Client_Type;
@@ -201,24 +254,144 @@ procedure Receive
    Timeout : Duration := Duration'Last);
 
 procedure Close
-  (Self    : in out Client_Type;
-   Code    : Valid_Close_Code := 1000;
-   Reason  : String := "";
-   Timeout : Duration := 5.0);
+  (Self          : in out Client_Type;
+   Code          : Valid_Close_Code := 1000;
+   Reason        : String := "";
+   Timeout       : Duration := 5.0;
+   Drain_Timeout : Duration := Default_Drain_Timeout);
 
-function Is_Open (Self : Client_Type) return Boolean;
+procedure Configure (Self : in out Client_Type; L : Limits);
+
+function Is_Open              (Self : Client_Type) return Boolean;
 function Selected_Subprotocol (Self : Client_Type) return String;
+function Generation           (Self : Client_Type) return Natural;
 ```
 
-`ws://` runs on the plain TCP transport, `wss://` on the TLS transport;
-`Insecure` / `CA_Path` apply to `wss://` only (ignored for `ws://`). A
-`Client_Type` is single-use — after `Close`, a second `Connect` raises
-`Handshake_Error`. `Receive` blocks up to `Timeout` and raises
-`AHT.Websocket.Closed_Error` once the connection has closed; `Close`
-runs the §1.4 handshake bounded by `Timeout` (see the `.ads` for the
-0.0 / `Duration'Last` knobs).
+`ws://` runs on the plain TCP transport, `wss://` on the TLS
+transport; `Insecure` / `CA_Path` apply to `wss://` only (ignored for
+`ws://`).
 
-Callback registration (push-mode receive):
+The `Send_*` operations deliberately carry **no** `Is_Open`
+precondition. The receiver task can tear a connection down
+concurrently — the peer may close between the application pulling a
+message and echoing it — so no caller can guarantee such a
+precondition across the call. The check is a runtime guard raising a
+catchable `Closed_Error`, and it is expressed as a *borrow*: a sender
+that cannot borrow the current session raises rather than touching one
+it does not hold.
+
+### Lifecycle: a client outlives its connections
+
+A `Client_Type` is **reusable**. This is the central change from the
+original design, in which the receiver was a one-shot task and every
+per-connection resource was an inline component, so a second `Connect`
+had to be refused. Now each connection is a heap-allocated
+`Session_Type` owned for the length of one generation, and the client
+is a durable handle that outlives them.
+
+Two state machines, and they are not the same thing:
+
+```ada
+--  Per CONNECTION (RFC 6455 §1.4), inside a session.
+type State_Kind is (Connecting, Open, Closing, Closed);
+
+--  Per CLIENT, spanning connections.
+type Client_State is (Idle, Connecting, Open, Closing, Disconnected);
+```
+
+`Idle` means nothing has ever been dialed; `Disconnected` means a
+generation has been fully reclaimed. Both are dialable, and keeping
+them distinct is what lets `Reconnect` know whether there are saved
+parameters worth replaying.
+
+| Call | `Idle` | `Disconnected` | `Connecting` | `Open` / `Closing` |
+|---|---|---|---|---|
+| `Connect` | admitted | admitted | `Handshake_Error` | `Handshake_Error` |
+| `Reconnect` | `Handshake_Error` | redials saved params | `Handshake_Error` | drains, then redials |
+| `Configure` | accepted | accepted | `Mode_Error` | `Mode_Error` |
+
+`Idle` and `Disconnected` differ for exactly one call. `Reconnect`
+repeats the last connect that *succeeded*, and parameters are saved
+only on publication — so from `Idle` there is nothing to repeat and it
+raises `Handshake_Error`. That is the whole reason the two states are
+not collapsed: they are equally dialable, but only one of them has a
+past.
+
+`Connect` never displaces a live connection silently — that is the one
+thing `Reconnect` exists to do, and it does it explicitly. `Reconnect`
+replays the parameters of the last connect that actually **worked**,
+not the last one attempted, so a failed attempt in between does not
+become the thing that gets repeated.
+
+`Generation` counts connections that were successfully established: 0
+before the first, one more on each. Reserved numbers are not counted,
+so a failed attempt does not advance it. That is what makes it usable
+as "am I still looking at the connection I was?" across a reconnect.
+
+`Selected_Subprotocol` belongs to the connection, not to the client.
+It stops answering once that connection is reclaimed rather than
+lingering until some later one overwrites it — "gone with the
+connection" rather than "replaced eventually".
+
+### Delivery modes and limits
+
+```ada
+type Delivery_Mode is (Pull_Only, Callback_Only, Both);
+
+type Limits is record
+   Max_Message_Bytes  : Natural := 32 * 1024 * 1024;
+   Max_Inbox_Messages : Count_Type := 1_024;
+   Max_Inbox_Bytes    : Natural := 64 * 1024 * 1024;
+   Delivery           : Delivery_Mode := Both;
+end record;
+```
+
+`Callback_Only` does not enqueue at all, and is the only mode that
+removes the inbox as a growth path outright. It therefore requires an
+`On_Message` callback: with none there is no consumer, and `Connect`
+raises `Mode_Error` rather than dropping every message in silence.
+Under `Both`, a message the inbox refuses is not passed to the
+callback either — pull and push consumers observe exactly the same
+accepted set.
+
+`Configure` is legal only while fully disconnected. Every limit
+becomes an immutable property of a session at the moment it is
+allocated, so a running connection cannot have its ceilings moved
+underneath it and the receiver never re-reads a limit that might have
+changed since it last looked.
+
+The failure codes are deliberately distinct, because the failures are:
+
+- **Exceeding `Max_Message_Bytes`** — in one frame or accumulated
+  across a fragment sequence — closes with **1009 Message Too Big**,
+  fires `On_Error`, and tears down through normal reclamation.
+- **Overrunning an inbox bound** closes with **1008 Policy Violation**.
+  This is a different failure: the peer is outrunning the application,
+  not misbehaving. Silently dropping would corrupt stream semantics the
+  caller has no way to detect.
+- **Invalid UTF-8** — in a text message or in a Close reason — closes
+  with **1007 Invalid Payload Data** (§8.1).
+- **A peer close carrying a reserved code** is answered with **1002
+  Protocol Error**.
+
+A `Protocol_Error` from the codec — a malformed frame — is handled
+differently from all of these: the receiver fires `On_Error` and tears
+the connection down **without sending a close frame at all**. The
+connection is already unusable, and there is no reason to believe a
+peer that produced a malformed frame will read a reply. 1002 on the
+wire therefore means specifically "your close code was reserved", not
+"you sent something malformed".
+
+The defaults are policy, not minimums. 32 MiB covers the Autobahn §9
+cases (~16 MiB) with room to spare, exceeds the 13 MB the echo test
+needs, and matches what `server_ws.py` itself accepts.
+
+They are also a **compatibility surface**, and the one part of this
+that can break a working application silently: a message that used to
+arrive now closes the connection with 1009. A default below the 16 MiB
+§9 cases would fail an Autobahn run, which is the intended tripwire.
+
+### Callbacks
 
 ```ada
 procedure Set_On_Message (Self : in out Client_Type; CB : On_Message_Callback);
@@ -226,24 +399,91 @@ procedure Set_On_Close   (Self : in out Client_Type; CB : On_Close_Callback);
 procedure Set_On_Error   (Self : in out Client_Type; CB : On_Error_Callback);
 ```
 
-Callbacks fire from the receiver task. Use `Receive` instead if the
-caller prefers a pull model; both are supported simultaneously — every
-inbound message is delivered to the callback (if set) and enqueued into
-`Inbox` (so a later `Receive` still sees it). Callbacks must be
-task-safe and non-blocking, and an exception raised inside one is
-swallowed by the receiver so it can keep draining the wire.
+Callbacks live in the **client**, not in a connection, so one
+installation serves every generation and they are read afresh for each
+event rather than captured once.
+
+**Callbacks must not block.** This is now load-bearing rather than
+advisory: callbacks run on the receiver task, and the receiver cannot
+reclaim a connection while it is inside user code. A callback that
+never returns stalls `Close` — which is bounded, so the caller gets
+`Timeout_Error` and the teardown continues in the background. An
+exception raised inside a callback is swallowed so the receiver can
+keep draining the wire.
+
+`Close`, `Reconnect` and `Receive` raise **`Reentrant_Error`** when
+called from inside a callback. Each would otherwise wait on the very
+task making the call: the first two for a teardown only the receiver
+can complete, the third for a message only the receiver can deliver.
+Refusing is strictly better than the deadlock it replaces. `Send_*`
+stay legal — they wait for nothing the receiver owes them, which is
+what keeps echo-from-`On_Message` working.
+
+A teardown the caller asked for is **not** reported as an error.
+`Close` and `Reconnect` stop a parked receiver by aborting its
+transport I/O, so the receiver sees `Aborted_Error` on the way out;
+passing that to `On_Error` would tell the application its connection
+had failed every time it deliberately closed one. A peer-driven abort
+still reaches the callback.
+
+### Bounds: two clocks, not one
+
+```ada
+Default_Drain_Timeout : constant Duration := 5.0;
+```
+
+`Close` and `Reconnect` take two bounds because they measure different
+things, and only one of them can raise.
+
+**`Timeout` is a compound budget for getting our Close frame out and
+hearing the answer.** It covers all three of: acquiring the send
+guard, writing the Close frame, and waiting for the peer's echo. It is
+not "how long to wait for the peer" — that would leave the first two
+unbounded, which is exactly the hole a peer that stops reading walks
+through. When it expires, the teardown calls `Abort_Pending` and
+carries on; **it does not raise**. Running out of patience with a peer
+is a normal outcome, not an error.
+
+**`Drain_Timeout` bounds us** — how long to wait for our own receiver
+to finish reclaiming the session afterwards. This is the one that
+raises `Timeout_Error`.
+
+A single knob would make `Timeout => 0.0` mean "and fail if
+reclamation is not already finished", which is not what anyone asking
+for it wants.
+
+Nothing is abandoned on expiry. The client stays `Closing`,
+reclamation continues in the background, and a later call **joins**
+the same completion rather than starting a second one. A `Reconnect`
+that cannot finish the drain does **not** redial — dialing over a
+session a teardown still owns is the one thing it must never do.
+
+The usual cause of a drain timeout is a callback that has not
+returned, which no receiver-side mechanism can detect: `Abort_Pending`
+cancels transport I/O, not user code.
+
+`Receive` has its own, unrelated `Timeout`, and that one does raise
+`Timeout_Error` — it bounds a wait for a message, not a teardown.
+
+**The caller's bound is a liveness knob, not a safety one.** Setting
+it too low produces spurious `Timeout_Error`s and nothing worse:
+teardown continues, nothing is freed early, and a later call joins the
+same completion. The safety property lives in `Wait_No_Borrowers`,
+which no caller can shorten.
 
 ### HTTP upgrade flow
 
 `Connect` reuses `AHT.HTTP.*` for the wire:
 
 1. `AHT.URL.Parse (URL)` yields a `ws` / `wss` scheme directly (no
-   rewrite to `http` / `https`); the scheme drives transport selection.
-   Non-`ws`/`wss` URLs are rejected upfront with `Handshake_Error`.
-2. Dial one transport for the scheme — TCP for `ws://`, TLS for
-   `wss://` (threading `Insecure` / `CA_Path` into the TLS handshake) —
-   and point `Active` at it.
-3. Build a `GET` request with the upgrade headers:
+   rewrite to `http` / `https`); the scheme drives transport
+   selection. This runs in the declarative part, *before* admission,
+   so a scheme the URL parser does not know at all — `ftp://` — raises
+   `AHT.URL.Parse_Error`, not `Handshake_Error`. A parseable but wrong
+   scheme (`http://`, `https://`) is rejected with `Handshake_Error`
+   — and that check happens **after** admission has already reserved a
+   generation, so the attempt owner is what releases it.
+2. Build a `GET` request with the upgrade headers:
    - `Host: <authority>`
    - `Upgrade: websocket`
    - `Connection: Upgrade`
@@ -255,118 +495,281 @@ swallowed by the receiver so it can keep draining the wire.
      `Sec-WebSocket-Key` are dropped so they can't override the
      generated values; other names (including `Origin` and
      `Sec-WebSocket-Protocol`) are appended as-is, so don't also pass
-     those via `Extra_Headers` if you're using the dedicated parameters
-     or you'll emit duplicate header lines.
-4. `AHT.HTTP.Request.Write` the request over `Active`.
-5. `AHT.HTTP.Response.Read` the status line + headers over `Active`.
+     those via `Extra_Headers` if you're using the dedicated
+     parameters or you'll emit duplicate header lines.
+3. Dial one transport for the scheme — TCP for `ws://`, TLS for
+   `wss://` (threading `Insecure` / `CA_Path` into the TLS handshake).
+   The request is built before the dial, not after.
+4. `AHT.HTTP.Request.Write` the request over the new transport.
+5. `AHT.HTTP.Response.Read` the status line + headers.
 6. Validate:
    - Status = `101 Switching Protocols`. Any other status raises
      `Handshake_Error` carrying the status and reason — callers
      distinguish `401`/`403` (auth) from `404` (no endpoint) from
      protocol mismatches.
-   - `Upgrade: websocket` (case-insensitive token match).
+   - `Upgrade: websocket` — a case-insensitive *equality*, not a
+     token match, so `Upgrade: websocket, foo` is rejected.
    - `Connection: Upgrade` (case-insensitive token match — the header
      may list additional tokens).
    - `Sec-WebSocket-Accept` equals
      `base64(SHA1(Key & "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))`.
    - At most one `Sec-WebSocket-Protocol`, and any value returned must
-     be one the client offered; the accepted value is stored and
-     reported by `Selected_Subprotocol`.
-7. Hand the open transport to the receiver task; set `State := Open`.
+     be one the client offered.
+7. Publish the session to the persistent receiver and advance the
+   generation.
 
 A TLS dial failure (step 2) propagates `AHT.Transport.TLS.TLS_Error`
-unwrapped; failures from step 4 onward are wrapped in `Handshake_Error`.
+unwrapped; failures from step 4 onward are wrapped in
+`Handshake_Error`.
 
-### Concurrency model
+A failed attempt is genuinely retryable, and that is a property of the
+session being per-generation: the retry builds fresh transports rather
+than re-dialing one whose single-use latch is already set. That
+failure — dial succeeds, upgrade rejected, object now unusable — is
+the bug this whole design started from.
 
-Three protected objects and one task per connection.
+## Ownership
 
-#### `Receiver_Task`
+The hard part of a reusable client is not reconnecting. It is
+answering "who frees this session, and when", such that the answer
+survives an exception or an abort at any point.
 
-Owns the read side of the transport. Loop:
+### Sessions are borrowed, never referenced
 
-1. `Frames.Decode` a frame from the transport.
-2. If control frame: handle in place.
-   - `Ping` → enqueue a `Pong` through `Send_Guard`.
-   - `Pong` → drop (no-op; app doesn't see unsolicited pongs).
-   - `Close` → send echoing close through `Send_Guard` (if we haven't
-     yet), fire `On_Close`, set `State := Closed` directly, exit.
-3. If data frame: buffer into a reassembly `Buffer` until
-   `FIN = 1`. On completion, fire `On_Message` (if set) **and** enqueue
-   into `Inbox` (if someone is blocked in `Receive` or will be later).
-4. On `Transport_Error` or malformed frame: fire `On_Error`, set
-   `State := Closed`, exit.
+`Send_*` and `Receive` do not hold a session pointer. They **borrow**
+one from the lifecycle controller for the duration of the call, and a
+borrow is refused once teardown has begun. Reclamation then waits for
+the borrow count to reach zero before freeing anything:
 
-Receiver termination is observed by `Client.Close` via the `State` PO —
-`Close` blocks until `State = Closed`, guaranteeing no stray callbacks
-after return.
-
-#### `Send_Guard` (protected object)
-
-Serializes writes. WebSocket clients MUST generate a fresh 32-bit mask
-per frame (RFC 6455 §5.3), and a single frame's bytes must be written
-contiguously. Interleaved writes from two tasks would corrupt the
-stream. Senders bracket each write with `Acquire` / `Release` and draw
-the per-frame mask from `Random_Mask` (under the lock so concurrent
-senders can't share generator state). The socket write runs *between*
-`Acquire` and `Release`, i.e. outside the protected object's own lock —
-so a slow write doesn't block `Release` or `Random_Mask` or state
-queries — but the `Acquire` mutex is still held across it, so other
-senders serialize behind a slow write. Both the user's `Send_*` calls
-and the receiver's Pong / Close echoes go through this guard.
-
-#### `Inbox` (protected object)
-
-FIFO of `Message_Type`. The receiver `Push`es completed messages; the
-user's `Receive` pulls. Entry barrier:
-
-```ada
-entry Receive (Msg : out Message_Type) when Closed_F or else not Q.Is_Empty;
+```
+1. Stop admission          — no new borrows
+2. Wake parked borrowers   — state Closed, inbox Mark_Closed
+3. Abort pending I/O       — release anyone parked in Read/Write
+4. Wait_No_Borrowers       — UNBOUNDED, deliberately
+5. Close the transport
+6. Drop the published pointer
+7. Free the session
+8. Signal_Generation_Done  — release the waiters, client → Disconnected
 ```
 
-`Receive (..., Timeout)` at the client level is a `select ... or delay`
-around that entry. The barrier opens both when a message is available
-*and* when `Mark_Closed` has been called, so a `Receive` parked on an
-empty queue wakes when the connection goes away and raises
-`Closed_Error` instead of blocking forever.
+Step 4 is the memory-safety gate and it has no timeout by design. A
+bound there would mean freeing a session while a task might still be
+inside it.
 
-#### `State` (protected object)
+Note what the caller's `Drain_Timeout` does and does not bound. It
+does **not** shorten step 4 — receiver-side reclamation stays
+unbounded from end to end. It bounds the caller's *external* wait on
+step 8, which is a different thing: a caller that gives up stops
+waiting, while the reclamation it was waiting for carries on and
+completes on its own. That is why a later `Close` or `Reconnect` can
+join the very same completion instead of starting a second teardown.
 
-```ada
-type State_Kind is (Connecting, Open, Closing, Closed);
-```
+Waking parked borrowers (step 2) is done twice — by the receiver's own
+reclamation and again by the caller's teardown pin — deliberately and
+idempotently, because a borrower nobody wakes is a drain that never
+completes.
 
-Transitions only ever move forward toward `Closed`. The intermediate
-`Closing` is visited only on the user-initiated `Close` path (which
-sets `Closing` while it waits for the peer's echo); a peer-initiated
-close handled in the receiver sets `Closed` directly, so `Open →
-Closed` is observable without ever passing through `Closing`. `Close`
-is effectively **idempotent**: on a still-`Connecting` client it's a
-no-op, and on an already-`Closed` one it just makes sure the transport
-is down. The PO also exposes `Wait_Closed` (an entry that
-blocks until `Closed`, used by `Close` to wait for the receiver to
-observe the peer's echo) and `Try_Mark_Local_Close`, which atomically
-arbitrates whether the user-`Close` path or the receiver's echo path is
-the one that emits our Close frame.
+### Abort safety is structural, not defensive
 
-### Why this shape
+Three GNAT behaviours were measured, not assumed, and each one rules
+out an approach that looks correct:
+
+- **An `in out` entry parameter's copy-back is not delivered when the
+  caller is aborted during the rendezvous.** So an ownership transfer
+  cannot be recorded by having the accepting task clear the caller's
+  pointer; it has to be recorded in a protected action, which *is*
+  abort-deferred.
+- **A blocking entry call made from a controlled `Initialize` is
+  unabortable**, because `Initialize` is abort-deferred — while the
+  same call made directly can be cancelled by an asynchronous select.
+  So a scope guard may release in `Finalize`, but must not acquire in
+  `Initialize`.
+- **A pending abort takes effect at the end of a protected action**,
+  before whatever statement follows it. So a guard cannot record "I
+  hold this" in its own state after the acquiring call returns — the
+  acquiring protected action has to record the owner itself.
+
+That last rule shapes two places. `Send_Guard.Acquire` takes the
+owner's identity *in* and records it inside the same action that takes
+the latch, so a cancelled acquisition records nothing and its release
+is a no-op. And admission works the same way: the `Attempt_Owner`
+exists **before** `Begin_Connect` is called, and `Begin_Connect`
+records the generation into it from inside the protected action. An
+owner created after admission returned would leave an instant in which
+the client was `Connecting` and nothing was responsible for taking it
+back out — and an abort landing there stranded the client permanently,
+refusing every later `Connect`.
+
+Ownership is carried by controlled types, so cleanup runs on every
+exit path including an abort: `Attempt_Owner` for an in-flight connect,
+`Teardown_Pin` for whoever wins a teardown.
+
+**What the suite can and cannot pin.** These windows are a few
+instructions wide and cannot be steered into from the public API, so
+for the most part the suite guards their *consequences* rather than
+the races themselves. `test_ws_send_guard` covers what follows from
+the guard's ownership protocol — pairing, that a cancelled acquisition
+releases nothing, that an aborted acquirer never leaves the latch held
+— and each is validated by backing the corresponding line out. The
+flag *shape* is not caught by it: whether the abort lands inside that
+interval is a scheduling race and the victim usually wins. It was
+falsified out of tree instead, by a probe that made the release and
+the abort adjacent in one task — 200/200 leaks that way, 0/200 with
+the owner recorded inside the protected action.
+
+Admission is the same split, for the same reason: `test_ws_abort`
+case 5 notices a client left admitted-but-unowned, because every later
+`Connect` is then refused forever, but it does not catch the record
+being moved out of the protected action. So the design rests on the
+structural argument — there is no interval — and the suite guards what
+would follow if there were.
+
+### `Close` before scope exit is required
+
+`Client_Type` is **not** controlled, and finalization deliberately does
+not tear a connection down. It cannot: RM 9.3(5) makes *waiting for
+dependent tasks* the first step of finalizing a master, and object
+finalization happens only afterwards. A receiver parked in `Read`
+therefore prevents `Finalize` from ever running, so `Finalize` can
+never be the thing that unparks it.
+
+The receiver's `terminate` alternative covers the safe cases — never
+connected, and idle after a completed reclamation — but an open
+connection must be closed explicitly. Any future automatic shutdown
+has to be initiated *before* master finalization: an explicit
+`Shutdown`, or a supervisor owning the client. Never `Finalize`.
+
+### Paths
+
+| Path | Behaviour |
+|---|---|
+| Failed upgrade before handoff | Session never published; `Connect` closes and frees it directly and admission is released. Object immediately reusable — the bug this design started from. |
+| Dial failure | The same shape one step earlier; admission is still released. |
+| Peer failure | The receiver's read raises, the loop exits, full reclamation runs, `On_Error` fires. |
+| Graceful close | `Close` wins the teardown, runs the §1.4 handshake on the pinned session, releases its borrow, waits (bounded) for reclamation. |
+| Forced reconnect, receiver parked in `Read` | `Reconnect` wins, marks the inbox closed, aborts I/O, drops its borrow, waits. The receiver wakes with `Aborted_Error`, suppresses `On_Error` because the caller asked for this, reclaims — and only then is the new generation dialed. |
+| Concurrent `Close` and `Reconnect` | One wins and drives it; the other joins, touches nothing, and waits for the same completion. A later call can likewise join a teardown still running after an earlier caller timed out. |
+| Send concurrent with teardown | The borrow is refused (`Closed_Error`), or granted and reclamation waits for it. It cannot park forever, because pending I/O is aborted before the wait. |
+| Receiver echo racing a forced teardown | The echo re-checks the forced-drain state *after* acquiring the guard and bails without latching or writing. |
+| Blocked user callback | The receiver never reaches reclamation; the caller's bounded wait raises `Timeout_Error` and the client stays `Closing`. |
+| Exception during cleanup | The gate steps propagate; the best-effort steps are handled locally. |
+
+### `Send_Guard`
+
+One latch per connection serialises frame writes — the application's
+`Send_*` and the receiver's Pong and Close echoes both go through it.
+A WebSocket client must generate a fresh mask per frame (§5.3) and a
+frame's bytes must be written contiguously, so interleaved writes from
+two tasks would corrupt the stream. The socket write happens *outside*
+the protected object's own lock, so a slow write doesn't block state
+queries, but other senders still serialize behind it.
+
+Acquisition is bounded in exactly **one** place: the teardown's
+attempt to send its Close frame, which uses `Try_Take`. Application
+sends and the receiver's Pong and Close echoes all use the blocking
+`Take` and queue normally — bounding those would mean failing a send
+because someone else was slow, which is not the caller's problem to
+absorb.
+
+The teardown is the exception because it is the one acquisition that
+can deadlock the caller's own bound. A WebSocket write carries no
+deadline of its own, so a peer that simply stops reading parks the
+application writer holding the latch — and a teardown that waited
+unconditionally for that latch in order to send its Close frame would
+never reach the `Timeout` supposed to bound it. On expiry it **skips
+the graceful Close frame** and aborts instead: a writer interrupted
+mid-frame may already have left a partial message on the wire, and
+§5.5.1 admits nothing after a Close.
+
+`Close_Frame_Sent` is latched under the guard, so a `Send_*` that
+loses the race to a concurrent close observes it and raises instead of
+writing a data frame behind our Close.
+
+### The receiver
+
+One persistent task per client, running one generation at a time. It
+waits for a session to be handed to it, runs that connection to
+completion, reclaims it, and goes back to waiting. Per-connection
+state — the decode buffer, the reassembly accumulator — is local to
+that run, which is what makes a reconnect start clean rather than
+inheriting the previous connection's half-received message.
+
+A rendezvous body that raises leaves the session with the connecting
+task, so the receiver drops it and waits for the next handoff rather
+than letting one bad handoff end the task and take the client with it.
+
+## Why this shape
 
 - A dedicated receiver task is the natural fit for asynchronous frame
   arrival — pings, server-initiated close, and unsolicited data all
   arrive without application polling.
-- Protected objects (instead of `Ada.Synchronous_Task_Control` or
-  semaphores) give us the entry-barrier primitive for free, which is
-  what `Inbox.Receive` and the `State` transitions want.
-- Splitting `Send_Guard` from `State` keeps the write mutex out of the
-  critical path of state queries like `Is_Open`.
+- Protected objects give the entry-barrier primitive for free, which
+  is what the inbox and the state transitions want, and they are
+  abort-deferred, which is what the ownership records need.
+- Splitting the send guard from the state keeps the write latch out of
+  the critical path of state queries like `Is_Open`.
+- Per-generation heap sessions are what make the client reusable at
+  all: the alternative — resetting inline components in place — cannot
+  be made safe against a borrower that is still inside the old
+  connection.
+
+## Not provided
+
+**Automatic reconnect** — retry policy, backoff, attempt limits,
+retryable-closure classification, reconnecting/reconnected callbacks —
+is deliberately absent. `Reconnect` is the mechanism; policy belongs
+in a managed-client layer above it, driven by its own supervisor task.
+
+It must never be driven from `On_Error`, which runs on the receiver:
+a callback that tried to reconnect would be asking the receiver to
+wait for a teardown only the receiver can perform, which is precisely
+what `Reentrant_Error` refuses. Authentication failures and
+caller-initiated closes should not retry by default.
 
 ## Tests
 
-The WebSocket layer is covered by four test mains:
+The WebSocket layer is covered by nineteen test mains. `test_ws_send_guard`
+runs **first** by construction: what it checks shows up everywhere else
+as a hang, so nothing may sit ahead of it that could hang and stop it
+running at all.
 
 | Test | Scope | Fixture |
 |---|---|---|
-| `test_ws_frames` | pure codec — encode/decode round trips for 7/16/64-bit lengths, masking, and control-frame validation | none (in-process) |
-| `test_ws_handshake` | the HTTP upgrade: base64 vectors, 101 / Upgrade / Connection / Accept validation, subprotocol checks, single-use lifecycle, `Close` timeout | `server_ws.py` (`ws://127.0.0.1:8765`) + an in-process fake-handshake server |
-| `test_ws_echo` | plain-WS frame I/O: text / binary round-trips, `Receive` timeout, post-close `Closed_Error`, ordering, push callbacks | `server_ws.py` (`ws://127.0.0.1:8765`) |
-| `test_ws_tls` | the `wss://` sibling: verify / insecure / untrusted, text + binary round-trips over TLS | `server_ws_tls.py` (`wss://127.0.0.1:8768`) |
+| `test_ws_send_guard` | the guard's ownership protocol in isolation — pairing, cancelled acquisition, aborted acquirer | none (in-process) |
+| `test_ws_budgets` | the close-budget arithmetic, extracted so it can be checked directly | none (in-process) |
+| `test_ws_frames` | pure codec — length forms, masking, control-frame validation, the `Allowance` and `Fragment` cases | none (in-process) |
+| `test_ws_utf8` | text validation | none (in-process) |
+| `test_ws_handshake` | the HTTP upgrade: base64 vectors, 101 / Upgrade / Connection / Accept, subprotocol checks | `server_ws.py`, `server.py`, `server_tls.py` + in-process fake |
+| `test_ws_echo` | frame I/O: text / binary round-trips, `Receive` timeout, ordering, push callbacks | `server_ws.py` |
+| `test_ws_ping` | ping / pong echo | `server_ws.py` |
+| `test_ws_send_closed` | sending on a closed connection | `server_ws.py` |
+| `test_ws_limits` | ceilings and delivery modes; the decisive case is a huge-length header with no body, where a post-hoc check would hang instead of rejecting | `server_ws_hostile.py`, `server_ws.py` |
+| `test_ws_reconnect` | reconnect after receiver teardown, failed upgrade, dial failure, across transport kinds; saved-parameter replay; reentrancy refusal | `server_ws.py`, `server_ws_tls.py`, `server_ws_hostile.py`, `server.py` |
+| `test_ws_reconnect_fragment` | no reassembly state survives a generation boundary | `server_ws_hostile.py`, `server_ws.py` |
+| `test_ws_reconnect_isolation` | what must and must not cross the boundary: parked `Receive`, unread backlog, callbacks, no `On_Error` | `server_ws.py`, `server_ws_hostile.py` |
+| `test_ws_reconnect_concurrency` | senders racing a forced teardown, with deliberately narrow per-scenario exception sets | `server_ws.py`, `server_ws_hostile.py` |
+| `test_ws_reconnect_echo_race` | teardown while the write latch is contended, in three shapes | `server_ws_hostile.py` |
+| `test_ws_reconnect_blocked_callback` | a callback that blocks past the bound; the teardown continues and a later call joins it | `server_ws.py` |
+| `test_ws_reconnect_leak` | 50 redial cycles, fd and thread counts from `/proc` | `server_ws.py` |
+| `test_ws_teardown` | close paths and their bounds, including a writer stuck against a deaf peer | `server_ws_hostile.py`, `server_ws.py` |
+| `test_ws_abort` | asynchronous transfer of control across every ownership handoff | `server_ws.py`, `server_stall.py` + in-process fake |
+| `test_ws_tls` | the `wss://` sibling: verify / insecure / untrusted, round-trips over TLS | `server_ws_tls.py` |
+
+Tests that assert a bound are validated by backing the corresponding
+guard out and confirming the test fails — and, where the test depends
+on a race having happened, by making that race *not* happen and
+confirming it fails differently. A test whose premise is established
+by a delay rather than an observed fact can pass while checking
+nothing, which several of these did before they were corrected.
+
+**One test does not meet that standard, and should not be read as if
+it did.** `test_ws_abort` case 3 sweeps an abort deadline across a
+calibrated handshake duration and requires both outcomes — some
+samples torn, some surviving — to appear in one run. That is a
+statistical property of a duration which varies several-fold under
+load, so the case flakes in both directions and re-tuning the span
+only moves which direction. Making it deterministic needs a mechanism
+that holds the receiver away from the handoff on demand — a narrow
+testing hook or an extracted handoff primitive — not another timing
+window. Until then it is a sampler, and the rule above describes where
+the suite is going rather than where all of it already is.
