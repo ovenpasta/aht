@@ -557,23 +557,29 @@ begin
       end;
    end if;
 
-   --  The deterministic check: the production paths actually consulted
-   --  the entropy source. One draw per frame plus one per handshake
-   --  nonce. Reverting either call site to any other generator leaves
-   --  this short, however good that generator's output looks.
-   --  Attribution, not just a total.
+   --  The deterministic check: the production paths requested entropy
+   --  of the expected widths, one per frame and one per handshake.
+   --  Reverting either call site to another generator leaves the
+   --  corresponding population short, however good that generator's
+   --  output looks.
    --
-   --  Counting calls alone cannot say WHICH caller drew, so a missing
-   --  call and a compensating extra call cancel. Counting bytes as
-   --  well removes that: the two callers ask for different widths, so
+   --  Split by WIDTH, not by caller. Counting calls alone cannot
+   --  separate requests of different sizes, so a missing call and a
+   --  compensating extra call cancel. Counting bytes as well removes
+   --  that, because the two callers ask for different widths:
    --
    --      calls =      masks +       nonces
    --      bytes =  4 * masks +  16 * nonces
    --
-   --  is two equations in two unknowns and solves uniquely. Each
-   --  population is then checked against what was independently
-   --  observed on the wire, so a shortfall in one cannot be paid for
-   --  by a surplus in the other.
+   --  is two equations in two unknowns and solves uniquely for how
+   --  many requests of each width were made. Each population is then
+   --  checked against what was independently observed on the wire, so
+   --  a shortfall in one width cannot be paid for by a surplus in the
+   --  other.
+   --
+   --  It does not attribute a request to a caller. Two 4-byte
+   --  requests are indistinguishable, so a missing one and an
+   --  unrelated extra one still balance.
    declare
       Expected : constant Natural := Wire.Mask_Count + Connections;
 
