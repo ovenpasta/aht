@@ -69,13 +69,17 @@ package AHT.Random is
    --  case, which is when one most wants to know.
    --
    --  A diagnostic, not a control primitive -- the same role
-   --  Send_Guard.Acquisitions plays. It exists because the property
-   --  that matters here cannot be tested any other way: no amount of
+   --  Send_Guard.Acquisitions plays. It exists because no amount of
    --  sampling the bytes on the wire distinguishes this source from a
    --  well-behaved PRNG, so a test that watched only the output would
-   --  stay green with the production call sites reverted. Counting
-   --  the calls pins the wiring itself, which is the part that can
-   --  actually regress silently.
+   --  stay green with the production call sites reverted.
+   --
+   --  What counting establishes is that a path REQUESTED entropy, and
+   --  of what width. It does not trace the returned bytes to the
+   --  value that shipped: a caller that drew and discarded, then used
+   --  something else, would count identically. That is a deliberate
+   --  limit, not an oversight -- see test_ws_masking, which states it
+   --  and the construction that defeats it.
    function Draws return Natural;
 
    --  Total bytes REQUESTED. Saturates likewise, and like Draws it

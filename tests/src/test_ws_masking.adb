@@ -14,14 +14,22 @@
 --  What is tested, and where the samples come from
 --  ---------------------------------------------------------------
 --
---  Case 1 reads the masks and nonces a real client puts ON THE WIRE,
---  from a fake peer that completes the handshake and then parses
---  frames. This is the case that pins the wiring. Sampling the
---  entropy package directly would pass just as well with the
---  production call sites reverted to a clock-seeded generator — which
---  is exactly the defect being guarded — so only samples taken off
---  the socket prove that the mask a frame actually carries came from
---  the intended source.
+--  Case 1 drives a real client against a fake peer that completes the
+--  handshake and parses frames, and pairs two independent
+--  observations: what the client emitted (masks and nonces, read off
+--  the socket) and what it requested (entropy calls and their
+--  widths, read from the counters).
+--
+--  Pairing them is the point. Sampling the entropy package alone
+--  would pass with the production call sites reverted to a
+--  clock-seeded generator, which is the defect being guarded; and
+--  sampling the wire alone cannot tell a strong source from any
+--  generator with plausible-looking output. Together they establish
+--  that the expected populations of requests accompanied the frames
+--  that went out.
+--
+--  What that does NOT establish is provenance — see the limit
+--  section below.
 --
 --  Case 2 samples the source directly, for two properties a handful
 --  of live frames cannot show: that the full byte range appears, and
@@ -71,16 +79,19 @@
 --  Verified: it passes. So the honest claim is "the paths requested
 --  the entropy they should have", not "these bytes are the entropy".
 --
---  Closing it needs an injectable provider whose recognisable output
---  can be matched on the wire. That was considered and rejected: it
---  means shipping, in the package whose entire purpose is that the
---  entropy path cannot be silently weakened, a supported API for
---  substituting the entropy path. The residual gap is an adversarial
---  construction — draw, discard, then use something else — and not a
---  shape any plausible refactor produces, whereas every realistic
---  regression (call removed, call swapped, source replaced) is
---  caught. Weakening the production API to close it would be the
---  worse trade.
+--  Closing it needs a provider that emits recognisable bytes, so the
+--  wire value can be matched against what was handed out. That does
+--  NOT require exposing substitution to library users: a test-only
+--  alternate body, selected by this project's source directories,
+--  would do it without adding anything to the public API.
+--
+--  It is rejected on cost, not on safety. Two bodies for one package
+--  means the tested build is not the shipped build, which is a poor
+--  trade for closing an adversarial construction — draw, discard,
+--  use something else — that no refactor produces, when every
+--  realistic regression (call removed, call swapped, source
+--  replaced) is already caught. If the entropy path grows past two
+--  call sites, that calculation is worth redoing.
 --
 --  The wire samples are still collected, for what they genuinely
 --  show: that frames are masked at all, that the mask is not a
@@ -586,18 +597,20 @@ begin
                & "entropy source");
       else
          if Masks /= Integer (Wire.Mask_Count) then
-            Fail ("the entropy source supplied"
-                  & Integer'Image (Masks) & " four-byte draws but"
-                  & Natural'Image (Wire.Mask_Count)
-                  & " masked frames were seen on the wire — the frame "
-                  & "mask is not coming from it");
+            Fail (Integer'Image (Masks)
+                  & " mask-width (4-byte) entropy requests were made "
+                  & "while" & Natural'Image (Wire.Mask_Count)
+                  & " masked frames went out — one request per frame "
+                  & "was expected, so a request of that width is "
+                  & "missing or surplus");
          end if;
          if Nonces /= Connections then
-            Fail ("the entropy source supplied"
-                  & Integer'Image (Nonces) & " sixteen-byte draws for"
-                  & Natural'Image (Connections)
-                  & " handshakes — the Sec-WebSocket-Key nonce is not "
-                  & "coming from it");
+            Fail (Integer'Image (Nonces)
+                  & " nonce-width (16-byte) entropy requests were made "
+                  & "while" & Natural'Image (Connections)
+                  & " handshakes went out — one request per handshake "
+                  & "was expected, so a request of that width is "
+                  & "missing or surplus");
          end if;
       end if;
       --  Exact, not a lower bound.
