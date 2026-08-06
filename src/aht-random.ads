@@ -59,8 +59,14 @@ package AHT.Random is
    --  no-op.
    procedure Fill (B : out AHT.Bytes.Byte_Array);
 
-   --  How many times Fill has been asked for bytes. Saturates at
+   --  How many times Fill has been ASKED for bytes. Saturates at
    --  Natural'Last rather than overflowing.
+   --
+   --  Requests, not deliveries: the count is taken on entry, so a
+   --  Fill that goes on to raise still increments it. That is the
+   --  useful reading for the callers -- "did this path ask?" -- and
+   --  the alternative would report nothing at all for the failure
+   --  case, which is when one most wants to know.
    --
    --  A diagnostic, not a control primitive -- the same role
    --  Send_Guard.Acquisitions plays. It exists because the property
@@ -72,7 +78,10 @@ package AHT.Random is
    --  actually regress silently.
    function Draws return Natural;
 
-   --  Total bytes handed out. Saturates likewise.
+   --  Total bytes REQUESTED. Saturates likewise, and like Draws it
+   --  counts on entry, so bytes a failed Fill never delivered are
+   --  included. Named for what it measures rather than for what a
+   --  reader might hope it measures.
    --
    --  Draws alone cannot say WHICH caller drew: a missing call and a
    --  compensating extra call balance. Paired with this, they can.
@@ -80,6 +89,6 @@ package AHT.Random is
    --  mask, 16 for a handshake nonce — so calls and bytes form two
    --  equations in two unknowns and a test can solve for each
    --  population exactly rather than checking an aggregate.
-   function Bytes_Drawn return Natural;
+   function Bytes_Requested return Natural;
 
 end AHT.Random;

@@ -99,7 +99,7 @@ package body AHT.Random is
    end Opener;
 
    function Draws return Natural is (Opener.Total);
-   function Bytes_Drawn return Natural is (Opener.Total_Bytes);
+   function Bytes_Requested return Natural is (Opener.Total_Bytes);
 
    ----------
    -- Fill --

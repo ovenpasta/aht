@@ -49,10 +49,38 @@
 --  statistical test on the bytes can tell it from the OS pool.
 --
 --  What CAN be pinned deterministically is that the production paths
---  consult the intended source at all. AHT.Random.Draws counts calls,
---  and a frame that carried a mask from anywhere else does not
---  increment it. That catches every reverted call site, including the
---  seeded-once PRNG that no sampling would catch.
+--  REQUEST the expected entropy. AHT.Random counts calls and bytes,
+--  and because the two callers ask for different widths — 4 for a
+--  mask, 16 for a nonce — those two totals form a solvable system and
+--  the request populations can be recovered exactly and checked
+--  against what the peer saw on the wire. That catches every reverted
+--  call site, including the seeded-once PRNG no sampling would catch.
+--
+--  ---------------------------------------------------------------
+--  The limit of that, stated precisely
+--  ---------------------------------------------------------------
+--
+--  Counters establish that the entropy was requested. They do NOT
+--  establish that those particular bytes became the mask or the
+--  nonce. This substitution satisfies every count exactly and still
+--  puts predictable bytes on the wire:
+--
+--      AHT.Random.Fill (Dummy);            --  right width, discarded
+--      Fill_From_A_Predictable_PRNG (Key); --  what actually ships
+--
+--  Verified: it passes. So the honest claim is "the paths requested
+--  the entropy they should have", not "these bytes are the entropy".
+--
+--  Closing it needs an injectable provider whose recognisable output
+--  can be matched on the wire. That was considered and rejected: it
+--  means shipping, in the package whose entire purpose is that the
+--  entropy path cannot be silently weakened, a supported API for
+--  substituting the entropy path. The residual gap is an adversarial
+--  construction — draw, discard, then use something else — and not a
+--  shape any plausible refactor produces, whereas every realistic
+--  regression (call removed, call swapped, source replaced) is
+--  caught. Weakening the production API to close it would be the
+--  worse trade.
 --
 --  The wire samples are still collected, for what they genuinely
 --  show: that frames are masked at all, that the mask is not a
@@ -400,7 +428,7 @@ begin
    --  Case 1: what the client actually put on the wire.
    ---------------------------------------------------------------
    Draws_Before := AHT.Random.Draws;
-   Bytes_Before := AHT.Random.Bytes_Drawn;
+   Bytes_Before := AHT.Random.Bytes_Requested;
 
    select
       Peer.Ready (Listening);
@@ -462,7 +490,7 @@ begin
       Fail ("the fake peer never finished");
    end select;
    Drew_During  := AHT.Random.Draws - Draws_Before;
-   Bytes_During := AHT.Random.Bytes_Drawn - Bytes_Before;
+   Bytes_During := AHT.Random.Bytes_Requested - Bytes_Before;
 
    if Wire.Error /= "" then
       Fail ("the peer reported: " & Wire.Error);
@@ -538,7 +566,9 @@ begin
    declare
       Expected : constant Natural := Wire.Mask_Count + Connections;
 
-      --  nonces = (bytes - 4*calls) / 12, from the pair above.
+      --  nonces = (bytes - 4*calls) / 12, from the pair above. Both
+      --  inputs count REQUESTS, including any that failed, which is
+      --  what makes the algebra exact rather than best-effort.
       Num       : constant Integer :=
         Integer (Bytes_During) - Mask_Bytes * Integer (Drew_During);
       Solvable  : constant Boolean :=
@@ -641,7 +671,7 @@ begin
       Put_Line ("test_ws_masking: OK ("
                 & Natural'Image (Wire.Mask_Count)
                 & " wire masks and" & Natural'Image (Wire.Nonce_Count)
-                & " nonces all distinct)");
+                & " nonces observed; entropy requested for each)");
       Ada.Command_Line.Set_Exit_Status (0);
    else
       Put_Line ("test_ws_masking:" & Failures'Image & " failure(s)");
