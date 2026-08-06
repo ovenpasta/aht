@@ -1,9 +1,12 @@
 with GNAT.OS_Lib;
-with Interfaces.C;
 
 package body AHT.Random is
 
    Source_Path : constant String := "/dev/urandom";
+
+   --  POSIX EINTR. Conventionally 4 on Linux and the BSDs including
+   --  macOS, which is every platform this library claims.
+   EINTR : constant := 4;
 
    --  Opened once, then read from directly by any number of tasks.
    --
@@ -15,16 +18,6 @@ package body AHT.Random is
    --  syscall part of a protected operation, which is exactly what
    --  protected objects are meant not to contain.
    FD : GNAT.OS_Lib.File_Descriptor := GNAT.OS_Lib.Invalid_FD;
-
-   --  POSIX-standard values, identical on Linux and the BSDs
-   --  including macOS, so no per-platform branch is needed.
-   F_SETFD    : constant := 2;
-   FD_CLOEXEC : constant := 1;
-
-   function C_Fcntl
-     (FD : Interfaces.C.int; Cmd : Interfaces.C.int; Arg : Interfaces.C.int)
-      return Interfaces.C.int
-     with Import, Convention => C, External_Name => "fcntl";
 
    --  Only the open is serialised. Retried on every call until it
    --  succeeds rather than latched after one attempt: the first open
@@ -45,21 +38,27 @@ package body AHT.Random is
    protected body Opener is
       procedure Ensure (OK : out Boolean) is
          use type GNAT.OS_Lib.File_Descriptor;
-         Ignored : Interfaces.C.int;
+         Set_OK : Boolean;
       begin
          if FD = GNAT.OS_Lib.Invalid_FD then
             FD := GNAT.OS_Lib.Open_Read (Source_Path, GNAT.OS_Lib.Binary);
 
-            --  Close-on-exec. Without it every subprocess this
-            --  program ever spawns inherits an open descriptor on the
-            --  entropy source, which is a descriptor leak into
-            --  processes that never asked for one. It does NOT affect
-            --  the deliberate fork behaviour -- a fork keeps the
-            --  descriptor, which is what makes reading through it
-            --  safe across one; only exec drops it.
             if FD /= GNAT.OS_Lib.Invalid_FD then
-               Ignored :=
-                 C_Fcntl (Interfaces.C.int (FD), F_SETFD, FD_CLOEXEC);
+               --  Close-on-exec, so subprocesses do not inherit a
+               --  descriptor on the entropy source. Fork still keeps
+               --  it, which is what makes reading through it safe
+               --  across one; only exec drops it.
+               --
+               --  The status is checked and a failure is fatal to
+               --  this descriptor. Keeping a descriptor that is NOT
+               --  close-on-exec would quietly break the guarantee
+               --  above, and the next Ensure re-opens rather than
+               --  handing out a weaker one.
+               GNAT.OS_Lib.Set_Close_On_Exec (FD, True, Set_OK);
+               if not Set_OK then
+                  GNAT.OS_Lib.Close (FD);
+                  FD := GNAT.OS_Lib.Invalid_FD;
+               end if;
             end if;
          end if;
          OK := FD /= GNAT.OS_Lib.Invalid_FD;
@@ -82,20 +81,11 @@ package body AHT.Random is
    ----------
 
    procedure Fill (B : out AHT.Bytes.Byte_Array) is
-      --  A read can be interrupted by a signal and return -1 with
-      --  EINTR, which is not a failure of the source. GNAT.OS_Lib
-      --  does not surface errno, so this cannot distinguish that case
-      --  from a real error; instead it retries a bounded number of
-      --  times and only then gives up. A genuine failure costs a few
-      --  wasted syscalls, an interrupted one is survived, and neither
-      --  can loop forever.
-      Max_Retries : constant := 8;
-
-      OK      : Boolean;
-      Got     : Integer;
-      Pos     : Natural;
-      Left    : Natural;
-      Retries : Natural := 0;
+      OK   : Boolean;
+      Got  : Integer;
+      Err  : Integer;
+      Pos  : Natural;
+      Left : Natural;
    begin
       if B'Length = 0 then
          return;
@@ -106,7 +96,8 @@ package body AHT.Random is
       if not OK then
          raise Entropy_Error
            with "AHT.Random: cannot open " & Source_Path
-             & "; refusing to fall back to a predictable source";
+             & " with close-on-exec; refusing to fall back to a "
+             & "predictable source";
       end if;
 
       --  Looped, because a short read is legal even here. Asking for
@@ -117,15 +108,36 @@ package body AHT.Random is
       while Left > 0 loop
          Got := GNAT.OS_Lib.Read (FD, B (Pos)'Address, Left);
 
-         if Got <= 0 then
-            Retries := Retries + 1;
-            if Retries > Max_Retries then
-               raise Entropy_Error
-                 with "AHT.Random: read from " & Source_Path
-                   & " returned" & Integer'Image (Got)
-                   & " after" & Natural'Image (Max_Retries)
-                   & " retries";
+         if Got < 0 then
+            --  Read immediately, before anything else can disturb it.
+            Err := GNAT.OS_Lib.Errno;
+
+            --  Only EINTR is retried. A signal arriving mid-read is
+            --  not a failure of the source and says nothing about it.
+            --  Everything else -- EIO, EBADF, EFAULT -- means the
+            --  descriptor or the request is broken, and retrying it
+            --  eight times only delays a diagnosis that is already
+            --  certain.
+            if Err /= EINTR then
+               declare
+                  --  Named, because Errno_Message returning String is
+                  --  ambiguous with indexing it at the call site.
+                  Why : constant String := GNAT.OS_Lib.Errno_Message (Err);
+               begin
+                  raise Entropy_Error
+                    with "AHT.Random: read from " & Source_Path
+                      & " failed:" & Integer'Image (Err) & " " & Why;
+               end;
             end if;
+
+         elsif Got = 0 then
+            --  End of file on a character device that is supposed to
+            --  be inexhaustible. Not retryable in any useful sense.
+            raise Entropy_Error
+              with "AHT.Random: read from " & Source_Path
+                & " returned 0 bytes; the source is not behaving as "
+                & "a character device";
+
          else
             --  Left is decremented FIRST, and Pos advanced only while
             --  bytes remain. Advancing unconditionally would compute

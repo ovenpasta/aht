@@ -199,8 +199,18 @@ procedure Test_WS_Masking is
    --  The fake peer
    ---------------------------------------------------------------
 
+   --  Ready carries a status rather than being a bare rendezvous.
+   --
+   --  It used to be bare, and that deadlocked: if the bind failed --
+   --  the port already in use, say -- the peer raised before ever
+   --  reaching `accept Ready`, so the main task waited on Ready
+   --  forever while the peer waited on Finished forever. A test that
+   --  hangs on a busy port is worse than one that fails on it. Both
+   --  entries are now on every path, and the main task's calls are
+   --  timed so that a peer which dies in some way not foreseen here
+   --  still produces a report rather than a wedge.
    task Peer is
-      entry Ready;
+      entry Ready (Listening : out Boolean);
       entry Finished;
    end Peer;
 
@@ -209,17 +219,35 @@ procedure Test_WS_Masking is
       Conn     : Socket_Type;
       Addr     : Sock_Addr_Type;
       Peer_Adr : Sock_Addr_Type;
+      Up       : Boolean := False;
    begin
-      Create_Socket (Listener);
-      Set_Socket_Option (Listener, Socket_Level, (Reuse_Address, True));
-      Addr := (Family => Family_Inet,
-               Addr   => Inet_Addr ("127.0.0.1"),
-               Port   => Port);
-      Bind_Socket (Listener, Addr);
-      Listen_Socket (Listener, 16);
-      accept Ready;
+      begin
+         Create_Socket (Listener);
+         Set_Socket_Option (Listener, Socket_Level, (Reuse_Address, True));
+         --  Bounds Accept_Socket, so a client that never arrives
+         --  cannot park this task past the end of the test.
+         Set_Socket_Option
+           (Listener, Socket_Level, (Receive_Timeout, 20.0));
+         Addr := (Family => Family_Inet,
+                  Addr   => Inet_Addr ("127.0.0.1"),
+                  Port   => Port);
+         Bind_Socket (Listener, Addr);
+         Listen_Socket (Listener, 16);
+         Up := True;
+      exception
+         when E : others =>
+            Wire.Note_Error
+              ("could not listen on port" & Integer'Image (Port) & ": "
+               & Ada.Exceptions.Exception_Name (E) & ": "
+               & Ada.Exceptions.Exception_Message (E));
+      end;
 
-      for C in 1 .. Connections loop
+      --  Accepted whether or not the socket came up.
+      accept Ready (Listening : out Boolean) do
+         Listening := Up;
+      end Ready;
+
+      for C in 1 .. (if Up then Connections else 0) loop
          Accept_Socket (Listener, Conn, Peer_Adr);
          declare
             Chan : constant Stream_Access := Stream (Conn);
@@ -321,28 +349,56 @@ procedure Test_WS_Masking is
       exception
          when others => null;
       end;
-      accept Finished;
+
+      --  A terminate alternative, not a bare accept.
+      --
+      --  The main task returns early on some failure paths without
+      --  ever reaching Peer.Finished, and a bare accept would then
+      --  park this task forever -- so the test printed its diagnosis
+      --  and the PROCESS still hung, because Ada waits for dependent
+      --  tasks before leaving the master. `terminate` lets the task
+      --  end when the master is finishing and no call can arrive.
+      select
+         accept Finished;
+      or
+         terminate;
+      end select;
    exception
       when E : others =>
          Wire.Note_Error
            ("peer raised " & Ada.Exceptions.Exception_Name (E) & ": "
             & Ada.Exceptions.Exception_Message (E));
-         begin
+         select
             accept Finished;
-         exception
-            when others => null;
-         end;
+         or
+            terminate;
+         end select;
    end Peer;
 
    Draws_Before : Natural;
    Drew_During  : Natural;
+   Listening    : Boolean;
 
 begin
    ---------------------------------------------------------------
    --  Case 1: what the client actually put on the wire.
    ---------------------------------------------------------------
    Draws_Before := AHT.Random.Draws;
-   Peer.Ready;
+
+   select
+      Peer.Ready (Listening);
+   or
+      delay 10.0;
+      Listening := False;
+      Fail ("the fake peer never reported readiness");
+   end select;
+
+   if not Listening then
+      Fail ("no peer to talk to: " & Wire.Error);
+      Put_Line ("test_ws_masking:" & Failures'Image & " failure(s)");
+      Ada.Command_Line.Set_Exit_Status (1);
+      return;
+   end if;
 
    for C in 1 .. Connections loop
       declare
@@ -363,7 +419,12 @@ begin
       end;
    end loop;
 
-   Peer.Finished;
+   select
+      Peer.Finished;
+   or
+      delay 30.0;
+      Fail ("the fake peer never finished");
+   end select;
    Drew_During := AHT.Random.Draws - Draws_Before;
 
    if Wire.Error /= "" then
@@ -431,15 +492,27 @@ begin
       --  draw made up the difference exactly.
       Expected : constant Natural := Wire.Mask_Count + Connections;
    begin
-      if Drew_During < Expected then
+      --  Exact, not a lower bound.
+      --
+      --  A lower bound lets one deficit be paid for by another
+      --  surplus. That is not hypothetical: with the peer counting
+      --  only Frames_Each frames it missed each connection's Close
+      --  frame, whose own mask draw then covered the eight missing
+      --  nonce draws exactly, and reverting the nonce path passed.
+      --  Requiring equality means a swallowed parse error -- the peer
+      --  ignores them, so its count can only ever be low -- shows up
+      --  as a surplus of draws rather than silently financing a
+      --  missing one.
+      if Drew_During /= Expected then
          Fail ("the entropy source was consulted"
                & Natural'Image (Drew_During) & " time(s) while"
                & Natural'Image (Wire.Mask_Count)
                & " masked frames and" & Natural'Image (Connections)
-               & " handshakes went out — at least"
+               & " handshakes went out — exactly"
                & Natural'Image (Expected)
-               & " draws were required, so a mask or a nonce came "
-               & "from somewhere else");
+               & " draws were expected, so either a mask or a nonce "
+               & "came from somewhere else, or the peer did not "
+               & "observe every frame that was sent");
       end if;
    end;
 

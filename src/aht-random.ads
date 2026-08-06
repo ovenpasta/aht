@@ -2,9 +2,12 @@ with AHT.Bytes;
 
 --  Cryptographically secure random bytes, from the operating system.
 --
---  This exists because RFC 6455 asks for more than a plain PRNG can
---  give, in two places, and both were previously served by a
---  clock-seeded `Ada.Numerics.Discrete_Random`:
+--  This exists because RFC 6455 asks, in two places, for randomness
+--  that a *predictable* generator cannot supply — and both were
+--  previously served by a clock-seeded
+--  `Ada.Numerics.Discrete_Random`. The distinction is not
+--  PRNG-versus-not: `/dev/urandom` is itself a CSPRNG. It is
+--  cryptographically secure versus predictable.
 --
 --    * §5.3 — the frame masking key "MUST be derived from a strong
 --      source of entropy", and a given frame's key must not make the
@@ -17,13 +20,30 @@ with AHT.Bytes;
 --    * §4.1 — `Sec-WebSocket-Key` "MUST be a nonce ... selected
 --      randomly for each connection".
 --
---  Bytes come straight from the OS pool (`/dev/urandom`), which is
---  itself a CSPRNG, so there is no generator state here to seed, to
---  share between tasks, or to get wrong. The descriptor is opened
---  once and kept; the read is a syscall per call, deliberately not
---  buffered. Buffering would amortise the syscall but would hand the
---  same pending bytes to both sides of a `fork`, and reading through
---  a retained descriptor is safe across one.
+--  Bytes come straight from the OS pool (`/dev/urandom`), so there is
+--  no generator state here to seed, to share between tasks, to
+--  reseed after a fork, or to get wrong. That is the whole reason for
+--  going to the OS rather than to a crypto library's DRBG: the OS
+--  pool is what those DRBGs are seeded from anyway, and owning one of
+--  them would add initialization, finalization and post-fork
+--  reseeding to obtain the same 4- and 16-byte public values.
+--
+--  The descriptor is opened once, kept for the life of the process,
+--  and read unbuffered — a syscall per call. Buffering would amortise
+--  that but would hand the same pending bytes to both sides of a
+--  `fork`, whereas reading through a retained descriptor stays
+--  correct across one.
+--
+--  It is set close-on-exec, so subprocesses do not inherit it. One
+--  narrow caveat, stated rather than papered over: the flag is set
+--  just after the open, not atomically with it, so a `fork`+`exec`
+--  performed by another task in exactly that window could still
+--  inherit the descriptor. Closing that window needs `O_CLOEXEC` on
+--  the open itself, which is not reachable through `GNAT.OS_Lib` and
+--  whose value differs across POSIX platforms. The exposure is one
+--  descriptor on a world-readable device, so the guarantee is
+--  documented as the narrower one rather than bought with C glue and
+--  a per-platform constant.
 --
 --  POSIX-only, which matches what this library already claims to
 --  support.
