@@ -39,4 +39,17 @@ package AHT.Random is
    --  no-op.
    procedure Fill (B : out AHT.Bytes.Byte_Array);
 
+   --  How many times Fill has been asked for bytes. Saturates at
+   --  Natural'Last rather than overflowing.
+   --
+   --  A diagnostic, not a control primitive -- the same role
+   --  Send_Guard.Acquisitions plays. It exists because the property
+   --  that matters here cannot be tested any other way: no amount of
+   --  sampling the bytes on the wire distinguishes this source from a
+   --  well-behaved PRNG, so a test that watched only the output would
+   --  stay green with the production call sites reverted. Counting
+   --  the calls pins the wiring itself, which is the part that can
+   --  actually regress silently.
+   function Draws return Natural;
+
 end AHT.Random;
