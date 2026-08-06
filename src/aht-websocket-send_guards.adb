@@ -26,17 +26,6 @@ package body AHT.Websocket.Send_Guards is
          end if;
       end Release_If_Owner;
 
-      procedure Random_Mask (Mask : out AHT.Bytes.Byte_Array) is
-      begin
-         if not Seeded then
-            Random_Bytes.Reset (Gen);
-            Seeded := True;
-         end if;
-         for I in Mask'Range loop
-            Mask (I) := Random_Bytes.Random (Gen);
-         end loop;
-      end Random_Mask;
-
       procedure Mark_Close_Sent is
       begin
          Close_Sent := True;

@@ -12,6 +12,7 @@ with GNAT.SHA1;
 with AHT.HTTP.Methods;
 with AHT.HTTP.Request;
 with AHT.HTTP.Response;
+with AHT.Random;
 with AHT.URL;
 with AHT.Websocket.Budgets;
 with AHT.Websocket.Frames;
@@ -146,14 +147,12 @@ package body AHT.Websocket.Client is
             (AHT.URL.Port_Number'Image (U.Port), Ada.Strings.Both);
    end Host_Header;
 
-   procedure Fill_Random (B : out AHT.Bytes.Byte_Array) is
-      Gen : Guards.Random_Bytes.Generator;
-   begin
-      Guards.Random_Bytes.Reset (Gen);
-      for I in B'Range loop
-         B (I) := Guards.Random_Bytes.Random (Gen);
-      end loop;
-   end Fill_Random;
+   --  Sec-WebSocket-Key must be a nonce selected randomly per
+   --  connection (RFC 6455 4.1). The previous implementation reset a
+   --  clock-seeded generator on every call, so two connections made
+   --  in the same tick could draw the same key.
+   procedure Fill_Random (B : out AHT.Bytes.Byte_Array)
+     renames AHT.Random.Fill;
 
    ---------------------------------------------------------------
    --  Session plumbing
@@ -172,13 +171,15 @@ package body AHT.Websocket.Client is
      (Session_Type, Session_Access);
 
    --  Build + send one masked frame on a transport. Caller MUST hold
-   --  the Send_Guard (Acquire / Release wrap this). The mask is drawn
-   --  from the guard's PRNG; the encode happens inside the lock; the
-   --  transport Write happens *outside* the lock so a slow socket
+   --  the Send_Guard (Acquire / Release wrap this). The transport
+   --  Write happens *outside* the guard's own lock so a slow socket
    --  can't block other tasks' Acquires.
+   --
+   --  The mask comes from the OS entropy pool rather than from state
+   --  the guard has to protect, so drawing it needs no lock of its
+   --  own -- see AHT.Random for why a PRNG will not do here.
    procedure Send_Frame
      (Transport : in out AHT.Transport.Transport_Type'Class;
-      Guard     : in out Guards.Send_Guard;
       Op        : AHT.Websocket.Opcode;
       FIN       : Boolean;
       Payload   : AHT.Bytes.Byte_Array)
@@ -189,7 +190,7 @@ package body AHT.Websocket.Client is
          Masked => True,
          others => <>);
    begin
-      Guard.Random_Mask (Hdr.Mask_Key);
+      AHT.Random.Fill (Hdr.Mask_Key);
       declare
          Wire : constant AHT.Bytes.Byte_Array :=
            AHT.Websocket.Frames.Encode (Hdr, Payload);
@@ -1013,7 +1014,7 @@ package body AHT.Websocket.Client is
 
             begin
                Send_Frame
-                 (Active (S).all, S.Guard,
+                 (Active (S).all,
                   Op      => AHT.Websocket.Close_Op,
                   FIN     => True,
                   Payload => Build_Close_Payload (Code, ""));
@@ -1039,7 +1040,7 @@ package body AHT.Websocket.Client is
             end if;
             begin
                Send_Frame
-                 (Active (S).all, S.Guard,
+                 (Active (S).all,
                   Op      => AHT.Websocket.Pong_Op,
                   FIN     => True,
                   Payload => Payload);
@@ -1832,7 +1833,7 @@ package body AHT.Websocket.Client is
               "Send_Text: connection is not open";
          end if;
          Send_Frame
-           (Active (L.Sess).all, L.Sess.Guard,
+           (Active (L.Sess).all,
             Op      => AHT.Websocket.Text,
             FIN     => True,
             Payload => AHT.Bytes.From_String (Text));
@@ -1870,7 +1871,7 @@ package body AHT.Websocket.Client is
               "Send_Binary: connection is not open";
          end if;
          Send_Frame
-           (Active (L.Sess).all, L.Sess.Guard,
+           (Active (L.Sess).all,
             Op      => AHT.Websocket.Binary,
             FIN     => True,
             Payload => Data);
@@ -1908,7 +1909,7 @@ package body AHT.Websocket.Client is
               "Send_Ping: connection is not open";
          end if;
          Send_Frame
-           (Active (L.Sess).all, L.Sess.Guard,
+           (Active (L.Sess).all,
             Op      => AHT.Websocket.Ping_Op,
             FIN     => True,
             Payload => Payload);
@@ -1993,7 +1994,7 @@ package body AHT.Websocket.Client is
 
                   begin
                      Send_Frame
-                       (Active (S).all, S.Guard,
+                       (Active (S).all,
                         Op      => AHT.Websocket.Close_Op,
                         FIN     => True,
                         Payload => Build_Close_Payload (Code, Reason));

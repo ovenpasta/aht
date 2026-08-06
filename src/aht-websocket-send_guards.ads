@@ -1,8 +1,5 @@
 with Ada.Finalization;
-with Ada.Numerics.Discrete_Random;
 with System;
-
-with AHT.Bytes;
 
 --  Serialization of frame writes on one connection, plus the scope
 --  guard that pairs taking the latch with giving it back.
@@ -15,11 +12,6 @@ with AHT.Bytes;
 --  types, in its own binary so that a hang in a client test cannot
 --  stop it running.
 package AHT.Websocket.Send_Guards is
-
-   --  Random-byte source for client-side frame masks. RFC 6455 §5.3
-   --  doesn't require cryptographic randomness.
-   package Random_Bytes is new Ada.Numerics.Discrete_Random
-     (AHT.Bytes.Octet);
 
    --  Acquire / Release_If_Owner serialize the actual socket writes
    --  across tasks (the client's Send_*, the receiver echoing Pong /
@@ -42,10 +34,6 @@ package AHT.Websocket.Send_Guards is
    protected type Send_Guard is
       entry     Acquire (Owner : System.Address);
       procedure Release_If_Owner (Owner : System.Address);
-
-      --  Fresh 4-byte mask per frame, drawn under the protected lock
-      --  so concurrent senders can't share generator state.
-      procedure Random_Mask (Mask : out AHT.Bytes.Byte_Array);
 
       --  Latched the moment a Close frame is written (by the client's
       --  Close or the receiver's echo). Both Mark_Close_Sent and the
@@ -80,8 +68,6 @@ package AHT.Websocket.Send_Guards is
       Taken      : Natural := 0;
       Held_By    : System.Address := System.Null_Address;
       Close_Sent : Boolean := False;
-      Gen        : Random_Bytes.Generator;
-      Seeded     : Boolean := False;
    end Send_Guard;
 
    --  Scope guard for one frame write.

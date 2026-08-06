@@ -13,6 +13,10 @@ Packages under `AHT.Websocket`:
 - `AHT.Websocket.Budgets` — the close-budget arithmetic, extracted so
   it can be checked without a socket.
 
+`AHT.Random` sits outside the WebSocket tree: it supplies
+cryptographically secure bytes from the OS pool for masking keys and
+the handshake nonce.
+
 Exceptions, all declared in `AHT.Websocket`:
 
 | Exception | Means |
@@ -25,8 +29,14 @@ Exceptions, all declared in `AHT.Websocket`:
 | `Reentrant_Error` | an operation that waits for the receiver was called *from* the receiver, i.e. from inside a callback |
 
 `AHT.Transport.Timeout_Error` and `AHT.Transport.Aborted_Error` also
-surface here: the first when a bound expires, the second when I/O is
-cancelled by a teardown.
+surface here. `Timeout_Error` comes from exactly two bounds —
+`Receive`'s own `Timeout`, and `Drain_Timeout` on `Close` /
+`Reconnect`. The close handshake's `Timeout` expires *without*
+raising; see *Bounds*. `Aborted_Error` means I/O was cancelled by a
+teardown.
+
+`AHT.Random.Entropy_Error` is raised if the OS entropy source cannot
+be read, rather than falling back to anything weaker.
 
 ## `AHT.Websocket` — shared types
 
@@ -209,11 +219,18 @@ received Close payload — which is where the 1007 cases come from: a
 Close whose reason is not valid UTF-8 is answered with **1007**, per
 §8.1, rather than 1002.
 
-Masking is *not* generated here. `Random_Mask` is a protected
-procedure of `Send_Guard` (`AHT.Websocket.Send_Guards`), drawn under
-the latch specifically so concurrent senders cannot share generator
-state; the codec is happy to take any caller-supplied mask. The mask
-is not cryptographic and the RFC does not require it to be.
+Masking keys are *not* generated here — the codec takes any
+caller-supplied mask. The client draws them from `AHT.Random`, which
+reads the OS entropy pool.
+
+**They must be unpredictable.** RFC §5.3 requires the key to come from
+a strong source of entropy, and requires one frame's key not to make
+the next one guessable. This is not about confidentiality: masking
+exists so that a client cannot be coerced into putting bytes on the
+wire that an intermediary would parse as a second, attacker-chosen
+HTTP request. A mask an observer can predict does not weaken that
+defence, it removes it. `Sec-WebSocket-Key` has a matching
+requirement in §4.1 — a nonce selected randomly per connection.
 
 ## `AHT.Websocket.Client`
 
@@ -299,8 +316,10 @@ type State_Kind is (Connecting, Open, Closing, Closed);
 type Client_State is (Idle, Connecting, Open, Closing, Disconnected);
 ```
 
-`Idle` means nothing has ever been dialed; `Disconnected` means a
-generation has been fully reclaimed. Both are dialable, and keeping
+`Idle` means no connection has ever been *successfully published* —
+not merely that nothing has been dialed, since a failed first attempt
+returns the client to `Idle`. `Disconnected` means a generation was
+established and has since been fully reclaimed. Both are dialable, and keeping
 them distinct is what lets `Reconnect` know whether there are saved
 parameters worth replaying.
 
@@ -378,9 +397,10 @@ A `Protocol_Error` from the codec — a malformed frame — is handled
 differently from all of these: the receiver fires `On_Error` and tears
 the connection down **without sending a close frame at all**. The
 connection is already unusable, and there is no reason to believe a
-peer that produced a malformed frame will read a reply. 1002 on the
-wire therefore means specifically "your close code was reserved", not
-"you sent something malformed".
+peer that produced a malformed frame will read a reply. So a 1002 this client *generates* means specifically "your close code
+was reserved", not "you sent something malformed". A caller may of
+course pass `Close (Code => 1002)` explicitly, which is unaffected by
+any of this.
 
 The defaults are policy, not minimums. 32 MiB covers the Autobahn §9
 cases (~16 MiB) with room to spare, exceeds the 13 MB the echo test
@@ -448,7 +468,14 @@ is a normal outcome, not an error.
 to finish reclaiming the session afterwards. This is the one that
 raises `Timeout_Error`.
 
-A single knob would make `Timeout => 0.0` mean "and fail if
+There is one deliberate exception to the compound budget.
+`Timeout => 0.0` still grants the Close-frame write a fixed 0.25 s
+grace, because a transport handed a zero deadline reads it as "fail
+rather than park" — so a literal zero would mean no goodbye was ever
+attempted, which is not what "don't wait for the peer" asks for. Every
+positive budget gets what is left of itself and no more.
+
+A single knob would also make `Timeout => 0.0` mean "and fail if
 reclamation is not already finished", which is not what anyone asking
 for it wants.
 
@@ -518,7 +545,7 @@ which no caller can shorten.
 7. Publish the session to the persistent receiver and advance the
    generation.
 
-A TLS dial failure (step 2) propagates `AHT.Transport.TLS.TLS_Error`
+A TLS dial failure (step 3) propagates `AHT.Transport.TLS.TLS_Error`
 unwrapped; failures from step 4 onward are wrapped in
 `Handshake_Error`.
 
@@ -728,7 +755,7 @@ caller-initiated closes should not retry by default.
 
 ## Tests
 
-The WebSocket layer is covered by nineteen test mains. `test_ws_send_guard`
+The WebSocket layer is covered by twenty test mains. `test_ws_send_guard`
 runs **first** by construction: what it checks shows up everywhere else
 as a hang, so nothing may sit ahead of it that could hang and stop it
 running at all.
@@ -737,6 +764,7 @@ running at all.
 |---|---|---|
 | `test_ws_send_guard` | the guard's ownership protocol in isolation — pairing, cancelled acquisition, aborted acquirer | none (in-process) |
 | `test_ws_budgets` | the close-budget arithmetic, extracted so it can be checked directly | none (in-process) |
+| `test_ws_masking` | the masking / nonce entropy source: no repeats, not constant, full byte range | none (in-process) |
 | `test_ws_frames` | pure codec — length forms, masking, control-frame validation, the `Allowance` and `Fragment` cases | none (in-process) |
 | `test_ws_utf8` | text validation | none (in-process) |
 | `test_ws_handshake` | the HTTP upgrade: base64 vectors, 101 / Upgrade / Connection / Accept, subprotocol checks | `server_ws.py`, `server.py`, `server_tls.py` + in-process fake |
