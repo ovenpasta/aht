@@ -77,10 +77,11 @@ procedure Test_WS_Masking is
    Port : constant := 8799;
    URL  : constant String := "ws://127.0.0.1:8799/";
 
-   --  Eight connections, each sending enough frames that the sample
-   --  is dominated by masks rather than by connection count. 256
-   --  four-byte masks collide legitimately with probability about
-   --  7.6e-6, so zero is a sound threshold at this size.
+   --  Eight connections of thirty-two frames each. The size is not a
+   --  statistical threshold -- nothing here counts duplicates any
+   --  more -- it just needs to be large enough that a mask stuck at a
+   --  constant is obvious, and spread over several connections so the
+   --  nonce is sampled per connection rather than once.
    Connections  : constant := 8;
    Frames_Each  : constant := 32;
    Mask_Samples : constant := Connections * Frames_Each;
@@ -242,10 +243,20 @@ procedure Test_WS_Masking is
                & Ada.Exceptions.Exception_Message (E));
       end;
 
-      --  Accepted whether or not the socket came up.
-      accept Ready (Listening : out Boolean) do
-         Listening := Up;
-      end Ready;
+      --  Accepted whether or not the socket came up, and with a
+      --  terminate alternative: the main task's call is timed, so if
+      --  it expires while this task is merely slow, nobody will ever
+      --  call Ready again and a bare accept would park here forever
+      --  -- with master finalization then waiting on this task. Every
+      --  accept in this task needs the alternative for that reason,
+      --  not just the last one.
+      select
+         accept Ready (Listening : out Boolean) do
+            Listening := Up;
+         end Ready;
+      or
+         terminate;
+      end select;
 
       for C in 1 .. (if Up then Connections else 0) loop
          Accept_Socket (Listener, Conn, Peer_Adr);
@@ -375,8 +386,13 @@ procedure Test_WS_Masking is
          end select;
    end Peer;
 
+   Mask_Bytes  : constant := 4;    --  RFC 6455 §5.3 masking key
+   Nonce_Bytes : constant := 16;   --  §4.1 Sec-WebSocket-Key nonce
+
    Draws_Before : Natural;
+   Bytes_Before : Natural;
    Drew_During  : Natural;
+   Bytes_During : Natural;
    Listening    : Boolean;
 
 begin
@@ -384,6 +400,7 @@ begin
    --  Case 1: what the client actually put on the wire.
    ---------------------------------------------------------------
    Draws_Before := AHT.Random.Draws;
+   Bytes_Before := AHT.Random.Bytes_Drawn;
 
    select
       Peer.Ready (Listening);
@@ -402,20 +419,39 @@ begin
 
    for C in 1 .. Connections loop
       declare
-         Cl : AHT.Websocket.Client.Client_Type;
+         Cl        : AHT.Websocket.Client.Client_Type;
+         Connected : Boolean := False;
       begin
          AHT.Websocket.Client.Connect (Cl, URL);
+         Connected := True;
          for F in 1 .. Frames_Each loop
             AHT.Websocket.Client.Send_Text (Cl, "mask me");
          end loop;
          --  Timeout 0.0: this peer never answers a Close, and the
          --  handshake is not what is under test here.
          AHT.Websocket.Client.Close (Cl, Timeout => 0.0);
+         Connected := False;
       exception
          when E : others =>
             Fail ("connection" & Integer'Image (C) & " raised "
                   & Ada.Exceptions.Exception_Name (E) & ": "
                   & Ada.Exceptions.Exception_Message (E));
+
+            --  Reporting is not enough. A client that connected and
+            --  then raised still owns a receiver parked on a socket
+            --  this peer holds open, and leaving the scope waits for
+            --  it -- so the test would hang after announcing its
+            --  failure, which is the worst of both. Bounded and
+            --  best-effort: the aim is to release the receiver, not
+            --  to complete a handshake.
+            if Connected then
+               begin
+                  AHT.Websocket.Client.Close
+                    (Cl, Timeout => 0.0, Drain_Timeout => 2.0);
+               exception
+                  when others => null;
+               end;
+            end if;
       end;
    end loop;
 
@@ -425,7 +461,8 @@ begin
       delay 30.0;
       Fail ("the fake peer never finished");
    end select;
-   Drew_During := AHT.Random.Draws - Draws_Before;
+   Drew_During  := AHT.Random.Draws - Draws_Before;
+   Bytes_During := AHT.Random.Bytes_Drawn - Bytes_Before;
 
    if Wire.Error /= "" then
       Fail ("the peer reported: " & Wire.Error);
@@ -485,13 +522,54 @@ begin
    --  the entropy source. One draw per frame plus one per handshake
    --  nonce. Reverting either call site to any other generator leaves
    --  this short, however good that generator's output looks.
+   --  Attribution, not just a total.
+   --
+   --  Counting calls alone cannot say WHICH caller drew, so a missing
+   --  call and a compensating extra call cancel. Counting bytes as
+   --  well removes that: the two callers ask for different widths, so
+   --
+   --      calls =      masks +       nonces
+   --      bytes =  4 * masks +  16 * nonces
+   --
+   --  is two equations in two unknowns and solves uniquely. Each
+   --  population is then checked against what was independently
+   --  observed on the wire, so a shortfall in one cannot be paid for
+   --  by a surplus in the other.
    declare
-      --  Calibrated from the frames the peer actually saw, plus one
-      --  nonce per connection. Deriving it by hand instead let a
-      --  reverted nonce path pass, because the Close frame's own mask
-      --  draw made up the difference exactly.
       Expected : constant Natural := Wire.Mask_Count + Connections;
+
+      --  nonces = (bytes - 4*calls) / 12, from the pair above.
+      Num       : constant Integer :=
+        Integer (Bytes_During) - Mask_Bytes * Integer (Drew_During);
+      Solvable  : constant Boolean :=
+        Num >= 0 and then Num mod (Nonce_Bytes - Mask_Bytes) = 0;
+      Nonces    : constant Integer :=
+        (if Solvable then Num / (Nonce_Bytes - Mask_Bytes) else -1);
+      Masks     : constant Integer :=
+        (if Solvable then Integer (Drew_During) - Nonces else -1);
    begin
+      if not Solvable then
+         Fail ("the" & Natural'Image (Drew_During) & " draws totalling"
+               & Natural'Image (Bytes_During)
+               & " bytes cannot be accounted for as 4-byte masks and "
+               & "16-byte nonces — something else is drawing from the "
+               & "entropy source");
+      else
+         if Masks /= Integer (Wire.Mask_Count) then
+            Fail ("the entropy source supplied"
+                  & Integer'Image (Masks) & " four-byte draws but"
+                  & Natural'Image (Wire.Mask_Count)
+                  & " masked frames were seen on the wire — the frame "
+                  & "mask is not coming from it");
+         end if;
+         if Nonces /= Connections then
+            Fail ("the entropy source supplied"
+                  & Integer'Image (Nonces) & " sixteen-byte draws for"
+                  & Natural'Image (Connections)
+                  & " handshakes — the Sec-WebSocket-Key nonce is not "
+                  & "coming from it");
+         end if;
+      end if;
       --  Exact, not a lower bound.
       --
       --  A lower bound lets one deficit be paid for by another

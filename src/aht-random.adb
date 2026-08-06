@@ -1,12 +1,28 @@
 with GNAT.OS_Lib;
 
+--  System.OS_Constants is an internal GNAT unit, and GNAT says so.
+--  It is used deliberately and narrowly, for one target-generated
+--  errno value: the alternative is hard-coding 4, which is correct on
+--  Linux and the BSDs today and is implementation-defined rather than
+--  fixed by POSIX, so it would stop being correct silently. A
+--  version-dependent dependency that fails at compile time is a
+--  better trade than a portable-looking constant that fails at run
+--  time.
+pragma Warnings (Off, "*internal GNAT unit*");
+pragma Warnings (Off, "*non-portable and version-dependent*");
+with System.OS_Constants;
+pragma Warnings (On, "*non-portable and version-dependent*");
+pragma Warnings (On, "*internal GNAT unit*");
+
 package body AHT.Random is
 
    Source_Path : constant String := "/dev/urandom";
 
-   --  POSIX EINTR. Conventionally 4 on Linux and the BSDs including
-   --  macOS, which is every platform this library claims.
-   EINTR : constant := 4;
+   --  Target-generated rather than hard-coded. The value is
+   --  implementation-defined, not fixed by POSIX, so writing 4 was
+   --  correct for the platforms currently supported and would quietly
+   --  stop being correct on one that is not.
+   EINTR : constant := System.OS_Constants.EINTR;
 
    --  Opened once, then read from directly by any number of tasks.
    --
@@ -29,10 +45,12 @@ package body AHT.Random is
    --  the failure is permanent.
    protected Opener is
       procedure Ensure (OK : out Boolean);
-      procedure Count;
+      procedure Count (Bytes : Natural);
       function  Total return Natural;
+      function  Total_Bytes return Natural;
    private
       N : Natural := 0;
+      B : Natural := 0;
    end Opener;
 
    protected body Opener is
@@ -64,17 +82,24 @@ package body AHT.Random is
          OK := FD /= GNAT.OS_Lib.Invalid_FD;
       end Ensure;
 
-      procedure Count is
+      procedure Count (Bytes : Natural) is
       begin
          if N < Natural'Last then
             N := N + 1;
          end if;
+         if B <= Natural'Last - Bytes then
+            B := B + Bytes;
+         else
+            B := Natural'Last;
+         end if;
       end Count;
 
       function Total return Natural is (N);
+      function Total_Bytes return Natural is (B);
    end Opener;
 
    function Draws return Natural is (Opener.Total);
+   function Bytes_Drawn return Natural is (Opener.Total_Bytes);
 
    ----------
    -- Fill --
@@ -91,7 +116,7 @@ package body AHT.Random is
          return;
       end if;
 
-      Opener.Count;
+      Opener.Count (B'Length);
       Opener.Ensure (OK);
       if not OK then
          raise Entropy_Error

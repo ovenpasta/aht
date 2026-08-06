@@ -72,4 +72,14 @@ package AHT.Random is
    --  actually regress silently.
    function Draws return Natural;
 
+   --  Total bytes handed out. Saturates likewise.
+   --
+   --  Draws alone cannot say WHICH caller drew: a missing call and a
+   --  compensating extra call balance. Paired with this, they can.
+   --  The two callers ask for different widths — 4 bytes for a frame
+   --  mask, 16 for a handshake nonce — so calls and bytes form two
+   --  equations in two unknowns and a test can solve for each
+   --  population exactly rather than checking an aggregate.
+   function Bytes_Drawn return Natural;
+
 end AHT.Random;
