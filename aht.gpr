@@ -19,6 +19,17 @@ library project Aht is
    type TLS_Backend_Kind is ("openssl", "mbedtls");
    TLS_Backend : TLS_Backend_Kind := external ("AHT_TLS_BACKEND", "openssl");
 
+   --  Host OS family, for the one unit that cannot be written
+   --  portably: AHT.Random.Source, which reads the system CSPRNG
+   --  (/dev/urandom on POSIX, BCryptGenRandom on Windows).
+   --
+   --  An explicit external rather than target sniffing, because GPR
+   --  cannot pattern-match Project'Target and a wrong guess here is
+   --  the kind that fails at link time on someone else's machine.
+   --  Defaults to posix, which is what this library is tested on.
+   type OS_Kind is ("posix", "windows");
+   OS : OS_Kind := external ("AHT_OS", "posix");
+
    --  Where the system OpenSSL 3 lives. /usr is right for Linux;
    --  macOS needs the Homebrew prefix (Apple ships no OpenSSL headers):
    --  AHT_OPENSSL_DIR=$(brew --prefix openssl@3)
@@ -27,12 +38,26 @@ library project Aht is
    --  Exactly one backend's sources compile: the shared spec
    --  src/aht-transport-tls.ads has one body per backend directory,
    --  alongside that backend's bindings and C glue.
+   Tls_Dirs := ();
    case TLS_Backend is
       when "mbedtls" =>
-         for Source_Dirs use ("src", "src/tls/mbedtls", "csrc/mbedtls");
+         Tls_Dirs := ("src/tls/mbedtls", "csrc/mbedtls");
       when "openssl" =>
-         for Source_Dirs use ("src", "src/tls/openssl", "csrc/openssl");
+         Tls_Dirs := ("src/tls/openssl", "csrc/openssl");
    end case;
+
+   --  Same one-body-per-directory shape as the TLS split above: the
+   --  shared spec src/aht-random-source.ads has one body per OS
+   --  directory, and exactly one of them compiles.
+   Os_Dirs := ();
+   case OS is
+      when "posix" =>
+         Os_Dirs := ("src/os/posix");
+      when "windows" =>
+         Os_Dirs := ("src/os/windows");
+   end case;
+
+   for Source_Dirs use ("src") & Tls_Dirs & Os_Dirs;
 
    --  Output dirs are per-mode AND per-backend so no combination ever
    --  clobbers another (a release build used to overwrite the debug
@@ -40,6 +65,12 @@ library project Aht is
    --  next debug run; backend switches would do the same). Consumers
    --  reach the library through this project, so the suffixed
    --  Library_Dir resolves automatically.
+   --  OS is deliberately NOT in the variant. It would be more
+   --  thorough, but the test harness derives its paths from
+   --  BUILD_MODE and AHT_TLS_BACKEND alone, and renaming every
+   --  output directory to gain isolation between builds that cannot
+   --  share a machine's toolchain anyway is a poor trade. Cross-build
+   --  for another OS in a separate tree.
    Variant := Build_Mode & "-" & TLS_Backend;
    for Object_Dir  use "obj/" & Variant;
    for Library_Dir use "lib/" & Variant;

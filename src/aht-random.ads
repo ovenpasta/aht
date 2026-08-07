@@ -28,25 +28,33 @@ with AHT.Bytes;
 --  them would add initialization, finalization and post-fork
 --  reseeding to obtain the same 4- and 16-byte public values.
 --
---  The descriptor is opened once, kept for the life of the process,
---  and read unbuffered — a syscall per call. Buffering would amortise
---  that but would hand the same pending bytes to both sides of a
---  `fork`, whereas reading through a retained descriptor stays
---  correct across one.
+--  Which system call that is, and the handling it needs, is the one
+--  part that cannot be written portably, so it lives in
+--  `AHT.Random.Source` with one body per OS — selected by the
+--  `AHT_OS` scenario variable, exactly as the TLS backend picks its
+--  own directory. Everything else, including the counters below, is
+--  shared, so the two platforms cannot drift in what they report.
 --
---  It is set close-on-exec, so subprocesses do not inherit it. One
---  narrow caveat, stated rather than papered over: the flag is set
---  just after the open, not atomically with it, so a `fork`+`exec`
---  performed by another task in exactly that window could still
---  inherit the descriptor. Closing that window needs `O_CLOEXEC` on
---  the open itself, which is not reachable through `GNAT.OS_Lib` and
---  whose value differs across POSIX platforms. The exposure is one
---  descriptor on a world-readable device, so the guarantee is
---  documented as the narrower one rather than bought with C glue and
---  a per-platform constant.
+--    POSIX    `/dev/urandom`. The descriptor is opened once, kept for
+--             the life of the process, and read unbuffered — a
+--             syscall per call. Buffering would amortise that but
+--             would hand the same pending bytes to both sides of a
+--             `fork`, whereas reading through a retained descriptor
+--             stays correct across one. It is set close-on-exec so
+--             subprocesses do not inherit it; see the body for the
+--             narrow window that leaves open.
 --
---  POSIX-only, which matches what this library already claims to
---  support.
+--    Windows  `BCryptGenRandom` with
+--             `BCRYPT_USE_SYSTEM_PREFERRED_RNG`. One call fills the
+--             buffer or fails, so there is no descriptor to leak
+--             across `exec`, no state to inherit across a `fork`, and
+--             no partial result to loop over — the whole family of
+--             concerns above simply does not arise.
+--
+--  Adding a platform means implementing one procedure. It does NOT
+--  mean the rest of the library builds there: this unit is portable,
+--  the transports and the test harness have not been verified
+--  anywhere but POSIX.
 package AHT.Random is
 
    --  The OS entropy source could not be opened or read. Deliberately
