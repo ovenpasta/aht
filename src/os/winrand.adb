@@ -20,6 +20,7 @@
 --  entirely would have left it green.
 
 with Ada.Command_Line;
+with Ada.Exceptions;
 with Ada.Text_IO; use Ada.Text_IO;
 
 --  use type for /=, which is not directly visible on Octet here.
@@ -63,8 +64,16 @@ begin
       AHT.Random.Fill (A);
       AHT.Random.Fill (B);
    exception
-      when others =>
-         Fail ("Fill raised - the OS entropy call did not succeed");
+      when E : others =>
+         --  Reported in full, because the distinctions matter here and
+         --  a generic message erases them: Entropy_Error means
+         --  BCryptGenRandom returned a failure status, while
+         --  Program_Error or Storage_Error from the same call means
+         --  the binding itself is wrong -- a bad convention, a bad
+         --  parameter width -- which is a different bug with a
+         --  different fix.
+         Fail ("Fill raised: "
+               & Ada.Exceptions.Exception_Information (E));
          Put_Line ("winrand:" & Failures'Image & " failure(s)");
          Ada.Command_Line.Set_Exit_Status (1);
          return;

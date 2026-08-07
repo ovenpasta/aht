@@ -37,24 +37,26 @@ children — so it never joins the library.
 From the repository root:
 
 ```sh
+set -e
 rm -rf /tmp/winobj64 && mkdir -p /tmp/winobj64
 x86_64-w64-mingw32-gnatmake -gnat2022 -D /tmp/winobj64 \
   -I"$PWD/src" -I"$PWD/src/os/windows" \
   "$PWD/src/os/winrand.adb" -o /tmp/winobj64/winrand.exe
 x86_64-w64-mingw32-objdump -p /tmp/winobj64/winrand.exe | grep -i bcrypt
-WINEDEBUG=-all wine /tmp/winobj64/winrand.exe ; echo "exit=$?"
+WINEDEBUG=-all wine /tmp/winobj64/winrand.exe
 ```
 
 And for 32-bit — the target where the `Stdcall` convention actually
 differs from C, so the one that would catch a wrong convention:
 
 ```sh
+set -e
 rm -rf /tmp/winobj32 && mkdir -p /tmp/winobj32
 i686-w64-mingw32-gnatmake -gnat2022 -D /tmp/winobj32 \
   -I"$PWD/src" -I"$PWD/src/os/windows" \
   "$PWD/src/os/winrand.adb" -o /tmp/winobj32/winrand.exe
 i686-w64-mingw32-objdump -p /tmp/winobj32/winrand.exe | grep -i bcrypt
-WINEDEBUG=-all wine /tmp/winobj32/winrand.exe ; echo "exit=$?"
+WINEDEBUG=-all wine /tmp/winobj32/winrand.exe
 ```
 
 **Separate object directories, not one reused.** Substituting only
@@ -64,8 +66,15 @@ in place and the 32-bit link fails with
 
 Expected from either: two distinct 16-byte hex draws,
 `winrand: OK (draws = 2, bytes = 32)`, and **exit 0**. The probe
-asserts all of that and exits 1 on any failure, so it is usable from
-a script — check the status rather than reading the text.
+asserts all of that and exits 1 on any failure, so check the status
+rather than reading the text.
+
+Note the `set -e` and the absence of a trailing `echo "exit=$?"`.
+That echo was there to *show* the status and destroyed it: it
+succeeds, so it becomes the script's last command and a failing probe
+still exits 0 — the recipe reported the very property it was breaking.
+The probe must be the final command, or its status must be propagated
+explicitly.
 
 What that established, on 2026-08-07 with GNAT 15.2.0 for
 `x86_64-w64-mingw32`:
