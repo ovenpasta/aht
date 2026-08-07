@@ -193,14 +193,29 @@ package AHT.Websocket.Client is
    --
    --  Which of them fire depends on the delivery mode, and only
    --  On_Message is affected by it: under Both it fires alongside the
-   --  inbox, so Receive still sees every accepted message; under
-   --  Callback_Only it is the sole consumer; under Pull_Only it does
-   --  not fire at all, even if one is installed. On_Close and
-   --  On_Error are not message delivery and fire in every mode.
+   --  inbox; under Callback_Only it is the sole consumer; under
+   --  Pull_Only it does not fire at all, even if one is installed.
+   --  On_Close and On_Error are not message delivery and fire in
+   --  every mode.
    --
-   --  Under Both, a message the inbox refuses is not passed to the
-   --  callback either — pull and push consumers observe exactly the
-   --  same accepted set.
+   --  Under Both, pull and push agree on what is ACCEPTED: a message
+   --  the inbox refuses is not passed to the callback either.
+   --
+   --  They do not agree on what is eventually OBSERVED, and the
+   --  difference matters once teardown begins. The callback fires
+   --  from the receiver as the message is decoded, so it has already
+   --  run; Receive has to borrow the session to reach the inbox, and
+   --  a borrow is refused the moment admission stops. A message that
+   --  was accepted and enqueued, but not yet pulled when the
+   --  connection failed or was replaced, is discarded with its
+   --  session — the caller sees Closed_Error rather than the message.
+   --
+   --  That is the same generation-scoping that keeps a reconnect from
+   --  inheriting a previous connection's backlog, and it is
+   --  deliberate. It is visible from outside: Autobahn case 5.15
+   --  sends a complete fragmented message and an illegal continuation
+   --  in one chop, and the message is dropped rather than delivered
+   --  ahead of the failure. See tests/autobahn/BASELINE.md.
    --
    --  Callbacks run on the receiver task, so they must be
    --  task-safe and must not block: the receiver cannot reclaim a

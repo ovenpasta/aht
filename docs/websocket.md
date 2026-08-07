@@ -409,7 +409,9 @@ needs, and matches what `server_ws.py` itself accepts.
 They are also a **compatibility surface**, and the one part of this
 that can break a working application silently: a message that used to
 arrive now closes the connection with 1009. A default below the 16 MiB
-§9 cases would fail an Autobahn run, which is the intended tripwire.
+§9 cases would fail an Autobahn run, which is the intended tripwire —
+and it holds: §9 is 54/54 `OK` at the current defaults. See
+`tests/autobahn/BASELINE.md`.
 
 ### Callbacks
 
@@ -782,6 +784,19 @@ running at all.
 | `test_ws_teardown` | close paths and their bounds, including a writer stuck against a deaf peer | `server_ws_hostile.py`, `server_ws.py` |
 | `test_ws_abort` | asynchronous transfer of control across every ownership handoff | `server_ws.py`, `server_stall.py` + in-process fake |
 | `test_ws_tls` | the `wss://` sibling: verify / insecure / untrusted, round-trips over TLS | `server_ws_tls.py` |
+
+### Conformance
+
+The suite above is all our own tests against our own fixtures. The
+external check is the Autobahn|Testsuite, which throws ~500 RFC 6455
+cases at the client; `tests/autobahn/BASELINE.md` records the counts,
+the suite version and image digest, and the reasoning for every case
+that is not `OK`.
+
+The current standing is **zero hard failures** — deliberately not
+"full conformance", since 216 cases are `UNIMPLEMENTED`
+(`permessage-deflate`, which this client does not negotiate) and five
+are `NON-STRICT`.
 
 Tests that assert a bound are validated by backing the corresponding
 guard out and confirming the test fails — and, where the test depends
