@@ -56,13 +56,18 @@
 --  drawn sequentially produces uniform, non-repeating output, so no
 --  statistical test on the bytes can tell it from the OS pool.
 --
---  What CAN be pinned deterministically is that the production paths
---  REQUEST the expected entropy. AHT.Random counts calls and bytes,
---  and because the two callers ask for different widths — 4 for a
---  mask, 16 for a nonce — those two totals form a solvable system and
---  the request populations can be recovered exactly and checked
---  against what the peer saw on the wire. That catches every reverted
---  call site, including the seeded-once PRNG no sampling would catch.
+--  What CAN be pinned deterministically is narrower than it first
+--  looks: that matching request-width populations OCCURRED during
+--  those operations. AHT.Random counts calls and bytes, and because
+--  the two callers ask for different widths — 4 for a mask, 16 for a
+--  nonce — those two totals form a solvable system, so the number of
+--  requests of each width can be recovered exactly and checked
+--  against what the peer saw on the wire.
+--
+--  Not "the mask path requested entropy". A request whose result is
+--  thrown away counts the same as one whose result ships, so what is
+--  established is that the requests happened alongside the frames,
+--  not that they were made in service of them.
 --
 --  ---------------------------------------------------------------
 --  The limit of that, stated precisely
@@ -88,10 +93,32 @@
 --  It is rejected on cost, not on safety. Two bodies for one package
 --  means the tested build is not the shipped build, which is a poor
 --  trade for closing an adversarial construction — draw, discard,
---  use something else — that no refactor produces, when every
---  realistic regression (call removed, call swapped, source
---  replaced) is already caught. If the entropy path grows past two
---  call sites, that calculation is worth redoing.
+--  use something else — that no refactor produces.
+--
+--  Be exact about what is and is not covered, because the boundary
+--  is not where one would guess:
+--
+--    Caught      a call site stops calling AHT.Random, or calls it
+--                for the wrong width. Both counters move.
+--    NOT caught  AHT.Random itself stops reading /dev/urandom and
+--                returns the output of a PRNG seeded once and drawn
+--                sequentially. Every counter is unchanged, and per
+--                the paragraph above no statistical check on the
+--                bytes can tell the difference either. Verified, not
+--                assumed: substituting exactly that, with a fixed
+--                seed, leaves this test fully green.
+--
+--                Note what does NOT demonstrate this. A PRNG re-seeded
+--                on every call IS caught, loudly — identical nonces
+--                across connections, a constant mask, a collapsed byte
+--                range. It is the seeded-once sequential case that
+--                slips through, and testing the wrong one of the two
+--                is an easy way to conclude the opposite.
+--
+--  So this test guards the WIRING, and nothing guards the source
+--  except reading it. If the entropy path ever grows past two call
+--  sites, or the source acquires options, that calculation is worth
+--  redoing.
 --
 --  The wire samples are still collected, for what they genuinely
 --  show: that frames are masked at all, that the mask is not a
