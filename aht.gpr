@@ -19,8 +19,13 @@ library project Aht is
    type TLS_Backend_Kind is ("openssl", "mbedtls");
    TLS_Backend : TLS_Backend_Kind := external ("AHT_TLS_BACKEND", "openssl");
 
-   --  Host OS family, for the one unit that cannot be written
-   --  portably: AHT.Random.Source, which reads the system CSPRNG
+   --  TARGET OS family -- not the host, and the difference is the
+   --  whole point: the Windows body is built from a Linux host with a
+   --  mingw toolchain, so a variable named for the host would be
+   --  wrong in exactly the case it exists to serve.
+   --
+   --  Selects the one unit that cannot be written portably,
+   --  AHT.Random.Source, which reads the system CSPRNG
    --  (/dev/urandom on POSIX, BCryptGenRandom on Windows).
    --
    --  An explicit external rather than target sniffing, because GPR

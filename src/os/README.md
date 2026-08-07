@@ -37,19 +37,35 @@ children — so it never joins the library.
 From the repository root:
 
 ```sh
-mkdir -p /tmp/winobj
-x86_64-w64-mingw32-gnatmake -gnat2022 -D /tmp/winobj \
+rm -rf /tmp/winobj64 && mkdir -p /tmp/winobj64
+x86_64-w64-mingw32-gnatmake -gnat2022 -D /tmp/winobj64 \
   -I"$PWD/src" -I"$PWD/src/os/windows" \
-  "$PWD/src/os/winrand.adb" -o /tmp/winobj/winrand.exe
-x86_64-w64-mingw32-objdump -p /tmp/winobj/winrand.exe | grep -i bcrypt
-WINEDEBUG=-all wine /tmp/winobj/winrand.exe
+  "$PWD/src/os/winrand.adb" -o /tmp/winobj64/winrand.exe
+x86_64-w64-mingw32-objdump -p /tmp/winobj64/winrand.exe | grep -i bcrypt
+WINEDEBUG=-all wine /tmp/winobj64/winrand.exe ; echo "exit=$?"
 ```
 
-Expected output: two distinct 16-byte hex draws, `distinct = TRUE`,
-`draws = 2  bytes = 32`, `OK`.
+And for 32-bit — the target where the `Stdcall` convention actually
+differs from C, so the one that would catch a wrong convention:
 
-For 32-bit — the target where the `Stdcall` convention actually
-differs from C — substitute `i686-w64-mingw32-` for the tool prefix.
+```sh
+rm -rf /tmp/winobj32 && mkdir -p /tmp/winobj32
+i686-w64-mingw32-gnatmake -gnat2022 -D /tmp/winobj32 \
+  -I"$PWD/src" -I"$PWD/src/os/windows" \
+  "$PWD/src/os/winrand.adb" -o /tmp/winobj32/winrand.exe
+i686-w64-mingw32-objdump -p /tmp/winobj32/winrand.exe | grep -i bcrypt
+WINEDEBUG=-all wine /tmp/winobj32/winrand.exe ; echo "exit=$?"
+```
+
+**Separate object directories, not one reused.** Substituting only
+the tool prefix and keeping `/tmp/winobj` leaves the 64-bit `aht.o`
+in place and the 32-bit link fails with
+`file format not recognized`.
+
+Expected from either: two distinct 16-byte hex draws,
+`winrand: OK (draws = 2, bytes = 32)`, and **exit 0**. The probe
+asserts all of that and exits 1 on any failure, so it is usable from
+a script — check the status rather than reading the text.
 
 What that established, on 2026-08-07 with GNAT 15.2.0 for
 `x86_64-w64-mingw32`:
