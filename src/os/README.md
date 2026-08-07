@@ -29,14 +29,27 @@ POSIX-only on purpose.
 It was cross-compiled, cross-linked and executed before being
 committed, not merely written:
 
+The probe is `src/os/winrand.adb`, committed alongside this file so
+the recipe is actually reproducible. It is not in any `Source_Dirs`
+— `src/os` itself is not a source directory, only its per-OS
+children — so it never joins the library.
+
+From the repository root:
+
 ```sh
-mkdir -p /tmp/winobj && cd /tmp/winobj
-x86_64-w64-mingw32-gnatmake -gnat2022 \
-  -I<repo>/src -I<repo>/src/os/windows \
-  winrand.adb -o winrand.exe          # a main that calls AHT.Random.Fill twice
-x86_64-w64-mingw32-objdump -p winrand.exe | grep -i bcrypt
-WINEDEBUG=-all wine winrand.exe
+mkdir -p /tmp/winobj
+x86_64-w64-mingw32-gnatmake -gnat2022 -D /tmp/winobj \
+  -I"$PWD/src" -I"$PWD/src/os/windows" \
+  "$PWD/src/os/winrand.adb" -o /tmp/winobj/winrand.exe
+x86_64-w64-mingw32-objdump -p /tmp/winobj/winrand.exe | grep -i bcrypt
+WINEDEBUG=-all wine /tmp/winobj/winrand.exe
 ```
+
+Expected output: two distinct 16-byte hex draws, `distinct = TRUE`,
+`draws = 2  bytes = 32`, `OK`.
+
+For 32-bit — the target where the `Stdcall` convention actually
+differs from C — substitute `i686-w64-mingw32-` for the tool prefix.
 
 What that established, on 2026-08-07 with GNAT 15.2.0 for
 `x86_64-w64-mingw32`:
@@ -57,4 +70,7 @@ anyway.
 
 `Stdcall` is deliberate rather than incidental. It coincides with the
 C convention on x86-64, so a `Convention => C` import would pass the
-test above and corrupt the stack on 32-bit Windows.
+64-bit test above and corrupt the stack on 32-bit Windows — which is
+why the 32-bit cross-link is worth running when this body changes.
+That has been done: the body compiles and links for `i686-w64-mingw32`
+and the PE imports `bcrypt.dll!BCryptGenRandom` there too.

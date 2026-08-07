@@ -6,8 +6,8 @@ with AHT.Bytes;
 --  that a *predictable* generator cannot supply — and both were
 --  previously served by a clock-seeded
 --  `Ada.Numerics.Discrete_Random`. The distinction is not
---  PRNG-versus-not: `/dev/urandom` is itself a CSPRNG. It is
---  cryptographically secure versus predictable.
+--  PRNG-versus-not — every system source here is itself a CSPRNG. It
+--  is cryptographically secure versus predictable.
 --
 --    * §5.3 — the frame masking key "MUST be derived from a strong
 --      source of entropy", and a given frame's key must not make the
@@ -20,12 +20,12 @@ with AHT.Bytes;
 --    * §4.1 — `Sec-WebSocket-Key` "MUST be a nonce ... selected
 --      randomly for each connection".
 --
---  Bytes come straight from the OS pool (`/dev/urandom`), so there is
---  no generator state here to seed, to share between tasks, to
---  reseed after a fork, or to get wrong. That is the whole reason for
---  going to the OS rather than to a crypto library's DRBG: the OS
---  pool is what those DRBGs are seeded from anyway, and owning one of
---  them would add initialization, finalization and post-fork
+--  Bytes come straight from the system CSPRNG, so there is no
+--  generator state here to seed, to share between tasks, to reseed
+--  after a fork, or to get wrong. That is the whole reason for going
+--  to the OS rather than to a crypto library's DRBG: the system
+--  source is what those DRBGs are seeded from anyway, and owning one
+--  of them would add initialization, finalization and post-fork
 --  reseeding to obtain the same 4- and 16-byte public values.
 --
 --  Which system call that is, and the handling it needs, is the one
@@ -57,14 +57,19 @@ with AHT.Bytes;
 --  anywhere but POSIX.
 package AHT.Random is
 
-   --  The OS entropy source could not be opened or read. Deliberately
-   --  fatal rather than falling back to a weaker source: a silent
-   --  downgrade to predictable masks is the failure this package
-   --  exists to prevent, and it would be invisible on the wire.
+   --  A request to the system CSPRNG failed. What that means is
+   --  platform-specific -- a device that would not open or read, an
+   --  API returning a failure status -- and the message says which;
+   --  what matters to a caller is the same either way.
+   --
+   --  Deliberately fatal rather than falling back to a weaker source:
+   --  a silent downgrade to predictable masks is the failure this
+   --  package exists to prevent, and it would be invisible on the
+   --  wire.
    Entropy_Error : exception;
 
-   --  Fills every byte of `B` from the OS pool. A null range is a
-   --  no-op.
+   --  Fills every byte of `B` from the system CSPRNG. A null range is
+   --  a no-op.
    procedure Fill (B : out AHT.Bytes.Byte_Array);
 
    --  How many times Fill has been ASKED for bytes. Saturates at

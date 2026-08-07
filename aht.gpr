@@ -65,13 +65,26 @@ library project Aht is
    --  next debug run; backend switches would do the same). Consumers
    --  reach the library through this project, so the suffixed
    --  Library_Dir resolves automatically.
-   --  OS is deliberately NOT in the variant. It would be more
-   --  thorough, but the test harness derives its paths from
-   --  BUILD_MODE and AHT_TLS_BACKEND alone, and renaming every
-   --  output directory to gain isolation between builds that cannot
-   --  share a machine's toolchain anyway is a poor trade. Cross-build
-   --  for another OS in a separate tree.
+   --  The OS is part of the variant, but only when it is not the
+   --  default, so existing POSIX paths keep their names and the test
+   --  harness -- which derives its own from BUILD_MODE and
+   --  AHT_TLS_BACKEND -- is unaffected.
+   --
+   --  It has to be in there somehow. AHT_OS changes which body
+   --  compiles, so a native and a cross build produce artifacts that
+   --  are not interchangeable, and sharing one object directory means
+   --  each silently overwrites the other. The earlier justification
+   --  for leaving it out -- that such builds cannot share a machine
+   --  anyway -- was simply wrong: a mingw toolchain alongside the
+   --  native one is exactly how the Windows body was verified, on
+   --  this machine, before it was committed.
    Variant := Build_Mode & "-" & TLS_Backend;
+   case OS is
+      when "posix" =>
+         null;
+      when "windows" =>
+         Variant := Variant & "-windows";
+   end case;
    for Object_Dir  use "obj/" & Variant;
    for Library_Dir use "lib/" & Variant;
 
