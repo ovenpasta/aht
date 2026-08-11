@@ -251,14 +251,16 @@ procedure Connect
    Subprotocols  : String := "";
    Origin        : String := "";
    Insecure      : Boolean := False;
-   CA_Path       : String := "");
+   CA_Path       : String := "";
+   CA_PEM        : String := "");
 
 --  Convenience form — no extra headers.
 procedure Connect
   (Self     : in out Client_Type;
    URL      : String;
    Insecure : Boolean := False;
-   CA_Path  : String := "");
+   CA_Path  : String := "";
+   CA_PEM   : String := "");
 
 procedure Reconnect
   (Self          : in out Client_Type;
@@ -552,7 +554,8 @@ which no caller can shorten.
      those via `Extra_Headers` if you're using the dedicated
      parameters or you'll emit duplicate header lines.
 3. Dial one transport for the scheme — TCP for `ws://`, TLS for
-   `wss://` (threading `Insecure` / `CA_Path` into the TLS handshake).
+   `wss://` (threading `Insecure` / `CA_Path` / `CA_PEM` into the TLS
+   handshake).
    The request is built before the dial, not after.
 4. `AHT.HTTP.Request.Write` the request over the new transport.
 5. `AHT.HTTP.Response.Read` the status line + headers.

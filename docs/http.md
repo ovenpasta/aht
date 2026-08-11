@@ -291,6 +291,15 @@ type Client_Type is tagged record
    User_Agent      : Unbounded_String := "AHT/0.1";
    Default_Headers : AHT.HTTP.Headers.Map;
    CA_Path         : Unbounded_String;
+   CA_PEM          : Unbounded_String;
+
+`CA_PEM` holds trust anchors as PEM data rather than a path, for
+anchors compiled into the binary. Setting both it and `CA_Path` raises
+`TLS_Error` — but on the **request that consumes them**, not when the
+field is set, and not at all on a plain `http://` request. These are
+persistent TLS configuration on the client record rather than
+arguments to a call, so a plain request simply does not read them,
+exactly as it already ignores `CA_Path`.
    Insecure        : Boolean := False;
    Timeout_Seconds : Natural := 30;
 end record;
@@ -310,7 +319,8 @@ function  Get  (Self, URL) return Response_Type;
   - `http://` → `AHT.Transport.TCP`.
   - `https://` → `AHT.Transport.TLS` (custom BIO over the TCP
     transport). `Send` constructs a `TLS_Transport`, threading
-    `Client_Type.CA_Path` / `.Insecure` into the handshake, then runs
+    `Client_Type.CA_Path` / `.CA_PEM` / `.Insecure` into the
+    handshake, then runs
     the same wire round-trip polymorphically.
   - `ws://` / `wss://` → raises `HTTP_Error`; route those through
     `AHT.Websocket.Client`.

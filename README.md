@@ -18,7 +18,8 @@ Every Ada unit lives under the `AHT.*` namespace.
   blocking `Receive` or push callbacks; exercised against the
   Autobahn|Testsuite conformance harness.
 - **TLS** — `https://` and `wss://`, with certificate verification
-  against the system trust store or a caller CA bundle (`CA_Path`),
+  against the system trust store, a caller CA bundle (`CA_Path`) or
+  anchors embedded in the binary (`CA_PEM`),
   or opt-in `Insecure` mode. Two build-time backends: system
   OpenSSL 3 (default, TLS 1.3) or vendored mbedTLS 2.28
   (`AHT_TLS_BACKEND=mbedtls`) — see [`docs/tls.md`](docs/tls.md).
@@ -144,7 +145,7 @@ easy → hard, each demonstrating one capability of the client:
    protected object.
 8. `ex_08_wss_subprotocol` — `wss://` with subprotocol negotiation.
 9. `ex_09_https` — the same one-line GET over `https://`, configuring
-   the client's `Insecure` / `CA_Path` trust fields.
+   the client's `Insecure` / `CA_Path` / `CA_PEM` trust fields.
 
 Each takes an optional URL/host argument and otherwise defaults to the
 local Python fixture server from `tests/`. Build them all:

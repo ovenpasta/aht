@@ -14,6 +14,7 @@ with AHT.Openssl.SSL;
 with AHT.TLS_Sync;
 with AHT.Openssl.Version;
 with AHT.Openssl.X509;
+with AHT.PEM;
 with AHT.Transport.TCP;
 
 --  OpenSSL backend: a memory-BIO engine. The SSL object owns two
@@ -509,6 +510,31 @@ package body AHT.Transport.TLS is
            with "TLS connect: CA_Path and CA_PEM are mutually "
              & "exclusive; supply the trust anchors either as a path "
              & "or as PEM data, not both";
+      end if;
+
+      --  Validated here, before anything is dialled and regardless of
+      --  Insecure.
+      --
+      --  Regardless of Insecure, because the two backends disagreed
+      --  otherwise: OpenSSL skips CA loading entirely when
+      --  verification is off, mbedTLS parsed it anyway, so the same
+      --  malformed bundle was accepted by one and rejected by the
+      --  other. Checking the shape unconditionally makes supplying
+      --  broken trust material an error the caller hears about even
+      --  when this particular dial would not have used it -- which is
+      --  the fail-closed reading, and the one that does not depend on
+      --  which backend is linked.
+      if CA_PEM /= "" then
+         declare
+            Problem : constant String := AHT.PEM.Bundle_Problem (CA_PEM);
+         begin
+            if Problem /= "" then
+               raise TLS_Error
+                 with "TLS connect (CA_PEM): " & Problem
+                   & "; the bundle is rejected whole rather than in "
+                   & "part";
+            end if;
+         end;
       end if;
 
       --  1. Plain TCP first (fresh per attempt — failed Connect frees

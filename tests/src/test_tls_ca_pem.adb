@@ -190,12 +190,58 @@ begin
       "the bundle's tail is corrupt, so the whole bundle must be "
       & "rejected rather than the leading certificate installed");
 
+   --  Case 6b: a valid certificate followed by ORDINARY text, not a
+   --  malformed PEM block. This is the shape a stray log line, an
+   --  editor artefact or a concatenation accident actually takes, and
+   --  it is not caught by either library's own error reporting:
+   --  OpenSSL's PEM_R_NO_START_LINE means "no further header found",
+   --  which arbitrary trailing text also produces, and mbedTLS stops
+   --  at the missing header and returns the earlier success count.
+   Expect_Refused
+     ("valid-then-plain-garbage",
+      "", Cert & "this is trailing garbage" & ASCII.LF,
+      "the bundle has trailing non-PEM data, so it is not wholly what "
+      & "the caller supplied and must be refused");
+
+   --  Case 6c: the same, leading. A prefix of junk before the first
+   --  certificate is equally not a well-formed bundle.
+   Expect_Refused
+     ("garbage-then-valid",
+      "", "this is leading garbage" & ASCII.LF & Cert,
+      "the bundle has leading non-PEM data");
+
    --  Case 7: a truncated certificate — the shape a partial copy or a
    --  clipped build artefact actually takes.
    Expect_Refused
      ("truncated",
       "", Cert (Cert'First .. Cert'First + Cert'Length / 2),
       "the certificate is cut short, so it cannot be trusted in part");
+
+   --  Case 7b: malformed PEM is refused even under Insecure.
+   --
+   --  This pins a rule the two backends disagreed on: OpenSSL skips
+   --  CA loading entirely when verification is off, mbedTLS parsed it
+   --  anyway, so the same broken bundle raised on one backend and was
+   --  ignored on the other. Supplying broken trust material is a
+   --  caller error whether or not this particular dial would have
+   --  used it, and the answer must not depend on which backend is
+   --  linked.
+   declare
+      T : AHT.Transport.TLS.TLS_Transport;
+   begin
+      T.Connect (Host, Port, Insecure => True,
+                 CA_PEM => "not a certificate at all");
+      Close_Quietly (T);
+      Fail ("insecure-malformed: a malformed CA_PEM was accepted "
+            & "because Insecure was set — the check must not depend "
+            & "on whether verification is on");
+   exception
+      when AHT.Transport.TLS.TLS_Error =>
+         null;   --  correct
+      when E : others =>
+         Fail ("insecure-malformed: expected TLS_Error, got "
+               & Ada.Exceptions.Exception_Name (E));
+   end;
 
    --  Case 8: the WebSocket client's own guard.
    --

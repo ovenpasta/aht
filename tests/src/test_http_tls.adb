@@ -109,6 +109,79 @@ begin
                & Ada.Exceptions.Exception_Message (E));
    end;
 
+
+   --  Case 4: the same anchor as PEM data on the client record.
+   --
+   --  Client_Type.CA_PEM is one forwarding line into the TLS connect,
+   --  and a broken one would leave every other test in this suite
+   --  green -- CA_Path would still work and nothing else reads the
+   --  field. This is the only thing that would notice.
+   declare
+      C    : AHT.HTTP.Client.Client_Type;
+      Resp : AHT.HTTP.Response.Response_Type;
+
+      function Read_File (Path : String) return String is
+         F : File_Type;
+         R : Ada.Strings.Unbounded.Unbounded_String;
+      begin
+         Open (F, In_File, Path);
+         while not End_Of_File (F) loop
+            Ada.Strings.Unbounded.Append (R, Get_Line (F));
+            Ada.Strings.Unbounded.Append (R, ASCII.LF);
+         end loop;
+         Close (F);
+         return Ada.Strings.Unbounded.To_String (R);
+      exception
+         when others =>
+            if Is_Open (F) then
+               Close (F);
+            end if;
+            return "";
+      end Read_File;
+
+      Cert : constant String := Read_File (CA_File);
+   begin
+      if Cert = "" then
+         Fail ("ca-pem: could not read " & CA_File);
+      else
+         C.CA_PEM := Ada.Strings.Unbounded.To_Unbounded_String (Cert);
+         begin
+            Resp := AHT.HTTP.Client.Get (C, URL);
+            if Resp.Status /= 200 then
+               Fail ("ca-pem: status =" & Resp.Status'Image);
+            elsif Body_To_String (Resp.Body_B) /= "hello, world" & ASCII.LF
+            then
+               Fail ("ca-pem: body = """
+                     & Body_To_String (Resp.Body_B) & """");
+            end if;
+         exception
+            when E : others =>
+               Fail ("ca-pem: request raised "
+                     & Ada.Exceptions.Exception_Name (E) & ": "
+                     & Ada.Exceptions.Exception_Message (E)
+                     & " — Client_Type.CA_PEM is not reaching the "
+                     & "handshake");
+         end;
+
+         --  Case 5: both fields set on the record. Refused when the
+         --  HTTPS request consumes them -- they are persistent
+         --  configuration, so the error belongs to the request that
+         --  uses them, not to setting them.
+         C.CA_Path :=
+           Ada.Strings.Unbounded.To_Unbounded_String (CA_File);
+         begin
+            Resp := AHT.HTTP.Client.Get (C, URL);
+            Fail ("ca-both: CA_Path and CA_PEM together were accepted");
+         exception
+            when AHT.Transport.TLS.TLS_Error =>
+               null;   --  correct
+            when E : others =>
+               Fail ("ca-both: expected TLS_Error, got "
+                     & Ada.Exceptions.Exception_Name (E));
+         end;
+      end if;
+   end;
+
    if Failures = 0 then
       Put_Line ("test_http_tls: OK");
       Ada.Command_Line.Set_Exit_Status (0);

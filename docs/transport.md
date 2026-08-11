@@ -201,7 +201,7 @@ concurrent writer task.
 
 ### mbedTLS backend walkthrough
 
-`Connect (Host, Port, Insecure, CA_Path)` lifecycle:
+`Connect (Host, Port, Insecure, CA_Path, ..., CA_PEM)` lifecycle:
 
 1. **TCP connect first** — `AHT.Transport.TCP.Connect (Host, Port)`, so
    all of the deadline/abort/fallback machinery above is reused. The
@@ -216,6 +216,20 @@ concurrent writer task.
    - `MBEDTLS_SSL_VERIFY_REQUIRED` by default;
    - `MBEDTLS_SSL_VERIFY_NONE` when `Insecure => True` (self-signed
      test certs).
+6b. **In-memory anchors.** `CA_PEM` carries one or more concatenated
+   PEM certificates instead of a path, for anchors compiled into the
+   binary. Supplying both it and `CA_Path` raises `TLS_Error` before
+   anything is dialled — no precedence, and the refusal stands under
+   `Insecure`.
+
+   Its envelope is validated by `AHT.PEM` before either backend sees
+   it, and unconditionally, because neither backend can answer "was
+   the input wholly what I supplied?". OpenSSL's `PEM_R_NO_START_LINE`
+   means "no further header found", which trailing garbage produces
+   too; mbedTLS returns the count of certificates that *failed*, which
+   for trailing garbage is zero. Both accepted a valid certificate
+   followed by junk until the shared check was added.
+
 6. **CA loading is explicit, no platform default.** If `CA_Path` is
    non-empty it is loaded with `mbedtls_x509_crt_parse_path` when it
    names a directory and `mbedtls_x509_crt_parse_file` otherwise
