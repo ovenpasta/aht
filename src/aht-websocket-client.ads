@@ -31,13 +31,15 @@ package AHT.Websocket.Client is
       Subprotocols  : String := "";
       Origin        : String := "";
       Insecure      : Boolean := False;
-      CA_Path       : String := "");
+      CA_Path       : String := "";
+      CA_PEM        : String := "");
 
    procedure Connect
      (Self     : in out Client_Type;
       URL      : String;
       Insecure : Boolean := False;
-      CA_Path  : String := "");
+      CA_Path  : String := "";
+      CA_PEM   : String := "");
 
    --  How decoded messages reach the application.
    --
@@ -399,6 +401,7 @@ private
       Origin       : Ada.Strings.Unbounded.Unbounded_String;
       Insecure     : Boolean := False;
       CA_Path      : Ada.Strings.Unbounded.Unbounded_String;
+      CA_PEM       : Ada.Strings.Unbounded.Unbounded_String;
    end record;
 
    --  Snapshot of the installed callbacks. The receiver takes one per

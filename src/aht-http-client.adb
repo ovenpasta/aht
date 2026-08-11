@@ -225,7 +225,8 @@ package body AHT.HTTP.Client is
                   Insecure           => Self.Insecure,
                   CA_Path            => To_String (Self.CA_Path),
                   Connect_Timeout    => Budget,
-                  Handshake_Deadline => Budget);
+                  Handshake_Deadline => Budget,
+                  CA_PEM             => To_String (Self.CA_PEM));
 
                --  Same Cancel bind/unbind discipline as the HTTP
                --  branch: Bind re-checks Cancelled under the lock and

@@ -1450,7 +1450,8 @@ package body AHT.Websocket.Client is
       Subprotocols  : String := "";
       Origin        : String := "";
       Insecure      : Boolean := False;
-      CA_Path       : String := "")
+      CA_Path       : String := "";
+      CA_PEM        : String := "")
    is
       Parsed : constant AHT.URL.URL_Type := AHT.URL.Parse (URL);
 
@@ -1467,7 +1468,8 @@ package body AHT.Websocket.Client is
          Subprotocols => To_Unbounded_String (Subprotocols),
          Origin       => To_Unbounded_String (Origin),
          Insecure     => Insecure,
-         CA_Path      => To_Unbounded_String (CA_Path));
+         CA_Path      => To_Unbounded_String (CA_Path),
+         CA_PEM       => To_Unbounded_String (CA_PEM));
 
       --  Declared BEFORE admission is asked for, so that there is no
       --  instant at which the client is Connecting and no object is
@@ -1476,6 +1478,20 @@ package body AHT.Websocket.Client is
       --  Connect still cannot release an admission it never took.
       Attempt : Attempt_Owner (Self.Ctl'Unchecked_Access);
    begin
+      --  Before admission, so a contradictory pair never reserves a
+      --  generation, and before the URL's scheme is consulted -- this
+      --  is the only place that catches it on a ws:// dial, where no
+      --  TLS transport is ever built to notice. No precedence, and
+      --  the refusal stands even under Insecure: a caller who gave
+      --  two sets of trust anchors is wrong about which is in force,
+      --  and honouring one silently leaves that belief intact.
+      if CA_Path /= "" and then CA_PEM /= "" then
+         raise AHT.Transport.TLS.TLS_Error
+           with "Websocket.Client.Connect: CA_Path and CA_PEM are "
+             & "mutually exclusive; supply the trust anchors either "
+             & "as a path or as PEM data, not both";
+      end if;
+
       --  Admission. One protected action decides whether an attempt
       --  may start, reserves its generation number and takes the
       --  snapshot the session will be built from. Idle and
@@ -1593,7 +1609,8 @@ package body AHT.Websocket.Client is
                      Host     => To_String (Parsed.Host),
                      Port     => Parsed.Port,
                      Insecure => Insecure,
-                     CA_Path  => CA_Path);
+                     CA_Path  => CA_Path,
+                     CA_PEM   => CA_PEM);
                when Plain_Transport =>
                   AHT.Transport.TCP.Connect
                     (Attempt.Sess.Plain,
@@ -1716,7 +1733,8 @@ package body AHT.Websocket.Client is
      (Self     : in out Client_Type;
       URL      : String;
       Insecure : Boolean := False;
-      CA_Path  : String := "")
+      CA_Path  : String := "";
+      CA_PEM   : String := "")
    is
       No_Extras : AHT.HTTP.Headers.Map;
    begin
@@ -1725,7 +1743,8 @@ package body AHT.Websocket.Client is
          URL           => URL,
          Extra_Headers => No_Extras,
          Insecure      => Insecure,
-         CA_Path       => CA_Path);
+         CA_Path       => CA_Path,
+         CA_PEM        => CA_PEM);
    end Connect;
 
    --  Called by every operation that would wait on the receiver.
@@ -1790,7 +1809,8 @@ package body AHT.Websocket.Client is
          Subprotocols  => To_String (P.Subprotocols),
          Origin        => To_String (P.Origin),
          Insecure      => P.Insecure,
-         CA_Path       => To_String (P.CA_Path));
+         CA_Path       => To_String (P.CA_Path),
+         CA_PEM        => To_String (P.CA_PEM));
    end Reconnect;
 
    function Is_Open (Self : Client_Type) return Boolean is

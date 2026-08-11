@@ -289,8 +289,29 @@ function Generation           (Self : Client_Type) return Natural;
 ```
 
 `ws://` runs on the plain TCP transport, `wss://` on the TLS
-transport; `Insecure` / `CA_Path` apply to `wss://` only (ignored for
-`ws://`).
+transport; `Insecure` / `CA_Path` / `CA_PEM` apply to `wss://` only
+(ignored for `ws://`).
+
+`CA_PEM` is the same trust material as `CA_Path`, held in memory
+rather than on disk — one or more concatenated PEM certificates, for
+anchors compiled into the binary. Two rules:
+
+- **Supplying both raises**, before anything is dialled and before
+  admission reserves a generation. There is no precedence, and the
+  refusal stands even under `Insecure`: a caller who passed two sets
+  of anchors is wrong about which is in force, and honouring one
+  silently leaves that belief intact. On a `ws://` dial the client's
+  own check is the only thing that catches it, since no TLS transport
+  is ever built.
+- **Parsing is all-or-nothing.** A bundle whose tail is truncated or
+  corrupt is rejected whole rather than installing the certificates
+  that parsed before the damage. Trusting a prefix of what the caller
+  meant to trust is worse than trusting nothing, because nobody finds
+  out.
+
+It is deep-copied into the saved parameters like every other
+argument, so `Reconnect` replays it without the caller keeping the
+PEM alive.
 
 The `Send_*` operations deliberately carry **no** `Is_Open`
 precondition. The receiver task can tear a connection down
@@ -761,7 +782,7 @@ caller-initiated closes should not retry by default.
 
 ## Tests
 
-The WebSocket layer is covered by twenty test mains. `test_ws_send_guard`
+The WebSocket layer is covered by twenty-one test mains. `test_ws_send_guard`
 runs **first** by construction: what it checks shows up everywhere else
 as a hang, so nothing may sit ahead of it that could hang and stop it
 running at all.
@@ -788,6 +809,7 @@ running at all.
 | `test_ws_teardown` | close paths and their bounds, including a writer stuck against a deaf peer | `server_ws_hostile.py`, `server_ws.py` |
 | `test_ws_abort` | asynchronous transfer of control across every ownership handoff | `server_ws.py`, `server_stall.py` + in-process fake |
 | `test_ws_tls` | the `wss://` sibling: verify / insecure / untrusted, round-trips over TLS | `server_ws_tls.py` |
+| `test_tls_ca_pem` | in-memory trust anchors: same chain as the file, both-supplied refused, partial bundles refused, replayed by `Reconnect` | `server_tls.py`, `server_ws_tls.py`, `server_ws.py` |
 
 ### Conformance
 

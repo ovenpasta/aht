@@ -437,7 +437,8 @@ package body AHT.Transport.TLS is
       Insecure           : Boolean := False;
       CA_Path            : String  := "";
       Connect_Timeout    : Duration := Duration'Last;
-      Handshake_Deadline : Duration := Duration'Last)
+      Handshake_Deadline : Duration := Duration'Last;
+      CA_PEM             : String  := "")
    is
       use Ada.Real_Time;
 
@@ -497,6 +498,19 @@ package body AHT.Transport.TLS is
       --  released are unaffected.
       begin
 
+      --  Refused before anything is dialled, and refused even under
+      --  Insecure. A caller who supplied two sets of trust anchors
+      --  holds a mistaken belief about which one is in force;
+      --  honouring one silently leaves that belief intact. Under
+      --  Insecure neither is used, which makes accepting the
+      --  contradiction more misleading rather than less.
+      if CA_Path /= "" and then CA_PEM /= "" then
+         raise TLS_Error
+           with "TLS connect: CA_Path and CA_PEM are mutually "
+             & "exclusive; supply the trust anchors either as a path "
+             & "or as PEM data, not both";
+      end if;
+
       --  1. Plain TCP first (fresh per attempt — failed Connect frees
       --     it and the object stays retryable).
       Self.State.TCP := new AHT.Transport.TCP.TCP_Transport;
@@ -530,13 +544,40 @@ package body AHT.Transport.TLS is
       else
          OSSL.CTX_Set_Verify
            (Self.State.Ctx, OSSL.VERIFY_PEER, System.Null_Address);
-         if CA_Path = "" then
+         if CA_Path = "" and then CA_PEM = "" then
             --  Platform trust store (deliberate difference from the
             --  mbedtls backend, which configures no default trust).
             if OSSL.CTX_Set_Default_Verify_Paths (Self.State.Ctx) /= 1
             then
                Fail ("TLS connect (set_default_verify_paths)");
             end if;
+         elsif CA_PEM /= "" then
+            declare
+               --  Copied so the bytes handed to OpenSSL are
+               --  contiguous and outlive the call; BIO_new_mem_buf
+               --  does not take ownership, and the glue frees its BIO
+               --  before returning, so this may be a local.
+               Buf : aliased C.char_array := C.To_C (CA_PEM, False);
+               N   : constant C.int :=
+                 AHT.Openssl.Glue.CTX_Load_CA_PEM
+                   (Self.State.Ctx, Buf'Address, Buf'Length);
+            begin
+               if N <= 0 then
+                  Fail ("TLS connect (CA_PEM load)",
+                        (case N is
+                            when -1 => "allocation failed",
+                            when -2 =>
+                              "no certificate found in the supplied PEM",
+                            when -3 =>
+                              "trailing or malformed data after the last "
+                              & "certificate; the bundle is rejected "
+                              & "whole rather than in part",
+                            when -4 =>
+                              "certificate could not be added to the "
+                              & "trust store",
+                            when others => "code" & C.int'Image (N)));
+               end if;
+            end;
          else
             declare
                Path_C : aliased C.char_array := C.To_C (CA_Path);

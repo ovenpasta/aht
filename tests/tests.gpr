@@ -69,6 +69,7 @@ project Tests is
       "test_tls_corrupt.adb",
       "test_tls_concurrent_corrupt.adb",
       "test_tls_bad_handshake.adb",
+      "test_tls_ca_pem.adb",
       "test_tls_ip_host.adb",
       "test_tls_stress.adb",
       "test_tls_keyupdate.adb",

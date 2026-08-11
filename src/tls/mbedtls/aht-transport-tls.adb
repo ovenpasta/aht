@@ -503,7 +503,8 @@ package body AHT.Transport.TLS is
       Insecure           : Boolean := False;
       CA_Path            : String  := "";
       Connect_Timeout    : Duration := Duration'Last;
-      Handshake_Deadline : Duration := Duration'Last)
+      Handshake_Deadline : Duration := Duration'Last;
+      CA_PEM             : String  := "")
    is
       use Ada.Real_Time;
 
@@ -561,6 +562,19 @@ package body AHT.Transport.TLS is
       --  paths that already released are unaffected.
       begin
 
+      --  Refused before anything is dialled, and refused even under
+      --  Insecure. A caller who supplied two sets of trust anchors
+      --  holds a mistaken belief about which one is in force;
+      --  honouring one silently leaves that belief intact. Under
+      --  Insecure neither is used, which makes accepting the
+      --  contradiction more misleading rather than less.
+      if CA_Path /= "" and then CA_PEM /= "" then
+         raise TLS_Error
+           with "TLS connect: CA_Path and CA_PEM are mutually "
+             & "exclusive; supply the trust anchors either as a path "
+             & "or as PEM data, not both";
+      end if;
+
       --  1. Plain TCP first (fresh per attempt, so a failed handshake
       --     leaves this object retryable): DNS multi-candidate
       --     fallback, the selectors, deadlines and Abort_Pending all
@@ -604,30 +618,57 @@ package body AHT.Transport.TLS is
          M.Conf_Authmode (Self.State.Conf, M.VERIFY_REQUIRED);
       end if;
 
-      if CA_Path /= "" then
+      if CA_Path /= "" or else CA_PEM /= "" then
          Self.State.CA_Cert := AHT.Mbedtls.Glue.X509_CRT_New;
          if Self.State.CA_Cert = System.Null_Address then
             Fail (0, "TLS connect (x509 alloc)");
          end if;
-         declare
-            Path_C : aliased C.char_array := C.To_C (CA_Path);
-            Is_Dir : constant Boolean :=
-              Ada.Directories.Exists (CA_Path)
-                and then Ada.Directories.Kind (CA_Path)
-                         = Ada.Directories.Directory;
-         begin
-            if Is_Dir then
-               Ret := AHT.Mbedtls.X509.CRT_Parse_Path
-                 (Self.State.CA_Cert, Path_C'Address);
-            else
-               Ret := AHT.Mbedtls.X509.CRT_Parse_File
-                 (Self.State.CA_Cert, Path_C'Address);
+
+         if CA_PEM /= "" then
+            declare
+               --  To_C with Append_Nul, and the NUL is COUNTED in the
+               --  length. mbedTLS picks PEM over DER by finding
+               --  "-----BEGIN", and its PEM branch requires the
+               --  terminator inside the counted length; passing the
+               --  text length alone makes it try DER and fail
+               --  obscurely.
+               Buf : aliased C.char_array := C.To_C (CA_PEM, True);
+            begin
+               Ret := AHT.Mbedtls.X509.CRT_Parse
+                 (Self.State.CA_Cert, Buf'Address, Buf'Length);
+            end;
+            --  0 only. A positive result counts certificates that
+            --  failed to parse, which is exactly the partial success
+            --  this must refuse: installing the ones that did parse
+            --  would trust a prefix of what the caller supplied and
+            --  say nothing about the rest.
+            if Ret /= 0 then
+               Fail (Ret,
+                     "TLS connect (CA_PEM parse; the bundle is "
+                     & "rejected whole rather than in part)");
             end if;
-         end;
-         --  parse_* returns 0 on full success, >0 if some certs in the
-         --  file failed, <0 on hard error. Require a clean parse.
-         if Ret /= 0 then
-            Fail (Ret, "TLS connect (CA parse """ & CA_Path & """)");
+         else
+            declare
+               Path_C : aliased C.char_array := C.To_C (CA_Path);
+               Is_Dir : constant Boolean :=
+                 Ada.Directories.Exists (CA_Path)
+                   and then Ada.Directories.Kind (CA_Path)
+                            = Ada.Directories.Directory;
+            begin
+               if Is_Dir then
+                  Ret := AHT.Mbedtls.X509.CRT_Parse_Path
+                    (Self.State.CA_Cert, Path_C'Address);
+               else
+                  Ret := AHT.Mbedtls.X509.CRT_Parse_File
+                    (Self.State.CA_Cert, Path_C'Address);
+               end if;
+            end;
+            --  parse_* returns 0 on full success, >0 if some certs in
+            --  the file failed, <0 on hard error. Require a clean
+            --  parse.
+            if Ret /= 0 then
+               Fail (Ret, "TLS connect (CA parse " & CA_Path & ")");
+            end if;
          end if;
          M.Conf_CA_Chain
            (Self.State.Conf, Self.State.CA_Cert, System.Null_Address);

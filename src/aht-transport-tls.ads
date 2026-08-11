@@ -24,7 +24,8 @@ package AHT.Transport.TLS is
       Insecure           : Boolean := False;
       CA_Path            : String  := "";
       Connect_Timeout    : Duration := Duration'Last;
-      Handshake_Deadline : Duration := Duration'Last);
+      Handshake_Deadline : Duration := Duration'Last;
+      CA_PEM             : String  := "");
    --  TCP-connect to Host:Port, then run the TLS handshake. For a DNS
    --  name the handshake sends SNI = Host and verifies the peer
    --  certificate against Host; for an IP-literal Host the certificate
@@ -41,6 +42,31 @@ package AHT.Transport.TLS is
    --  (A CA *directory* is also backend-specific: openssl requires
    --  c_rehash-style hashed names, mbedtls loads every file. Prefer a
    --  bundle file for portability.)
+   --
+   --  CA_PEM is the same trust material held in memory rather than on
+   --  disk -- one or more concatenated PEM certificates, for anchors
+   --  compiled into the binary. Empty means "not supplied" and leaves
+   --  the backend-specific default above untouched.
+   --
+   --  It is appended to the parameter list rather than placed beside
+   --  CA_Path so that existing positional callers passing
+   --  Connect_Timeout and Handshake_Deadline keep compiling and keep
+   --  meaning what they meant.
+   --
+   --  Supplying BOTH CA_Path and CA_PEM raises TLS_Error before
+   --  anything is dialled. There is deliberately no precedence rule,
+   --  and the refusal stands even under Insecure: a caller who gave
+   --  two sets of trust anchors has a mistaken belief about which one
+   --  is in force, and silently honouring one of them leaves that
+   --  belief intact. Under Insecure neither is used, which makes
+   --  quietly accepting the contradiction more misleading rather than
+   --  less.
+   --
+   --  Parsing is all-or-nothing. A bundle whose tail is truncated or
+   --  corrupt is rejected outright rather than installing the
+   --  certificates that parsed before the damage -- trusting a prefix
+   --  of what the caller meant to trust is worse than trusting
+   --  nothing, because nobody finds out.
    --
    --  Connect_Timeout is forwarded to the underlying TCP connect as its
    --  total budget across resolved candidates (see

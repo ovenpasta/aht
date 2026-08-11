@@ -15,6 +15,13 @@ package AHT.HTTP.Client is
         Ada.Strings.Unbounded.To_Unbounded_String ("AHT/0.1");
       Default_Headers : AHT.HTTP.Headers.Map;
       CA_Path         : Ada.Strings.Unbounded.Unbounded_String;
+      --  Trust anchors held in memory rather than on disk -- one or
+      --  more concatenated PEM certificates, for anchors compiled
+      --  into the binary. Setting BOTH this and CA_Path raises
+      --  TLS_Error on the next HTTPS request, before anything is
+      --  dialled; there is no precedence rule, and the refusal stands
+      --  even under Insecure.
+      CA_PEM          : Ada.Strings.Unbounded.Unbounded_String;
       Insecure        : Boolean := False;
       Timeout_Seconds : Natural := 30;
    end record;
@@ -60,7 +67,8 @@ package AHT.HTTP.Client is
    --
    --  Scheme dispatch on `Req.Target.Scheme`:
    --    * HTTP  → `AHT.Transport.TCP`.
-   --    * HTTPS → `AHT.Transport.TLS`, honouring `Self.CA_Path` /
+   --    * HTTPS → `AHT.Transport.TLS`, honouring `Self.CA_Path`,
+   --      `Self.CA_PEM` /
    --      `Self.Insecure`.
    --    * WS / WSS → raises `HTTP_Error`; use `AHT.Websocket.Client`.
    --
