@@ -291,8 +291,14 @@ function Generation           (Self : Client_Type) return Natural;
 ```
 
 `ws://` runs on the plain TCP transport, `wss://` on the TLS
-transport; `Insecure` / `CA_Path` / `CA_PEM` apply to `wss://` only
-(ignored for `ws://`).
+transport. `Insecure`, `CA_Path` and `CA_PEM` configure the TLS
+handshake, so on a `ws://` dial none of them is *used*.
+
+Not used is not the same as not checked. Supplying both `CA_Path` and
+`CA_PEM` is still rejected on `ws://`, because it is a contradiction
+in what the caller asked for rather than a setting this dial happens
+not to need — and the client checks it itself precisely because no
+TLS transport is built there to notice.
 
 `CA_PEM` is the same trust material as `CA_Path`, held in memory
 rather than on disk — one or more concatenated PEM certificates, for

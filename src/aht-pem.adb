@@ -14,22 +14,34 @@ package body AHT.PEM is
    ---------------------
 
    function Bundle_Problem (Data : String) return String is
-      P      : Natural := Data'First;
+      --  Scanned by OFFSET from Data'First, never by absolute index.
+      --
+      --  A String's bounds are arbitrary, and the scan needs to
+      --  represent "one past the last character" -- which as an
+      --  absolute position is Data'Last + 1 and overflows when the
+      --  bounds sit near Positive'Last. The object can be tiny and
+      --  still do this; it is the bounds, not the size, that are
+      --  extreme. An offset in 0 .. Len has no such edge: Len is a
+      --  length, and Data'First + O is only ever formed while
+      --  O < Len, so it cannot exceed Data'Last.
+      Len    : constant Natural := Data'Length;
+      O      : Natural := 0;
       Blocks : Natural := 0;
 
       function At_Marker (M : String) return Boolean is
-        (P + M'Length - 1 <= Data'Last
-         and then Data (P .. P + M'Length - 1) = M);
+        (O + M'Length <= Len
+         and then Data (Data'First + O .. Data'First + O + M'Length - 1)
+                  = M);
 
    begin
       loop
          --  Whitespace between blocks is fine and is the only thing
          --  that is.
-         while P <= Data'Last and then Is_Space (Data (P)) loop
-            P := P + 1;
+         while O < Len and then Is_Space (Data (Data'First + O)) loop
+            O := O + 1;
          end loop;
 
-         exit when P > Data'Last;
+         exit when O = Len;
 
          if not At_Marker (Begin_Line) then
             return
@@ -41,16 +53,17 @@ package body AHT.PEM is
                     & "blocks");
          end if;
 
-         P := P + Begin_Line'Length;
+         O := O + Begin_Line'Length;
 
          --  The matching END, searched for from here rather than
          --  anywhere in the input, so a stray END before the next
          --  BEGIN cannot be claimed by the wrong block.
          declare
-            E : constant Natural :=
-              Ada.Strings.Fixed.Index (Data (P .. Data'Last), End_Line);
+            Tail  : String renames Data (Data'First + O .. Data'Last);
+            E_Abs : constant Natural :=
+              Ada.Strings.Fixed.Index (Tail, End_Line);
          begin
-            if E = 0 then
+            if E_Abs = 0 then
                return "certificate" & Natural'Image (Blocks + 1)
                  & " has no " & End_Line
                  & "; it is truncated or corrupt";
@@ -58,18 +71,17 @@ package body AHT.PEM is
 
             --  A BEGIN inside the block means the previous one was
             --  never closed.
-            declare
-               B2 : constant Natural :=
-                 Ada.Strings.Fixed.Index (Data (P .. E), Begin_Line);
-            begin
-               if B2 /= 0 then
-                  return "certificate" & Natural'Image (Blocks + 1)
-                    & " contains a nested " & Begin_Line
-                    & "; a block was left unclosed";
-               end if;
-            end;
+            if Ada.Strings.Fixed.Index
+                 (Tail (Tail'First .. E_Abs), Begin_Line) /= 0
+            then
+               return "certificate" & Natural'Image (Blocks + 1)
+                 & " contains a nested " & Begin_Line
+                 & "; a block was left unclosed";
+            end if;
 
-            P := E + End_Line'Length;
+            --  Back to an offset, still without forming an absolute
+            --  one-past index.
+            O := (E_Abs - Data'First) + End_Line'Length;
          end;
 
          Blocks := Blocks + 1;

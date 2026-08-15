@@ -216,6 +216,16 @@ concurrent writer task.
    - `MBEDTLS_SSL_VERIFY_REQUIRED` by default;
    - `MBEDTLS_SSL_VERIFY_NONE` when `Insecure => True` (self-signed
      test certs).
+6. **CA loading is explicit, no platform default.** If `CA_Path` is
+   non-empty it is loaded with `mbedtls_x509_crt_parse_path` when it
+   names a directory and `mbedtls_x509_crt_parse_file` otherwise
+   (chosen via `Ada.Directories.Kind`), and a non-clean parse is a hard
+   `TLS_Error`. With `CA_Path = ""` **no** trust anchors are configured
+   here (there is no `/etc/ssl/certs` fallback), so unless `Insecure`
+   is set the handshake will reject the peer — callers must pass a CA
+   bundle or opt into `Insecure`. (The openssl backend differs: it
+   falls back to the platform trust store — see `tls.md`.)
+
 6b. **In-memory anchors.** `CA_PEM` carries one or more concatenated
    PEM certificates instead of a path, for anchors compiled into the
    binary. Supplying both it and `CA_Path` raises `TLS_Error` before
@@ -230,15 +240,6 @@ concurrent writer task.
    for trailing garbage is zero. Both accepted a valid certificate
    followed by junk until the shared check was added.
 
-6. **CA loading is explicit, no platform default.** If `CA_Path` is
-   non-empty it is loaded with `mbedtls_x509_crt_parse_path` when it
-   names a directory and `mbedtls_x509_crt_parse_file` otherwise
-   (chosen via `Ada.Directories.Kind`), and a non-clean parse is a hard
-   `TLS_Error`. With `CA_Path = ""` **no** trust anchors are configured
-   here (there is no `/etc/ssl/certs` fallback), so unless `Insecure`
-   is set the handshake will reject the peer — callers must pass a CA
-   bundle or opt into `Insecure`. (The openssl backend differs: it
-   falls back to the platform trust store — see `tls.md`.)
 7. `mbedtls_ssl_setup`, then `mbedtls_ssl_set_hostname (Host)` for SNI
    *and* cert-name verification.
 8. `mbedtls_ssl_set_bio` wires the send/recv callbacks. They are

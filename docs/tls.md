@@ -50,7 +50,7 @@ deliberately differ per backend:
 
 | | openssl | mbedtls |
 |---|---|---|
-| `CA_PEM` supplied | one or more concatenated PEM certificates loaded from memory; envelope validated by `AHT.PEM` first, and mutually exclusive with `CA_Path` | same |
+| `CA_PEM` supplied | envelope validated by `AHT.PEM` first, always — including under `Insecure`, where OpenSSL then loads nothing because verification is off while mbedTLS still parses the chain. Validation is the normalised behaviour; loading is not. Mutually exclusive with `CA_Path`. | same validation; the chain is parsed even under `Insecure` |
 | `CA_Path = ""`, verifying | platform trust store (`SSL_CTX_set_default_verify_paths`; honours `SSL_CERT_FILE`/`SSL_CERT_DIR`) — public `https://` endpoints work out of the box | no default trust — the handshake rejects; pass a CA bundle or set `Insecure` |
 | CA **directory** semantics | c_rehash hashed-name lookup | loads every file in the directory |
 | IP-literal host, verifying | verified against the cert's IP SANs (`X509_VERIFY_PARAM_set1_ip_asc`), no SNI sent | rejected — mbedTLS 2.28 matches dNSName SANs/CN only |
