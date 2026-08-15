@@ -427,9 +427,9 @@ package body AHT.Websocket.Client is
          --  the connecting task's owner still sees the session as
          --  un-handed-off and frees it, and the receiver treats the
          --  failed rendezvous as no session at all. Doing this after
-         --  setting Cur or Handed_Off_Gen would leave the two sides
-         --  disagreeing about who owns the session, and nobody
-         --  reclaiming it.
+         --  setting Cur or recording the handover would leave the
+         --  two sides disagreeing about who owns the session, and
+         --  nobody reclaiming it.
          Proto      := S.Selected_Protocol;
          --  Promoted here and nowhere else, so what Reconnect repeats
          --  is the last connect that actually worked rather than the

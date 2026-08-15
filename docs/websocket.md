@@ -851,11 +851,23 @@ directions, and re-tuning the span only moved which direction.
 
 It is gone. What it was reaching for — the record that a generation's
 session changed hands — is now `AHT.Websocket.Handoffs`, a type
-production uses directly, and `test_ws_handoff` pins its protocol with
-no fixture and no timing: the record survives the abort of the task
-that made it, is monotone, and loses no concurrent update. Every wait
-there is a bounded spin on an observed counter or a task's
-`'Terminated`, never a delay.
+production uses directly, and `test_ws_handoff` pins its *contract*
+with no fixture and no timing: one call is the whole record, a caller
+that never reaches the call records nothing, the record is monotone,
+and concurrent recorders lose no update. Every wait there is a bounded
+spin on an observed counter or a task's `'Terminated`, never a delay.
+
+**What that does not cover, stated plainly:** an abort arriving
+*during* the call. Reaching that window needs the abort to land in the
+couple of instructions between the protected action ending and the
+next statement, and a probe built for it — an asynchronous select
+fired while the victim was in the abortable part, 200 rounds, counting
+conclusive ones — found around thirty conclusive rounds per run and
+**zero** with the abort inside the window. It was removed rather than
+left looking like coverage. So the placement of the record inside the
+protected action, and of `Publish` inside the `Start` rendezvous,
+rests on the structural argument that abort is deferred there and no
+interval exists — the same standing as the `Send_Guard` flag shape.
 
 Same move as `Send_Guards`, and for the same reason — an abort-safety
 claim tested against a replica is not tested at all.

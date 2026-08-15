@@ -20,6 +20,13 @@
 --  lands exactly between the two, leaving the receiver owning a
 --  session whose giver still believes it owns it too -- a double
 --  free, and one that no ordinary run would show.
+--  Public, and deliberately: `test_ws_handoff` drives these exact
+--  types from its own binary, which is the point of the split, and a
+--  private child would need a descendant test to do it. Same standing
+--  as `AHT.Websocket.Send_Guards`, which is public for the same
+--  reason. So this is supported surface, diagnostics included -- not
+--  an internal detail that happens to be reachable. Callers have no
+--  reason to construct one, but nothing breaks if they do.
 package AHT.Websocket.Handoffs is
 
    protected type Handoff is

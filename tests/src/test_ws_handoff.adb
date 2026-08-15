@@ -20,11 +20,16 @@
 --
 --  Properties:
 --
---    1. A record survives the abort of the task that made it. This is
---       the one the client depends on: the connecting task hands a
---       session over and may be aborted immediately after, and its
---       cleanup must still see that the handover happened, or it frees
---       a session the receiver owns.
+--    1. One call is the whole record. After Record_Taken returns
+--       there is nothing left for the caller to do, so a caller
+--       aborted at any later point cannot leave the record half made.
+--       This is what the client depends on -- the connecting task
+--       hands a session over and may be aborted immediately after,
+--       and its cleanup must still see that the handover happened.
+--
+--       Note what this does NOT show: that an abort arriving DURING
+--       the call cannot lose the record. See the note below Property
+--       4 -- that window could not be reached from a test.
 --
 --    2. A caller that is aborted and never reaches the call records
 --       nothing. The complement of 1, and what stops "always true"
@@ -135,6 +140,33 @@ begin
       end if;
    end;
 
+   --  There is no property here for the abort BOUNDARY, and that is
+   --  a finding rather than an omission.
+   --
+   --  The dangerous shape is a record completed by the caller after
+   --  the call returns, where a pending abort lands between the two.
+   --  Reaching that window from a test needs the abort to arrive in
+   --  the couple of instructions between the protected action ending
+   --  and the next statement. It was attempted -- an asynchronous
+   --  select whose trigger fires while the victim is in the abortable
+   --  part, over 200 rounds, counting how many were conclusive and
+   --  how many had the abort arrive in time to cut the follow-up.
+   --  Conclusive rounds were plentiful, around thirty per run. Rounds
+   --  with the abort inside the window: zero, every run.
+   --
+   --  So that probe could not distinguish a correct implementation
+   --  from a caller-side one, and it was removed rather than left to
+   --  look like coverage. What caught the backed-out version was the
+   --  test simply not making the second call -- which detects a
+   --  changed protocol, not a lost race.
+   --
+   --  The placement of the record inside the protected action, and of
+   --  the Publish call inside the Start rendezvous, therefore rests
+   --  on the structural argument: abort is deferred inside a
+   --  protected action, so there is no interval. Same standing as the
+   --  Send_Guard flag shape, which was likewise falsified out of tree
+   --  rather than pinned by the suite.
+
    ---------------------------------------------------------------
    --  Property 2: a caller that never reaches the call records
    --  nothing.
@@ -142,15 +174,30 @@ begin
    declare
       Rec : aliased H.Handoff;
 
-      task Idler is
-         entry Go;
-      end Idler;
+      --  A barrier nothing opens. The idler parks on it and is
+      --  aborted there, so it never reaches the call below -- which
+      --  is the state this property is about. Expressed as a barrier
+      --  rather than an un-accepted task entry so there is no
+      --  entry sitting in the source that is deliberately never
+      --  called.
+      protected Never is
+         entry Wait;
+      private
+         Lit : Boolean := False;
+      end Never;
+
+      protected body Never is
+         entry Wait when Lit is
+         begin
+            null;
+         end Wait;
+      end Never;
+
+      task Idler;
 
       task body Idler is
       begin
-         --  Never accepted: this task is aborted while queued, so it
-         --  cannot reach the Record_Taken below.
-         accept Go;
+         Never.Wait;
          Rec.Record_Taken (3);
       exception
          when others => null;
@@ -218,17 +265,37 @@ begin
       Movers : constant := 16;
       Rec    : aliased H.Handoff;
 
-      task type Mover is
-         entry Go (G : Positive);
-      end Mover;
+      --  Each mover pulls its own generation instead of being told
+      --  it through an entry. That removes the only synchronisation
+      --  this property does not need -- the point is concurrent
+      --  recording, not ordered starting.
+      protected Dispenser is
+         procedure Next (G : out Natural);
+      private
+         N : Natural := 0;
+      end Dispenser;
+
+      protected body Dispenser is
+         procedure Next (G : out Natural) is
+         begin
+            if N < Movers then
+               N := N + 1;
+               G := N;
+            else
+               G := 0;
+            end if;
+         end Next;
+      end Dispenser;
+
+      task type Mover;
 
       task body Mover is
-         Mine : Positive := 1;
+         Mine : Natural;
       begin
-         accept Go (G : Positive) do
-            Mine := G;
-         end Go;
-         Rec.Record_Taken (Mine);
+         Dispenser.Next (Mine);
+         if Mine > 0 then
+            Rec.Record_Taken (Mine);
+         end if;
       exception
          when others => null;
       end Mover;
@@ -243,10 +310,6 @@ begin
       All_Done_Ref : constant access function return Boolean :=
         All_Done'Unrestricted_Access;
    begin
-      for I in Pool'Range loop
-         Pool (I).Go (I);
-      end loop;
-
       if not Await (10.0, All_Done_Ref) then
          Fail ("concurrent: only" & Natural'Image (Rec.Records) & " of"
                & Natural'Image (Movers)
