@@ -7,7 +7,7 @@
 --  where hand-written cleanup fails and controlled finalization has
 --  to carry the invariant instead.
 --
---  Five cases, in the order they run. How firmly each lands on the
+--  Four cases, in the order they run. How firmly each lands on the
 --  state it means to test differs, so that is stated per case rather
 --  than claimed uniformly.
 --
@@ -27,19 +27,10 @@
 --       and can never be connected again. Timing-based, but the
 --       fixture is silent for far longer than the delay.
 --
---    3. Sweep an abort across the whole connect, so some samples land
---       on the Start rendezvous itself. That is where the session
---       changes hands, and where an abort that lost the handoff
---       record would make the attempt's cleanup free a session the
---       receiver now owns. The window is a few instructions wide and
---       cannot be hit on demand from the public API, so this SAMPLES
---       it rather than pinning it: it calibrates the handshake first,
---       sweeps the abort deadline across that span, and round-trips a
---       message on every connection that survived, since a freed
---       session shows up when the receiver next touches it. A
---       deterministic version needs a second generation to keep the
---       receiver busy so Start actually queues, which only becomes
---       possible once repeated connects exist.
+--    The handover record used to be sampled here, by sweeping an
+--    abort across a calibrated handshake. It is now its own type
+--    and pinned deterministically by test_ws_handoff; see the note
+--    where that case stood.
 --
 --    4. Abort senders around Send_Guard. The guard is a plain busy
 --       latch, so a task torn out while holding it would leave it
@@ -522,140 +513,21 @@ begin
       end;
    end;
 
-   --  Case 3: sweep an abort across the connect, to sample the Start
-   --  rendezvous. Any connection that survives the abort is made to
-   --  round-trip a message, because that is what forces the receiver
-   --  to touch the session it was handed: if the aborted attempt had
-   --  wrongly freed it, this is where that shows.
-   declare
-      Samples   : constant := 40;
-      Calibrate : Duration := 0.0;
-      Survived  : Natural := 0;
-      Torn      : Natural := 0;
-   begin
-      --  How long a clean handshake takes, so the sweep brackets the
-      --  handoff instead of guessing at it.
-      --
-      --  Measured as the FASTEST of several, after warming up, and not
-      --  as one cold sample. A first connect pays for page faults, the
-      --  fixture's own accept path and whatever else is cold, and comes
-      --  out several times slower than steady state -- and since every
-      --  deadline below is a multiple of this number, an inflated
-      --  reading puts the whole sweep past the point where the
-      --  connect has already finished. Nothing is torn, and the case
-      --  fails reporting that it did not bracket the handshake. That
-      --  was a real intermittent failure, about one run in six.
-      --
-      --  The minimum is the right statistic precisely because the
-      --  sweep has to reach BELOW the quickest connect it will race;
-      --  an average would be dragged up by exactly the slow samples
-      --  that caused the problem.
-      declare
-         Warm : constant := 3;
-         Runs : constant := 5;
-      begin
-         for I in 1 .. Warm loop
-            declare
-               C : AHT.Websocket.Client.Client_Type;
-            begin
-               AHT.Websocket.Client.Connect (C, Echo_URL);
-               AHT.Websocket.Client.Close (C);
-            end;
-         end loop;
-
-         for I in 1 .. Runs loop
-            declare
-               C     : AHT.Websocket.Client.Client_Type;
-               Start : constant Time := Clock;
-               Took  : Duration;
-            begin
-               AHT.Websocket.Client.Connect (C, Echo_URL);
-               Took := Clock - Start;
-               AHT.Websocket.Client.Close (C);
-               if Calibrate = 0.0 or else Took < Calibrate then
-                  Calibrate := Took;
-               end if;
-            end;
-         end loop;
-      exception
-         when E : others =>
-            Fail ("handoff-sweep: calibration Connect raised "
-                  & Ada.Exceptions.Exception_Name (E)
-                  & " (is server_ws.py running?)");
-            Calibrate := 0.0;
-      end;
-
-      if Calibrate > 0.0 then
-         for I in 1 .. Samples loop
-            declare
-               --  From a tenth of a handshake to one and a half, so
-               --  the abort lands everywhere from early in the dial to
-               --  just past the rendezvous. The span starts far below
-               --  the calibrated time on purpose: connect duration
-               --  varies run to run, and a sweep that began at half of
-               --  one reading could sit entirely above a connect that
-               --  happened to be quick.
-               Fraction : constant Float :=
-                 0.1 + 1.4 * Float (I) / Float (Samples);
-               When_To_Abort : constant Duration :=
-                 Duration (Float (Calibrate) * Fraction);
-               C   : AHT.Websocket.Client.Client_Type;
-               Msg : AHT.Websocket.Client.Message_Type;
-            begin
-               begin
-                  select
-                     delay When_To_Abort;
-                  then abort
-                     AHT.Websocket.Client.Connect (C, Echo_URL);
-                  end select;
-               exception
-                  when AHT.Websocket.Handshake_Error
-                     | AHT.Transport.Transport_Error =>
-                     null;   --  ordinary failure of a torn attempt
-                  when E : others =>
-                     Fail ("handoff-sweep: sample" & I'Image
-                           & " raised " & Ada.Exceptions.Exception_Name (E)
-                           & ": " & Ada.Exceptions.Exception_Message (E));
-               end;
-
-               if AHT.Websocket.Client.Is_Open (C) then
-                  --  Published despite the abort: the receiver owns
-                  --  this session now. Make it use it.
-                  Survived := Survived + 1;
-                  begin
-                     AHT.Websocket.Client.Send_Text (C, "handoff");
-                     AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
-                     if AHT.Bytes.To_String (Msg.Payload) /= "handoff" then
-                        Fail ("handoff-sweep: sample" & I'Image
-                              & " echoed """
-                              & AHT.Bytes.To_String (Msg.Payload) & """");
-                     end if;
-                  exception
-                     when E : others =>
-                        Fail ("handoff-sweep: sample" & I'Image
-                              & " round-trip raised "
-                              & Ada.Exceptions.Exception_Name (E) & ": "
-                              & Ada.Exceptions.Exception_Message (E));
-                  end;
-                  AHT.Websocket.Client.Close (C, Timeout => 2.0);
-               else
-                  Torn := Torn + 1;
-               end if;
-            end;
-         end loop;
-
-         --  A sweep that never tore anything, or never let anything
-         --  through, swept the wrong span and is not sampling the
-         --  handoff at all.
-         if Survived = 0 or else Torn = 0 then
-            Fail ("handoff-sweep:" & Survived'Image & " survived,"
-                  & Torn'Image & " torn — the sweep did not bracket"
-                  & " the handshake, so it never approached the"
-                  & " rendezvous (calibration"
-                  & Duration'Image (Calibrate) & "s)");
-         end if;
-      end if;
-   end;
+   --  Case 3 is gone, and deliberately not replaced here.
+   --
+   --  It swept an abort across a calibrated handshake, hoping some
+   --  samples would land on the Start rendezvous. That could not be
+   --  made to work: the window is a few instructions wide, the span
+   --  had to bracket a duration that varies several-fold under load,
+   --  and it failed in both directions -- runs where every sample was
+   --  torn and runs where none was. Three attempts at re-tuning it
+   --  changed which direction it failed in and nothing else.
+   --
+   --  What it was reaching for is the handover record, which is now
+   --  its own type and driven directly by test_ws_handoff: no
+   --  fixture, no timing, and the record's survival of its maker's
+   --  abort is asserted rather than sampled. Same move as
+   --  Send_Guards, and for the same reason.
 
    --  Case 4: abort a sender parked inside Send_Guard.
    --
@@ -942,7 +814,7 @@ begin
 
    if Failures = 0 then
       Put_Line ("test_ws_abort: OK (teardown winner, connect attempt,"
-                & " handoff sweep, senders around the guard and"
+                & " senders around the guard and"
                 & " admission all survive being aborted)");
       Ada.Command_Line.Set_Exit_Status (0);
    else

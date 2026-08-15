@@ -451,12 +451,15 @@ package body AHT.Websocket.Client is
          Admitting     := True;
          Forced        := False;
          Done          := False;
-         Handed_Off_Gen := S.Generation;
+         --  Inside this protected action, and inside the accept
+         --  body that calls it, so the record cannot be lost to an
+         --  abort of the connecting task. See AHT.Websocket.Handoffs.
+         Handed_Off.Record_Taken (S.Generation);
          St            := Open;
       end Publish;
 
       function Attempt_Handed_Off (Gen : Positive) return Boolean is
-        (Handed_Off_Gen >= Gen);
+        (Handed_Off.Taken (Gen));
 
       procedure Acquire (S : out Session_Access; OK : out Boolean) is
       begin

@@ -8,6 +8,7 @@ with AHT.HTTP.Headers;
 with AHT.Transport;
 with AHT.Transport.TCP;
 with AHT.Transport.TLS;
+with AHT.Websocket.Handoffs;
 with AHT.Websocket.Send_Guards;
 
 package AHT.Websocket.Client is
@@ -562,7 +563,10 @@ private
       Done          : Boolean := True;    --  no generation in flight
       Forced        : Boolean := False;
       --  Highest generation ever published; never reset.
-      Handed_Off_Gen : Natural := 0;
+      --  The handover record, in its own protected type so its
+      --  abort-safety argument is exercised directly by
+      --  test_ws_handoff rather than only through a client.
+      Handed_Off     : AHT.Websocket.Handoffs.Handoff;
       CBs           : Callbacks;
       Proto         : Ada.Strings.Unbounded.Unbounded_String;
       --  What the NEXT session is built from.

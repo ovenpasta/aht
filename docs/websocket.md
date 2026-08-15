@@ -791,7 +791,7 @@ caller-initiated closes should not retry by default.
 
 ## Tests
 
-The WebSocket layer is covered by twenty-two test mains. `test_ws_send_guard`
+The WebSocket layer is covered by twenty-three test mains. `test_ws_send_guard`
 runs **first** by construction: what it checks shows up everywhere else
 as a hang, so nothing may sit ahead of it that could hang and stop it
 running at all.
@@ -808,6 +808,7 @@ running at all.
 | `test_ws_ping` | ping / pong echo | `server_ws.py` |
 | `test_ws_send_closed` | sending on a closed connection | `server_ws.py` |
 | `test_ws_limits` | ceilings and delivery modes; the decisive case is a huge-length header with no body, where a post-hoc check would hang instead of rejecting | `server_ws_hostile.py`, `server_ws.py` |
+| `test_ws_handoff` | the handover record's own protocol: survives its maker's abort, monotone, no lost concurrent update | none (in-process) |
 | `test_ws_reconnect` | reconnect after receiver teardown, failed upgrade, dial failure, across transport kinds; saved-parameter replay; reentrancy refusal | `server_ws.py`, `server_ws_tls.py`, `server_ws_hostile.py`, `server.py` |
 | `test_ws_reconnect_fragment` | no reassembly state survives a generation boundary | `server_ws_hostile.py`, `server_ws.py` |
 | `test_ws_reconnect_isolation` | what must and must not cross the boundary: parked `Receive`, unread backlog, callbacks, no `On_Error` | `server_ws.py`, `server_ws_hostile.py` |
@@ -841,14 +842,20 @@ confirming it fails differently. A test whose premise is established
 by a delay rather than an observed fact can pass while checking
 nothing, which several of these did before they were corrected.
 
-**One test does not meet that standard, and should not be read as if
-it did.** `test_ws_abort` case 3 sweeps an abort deadline across a
-calibrated handshake duration and requires both outcomes — some
-samples torn, some surviving — to appear in one run. That is a
-statistical property of a duration which varies several-fold under
-load, so the case flakes in both directions and re-tuning the span
-only moves which direction. Making it deterministic needs a mechanism
-that holds the receiver away from the handoff on demand — a narrow
-testing hook or an extracted handoff primitive — not another timing
-window. Until then it is a sampler, and the rule above describes where
-the suite is going rather than where all of it already is.
+Every main in the table now meets that standard. The one that did not
+was `test_ws_abort`'s handoff sweep, which swept an abort deadline
+across a calibrated handshake and needed both outcomes — some samples
+torn, some surviving — in one run. That is a statistical property of a
+duration varying several-fold under load, so it flaked in both
+directions, and re-tuning the span only moved which direction.
+
+It is gone. What it was reaching for — the record that a generation's
+session changed hands — is now `AHT.Websocket.Handoffs`, a type
+production uses directly, and `test_ws_handoff` pins its protocol with
+no fixture and no timing: the record survives the abort of the task
+that made it, is monotone, and loses no concurrent update. Every wait
+there is a bounded spin on an observed counter or a task's
+`'Terminated`, never a delay.
+
+Same move as `Send_Guards`, and for the same reason — an abort-safety
+claim tested against a replica is not tested at all.

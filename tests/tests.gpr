@@ -25,6 +25,7 @@ project Tests is
    for Main use
      ("test_ws_send_guard.adb",
       "test_ws_budgets.adb",
+      "test_ws_handoff.adb",
       "test_pem.adb",
       "test_ws_masking.adb",
       "test_bytes_buffer.adb",
