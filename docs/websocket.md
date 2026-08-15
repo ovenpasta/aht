@@ -808,7 +808,7 @@ running at all.
 | `test_ws_ping` | ping / pong echo | `server_ws.py` |
 | `test_ws_send_closed` | sending on a closed connection | `server_ws.py` |
 | `test_ws_limits` | ceilings and delivery modes; the decisive case is a huge-length header with no body, where a post-hoc check would hang instead of rejecting | `server_ws_hostile.py`, `server_ws.py` |
-| `test_ws_handoff` | the handover record's own protocol: survives its maker's abort, monotone, no lost concurrent update | none (in-process) |
+| `test_ws_handoff` | the handover record's contract: one call is the whole record, monotone, calls released together all recorded | none (in-process) |
 | `test_ws_reconnect` | reconnect after receiver teardown, failed upgrade, dial failure, across transport kinds; saved-parameter replay; reentrancy refusal | `server_ws.py`, `server_ws_tls.py`, `server_ws_hostile.py`, `server.py` |
 | `test_ws_reconnect_fragment` | no reassembly state survives a generation boundary | `server_ws_hostile.py`, `server_ws.py` |
 | `test_ws_reconnect_isolation` | what must and must not cross the boundary: parked `Receive`, unread backlog, callbacks, no `On_Error` | `server_ws.py`, `server_ws_hostile.py` |
@@ -852,10 +852,13 @@ directions, and re-tuning the span only moved which direction.
 It is gone. What it was reaching for — the record that a generation's
 session changed hands — is now `AHT.Websocket.Handoffs`, a type
 production uses directly, and `test_ws_handoff` pins its *contract*
-with no fixture and no timing: one call is the whole record, a caller
-that never reaches the call records nothing, the record is monotone,
-and concurrent recorders lose no update. Every wait there is a bounded
-spin on an observed counter or a task's `'Terminated`, never a delay.
+with no fixture and no timing-based coordination: one call is the
+whole record, a caller that never reaches the call records nothing,
+the record is monotone, and calls released together are all recorded. Every wait there is for an observed fact —
+a counter the type maintains, or a task's `'Terminated`. Timing
+remains only as the liveness backstop: the polls sleep between
+attempts and give up after a bound, so a broken build reports instead
+of hanging.
 
 **What that does not cover, stated plainly:** an abort arriving
 *during* the call. Reaching that window needs the abort to land in the

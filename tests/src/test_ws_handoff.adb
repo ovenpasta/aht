@@ -12,9 +12,14 @@
 --  are the production types, not a replica: AHT.Websocket.Handoffs is
 --  what Lifecycle_Controller records handovers in.
 --
---  Every wait here is on an OBSERVED FACT -- a counter the protected
---  type maintains, or a task's 'Terminated -- polled under a bound.
---  Nothing sleeps in the hope that something has happened by now.
+--  No timing-based COORDINATION and no timing-based PREMISE: every
+--  wait is for an observed fact -- a counter the protected type
+--  maintains, or a task's 'Terminated -- and no property is
+--  established by having let enough time pass. Timing is still
+--  present, as the liveness backstop: the polls sleep between
+--  attempts and give up after a bound, so a broken build reports
+--  instead of hanging. That bound is never the thing being waited
+--  for.
 --
 --  Fixture-free: no socket, no server, nothing to be running.
 --
@@ -28,8 +33,8 @@
 --       and its cleanup must still see that the handover happened.
 --
 --       Note what this does NOT show: that an abort arriving DURING
---       the call cannot lose the record. See the note below Property
---       4 -- that window could not be reached from a test.
+--       the call cannot lose the record. See the note just above
+--       Property 2 -- that window could not be reached from a test.
 --
 --    2. A caller that is aborted and never reaches the call records
 --       nothing. The complement of 1, and what stops "always true"
@@ -39,9 +44,20 @@
 --       after later attempts have published, so an earlier
 --       generation's answer must not be overwritten by a higher one.
 --
---    4. Concurrent recorders all land. The controller is reached from
---       several tasks and the record is a shared counter; this checks
---       the obvious lost-update.
+--    4. Calls released together are all recorded. The movers take
+--       their generations, park on a gate, and are let go at once, so
+--       the calls genuinely overlap rather than happening to run one
+--       after another.
+--
+--       Be clear about what this can and cannot show. A lost update
+--       is not constructible here: Record_Taken is a protected
+--       procedure, so mutual exclusion is a language guarantee and
+--       there is no version of the type that races with itself.
+--       What the property does guard is the state staying INSIDE the
+--       protected object and per-instance -- moving it to package
+--       level was tried, and is caught, though by Property 2 seeing
+--       one Handoff's record leak into another's rather than by
+--       anything here.
 
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
@@ -128,10 +144,13 @@ begin
       end if;
 
       if not Rec.Taken (7) then
-         Fail ("survives-abort: generation 7 is not recorded after the "
-               & "task that recorded it was aborted — the record was "
-               & "completed by the caller rather than inside the "
-               & "protected action");
+         --  Reports the observation and stops there. This test
+         --  cannot tell a caller-side record from a lost one -- see
+         --  the note above Property 2 -- so naming a cause here would
+         --  be a diagnosis the evidence does not support.
+         Fail ("survives-abort: Record_Taken returned but generation 7 "
+               & "is not recorded, so one call is not the whole "
+               & "record");
       end if;
 
       if Rec.Taken (8) then
@@ -287,12 +306,48 @@ begin
          end Next;
       end Dispenser;
 
+      --  A release gate, so the movers are all ready and then all
+      --  run. Without it each task could take its number and record
+      --  it before the next has even activated, and the property
+      --  would be "sixteen calls happened" rather than "sixteen calls
+      --  contended".
+      protected Gate is
+         entry Wait;
+         procedure Open;
+         procedure Arrive;
+         function  Ready return Natural;
+      private
+         Lit     : Boolean := False;
+         Arrived : Natural := 0;
+      end Gate;
+
+      protected body Gate is
+         entry Wait when Lit is
+         begin
+            null;
+         end Wait;
+         procedure Open is
+         begin
+            Lit := True;
+         end Open;
+         procedure Arrive is
+         begin
+            Arrived := Arrived + 1;
+         end Arrive;
+         function Ready return Natural is (Arrived);
+      end Gate;
+
       task type Mover;
 
       task body Mover is
          Mine : Natural;
       begin
          Dispenser.Next (Mine);
+         --  Announce, then block. The main task waits for every mover
+         --  to be here before opening, so the calls are released
+         --  together.
+         Gate.Arrive;
+         Gate.Wait;
          if Mine > 0 then
             Rec.Record_Taken (Mine);
          end if;
@@ -309,11 +364,24 @@ begin
 
       All_Done_Ref : constant access function return Boolean :=
         All_Done'Unrestricted_Access;
+      function All_Ready return Boolean is (Gate.Ready = Movers);
+      All_Ready_Ref : constant access function return Boolean :=
+        All_Ready'Unrestricted_Access;
    begin
+      --  Waited for as a fact, not slept for: every mover has taken
+      --  its number and is parked on the gate.
+      if not Await (10.0, All_Ready_Ref) then
+         Fail ("concurrent: only" & Natural'Image (Gate.Ready) & " of"
+               & Natural'Image (Movers)
+               & " movers reached the gate, so the calls below were "
+               & "not released together");
+      end if;
+      Gate.Open;
+
       if not Await (10.0, All_Done_Ref) then
          Fail ("concurrent: only" & Natural'Image (Rec.Records) & " of"
                & Natural'Image (Movers)
-               & " recordings completed — an update was lost");
+               & " recordings completed");
       elsif Rec.High_Water /= Movers then
          Fail ("concurrent: High_Water ="
                & Natural'Image (Rec.High_Water) & ", expected"
@@ -329,8 +397,8 @@ begin
    end;
 
    if Failures = 0 then
-      Put_Line ("test_ws_handoff: OK (the record survives its maker's "
-                & "abort, is monotone, and loses no concurrent update)");
+      Put_Line ("test_ws_handoff: OK (one call is the whole record; "
+                & "monotone; calls released together all recorded)");
       Ada.Command_Line.Set_Exit_Status (0);
    else
       Put_Line ("test_ws_handoff:" & Failures'Image & " failure(s)");
