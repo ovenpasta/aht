@@ -791,7 +791,7 @@ caller-initiated closes should not retry by default.
 
 ## Tests
 
-The WebSocket layer is covered by twenty-one test mains. `test_ws_send_guard`
+The WebSocket layer is covered by twenty-two test mains. `test_ws_send_guard`
 runs **first** by construction: what it checks shows up everywhere else
 as a hang, so nothing may sit ahead of it that could hang and stop it
 running at all.
@@ -818,6 +818,7 @@ running at all.
 | `test_ws_teardown` | close paths and their bounds, including a writer stuck against a deaf peer | `server_ws_hostile.py`, `server_ws.py` |
 | `test_ws_abort` | asynchronous transfer of control across every ownership handoff | `server_ws.py`, `server_stall.py` + in-process fake |
 | `test_ws_tls` | the `wss://` sibling: verify / insecure / untrusted, round-trips over TLS | `server_ws_tls.py` |
+| `test_pem` | the envelope validator in isolation: bundle rules, plus index arithmetic for shifted and near-Positive'Last bounds | none (in-process) |
 | `test_tls_ca_pem` | in-memory trust anchors: same chain as the file, both-supplied refused, partial bundles refused, replayed by `Reconnect` | `server_tls.py`, `server_ws_tls.py`, `server_ws.py` |
 
 ### Conformance
