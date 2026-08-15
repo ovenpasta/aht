@@ -28,9 +28,31 @@ package body AHT.PEM is
       O      : Natural := 0;
       Blocks : Natural := 0;
 
+      --  Both halves are written to keep every intermediate inside
+      --  the type.
+      --
+      --  The bound is M'Length <= Len - O rather than
+      --  O + M'Length <= Len: the sum can exceed Integer'Last while
+      --  the comparison it feeds is false, so the check meant to
+      --  prevent the overrun would itself overflow.
+      --
+      --  That one is defensive and is NOT covered: reaching it needs
+      --  Len itself near Integer'Last, i.e. a genuinely
+      --  multi-gigabyte bundle, which no test here allocates. Kept
+      --  because it costs nothing and the subtraction is no harder to
+      --  read. The other two below are covered, and each fails the
+      --  suite on its own when backed out.
+      --
+      --  The slice endpoint is Data'First + (O + M'Length - 1), not
+      --  Data'First + O + M'Length - 1. Ada evaluates the latter
+      --  left-to-right, so it forms Data'Last + 1 on the way to
+      --  Data'Last -- which overflows for a bundle ending exactly at
+      --  Positive'Last. Bracketing keeps the offset arithmetic among
+      --  small numbers and adds Data'First exactly once.
       function At_Marker (M : String) return Boolean is
-        (O + M'Length <= Len
-         and then Data (Data'First + O .. Data'First + O + M'Length - 1)
+        (M'Length <= Len - O
+         and then Data (Data'First + O
+                        .. Data'First + (O + M'Length - 1))
                   = M);
 
    begin
@@ -54,6 +76,17 @@ package body AHT.PEM is
          end if;
 
          O := O + Begin_Line'Length;
+
+         --  Nothing follows the marker. Checked before the slice
+         --  below, because with O = Len the start expression
+         --  Data'First + O is itself Data'Last + 1 and overflows --
+         --  the same hazard as the endpoint above, reached by a
+         --  different route.
+         if O = Len then
+            return "certificate" & Natural'Image (Blocks + 1)
+              & " has no " & End_Line
+              & "; it is truncated or corrupt";
+         end if;
 
          --  The matching END, searched for from here rather than
          --  anywhere in the input, so a stray END before the next

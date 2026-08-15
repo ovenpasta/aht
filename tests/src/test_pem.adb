@@ -157,6 +157,29 @@ begin
       Expect_Problem ("high-bounds-whitespace", High);
    end;
 
+   --  A bundle that is EXACTLY the BEGIN marker, ending at the last
+   --  index. This is the sharpest form: the marker comparison's slice
+   --  endpoint is Data'First + O + M'Length - 1, evaluated
+   --  left-to-right, so the intermediate sum reaches Positive'Last + 1
+   --  before the - 1 brings it back. And once the marker is consumed,
+   --  the offset equals the length, so forming the tail slice's start
+   --  overflows in the same way a second time.
+   declare
+      High : constant String
+        (Positive'Last - B'Length + 1 .. Positive'Last) := B;
+   begin
+      Expect_Problem ("high-bounds-begin-only", High);
+   end;
+
+   --  The same with a leading space, so the whitespace skip runs
+   --  first and the marker is reached at a non-zero offset.
+   declare
+      High : constant String
+        (Positive'Last - B'Length .. Positive'Last) := " " & B;
+   begin
+      Expect_Problem ("high-bounds-space-then-begin", High);
+   end;
+
    --  Trailing whitespace after a valid block, ending at the last
    --  index.
    declare
