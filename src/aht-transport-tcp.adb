@@ -563,6 +563,24 @@ package body AHT.Transport.TCP is
                then AHT.Transport.Waits.Bounded (Timeout)
                else GNAT.Sockets.Forever));
 
+         --  Poison may have fired while this task was parked, and the
+         --  wake is reported differently depending on which mechanism
+         --  got there: the selector abort shows up as Aborted, and on
+         --  POSIX the socket shutdown may beat it to Completed, after
+         --  which Receive_Socket would report 0 and this would look
+         --  like an orderly EOF from the peer. It is not — the
+         --  connection was torn down under the reader by a failing
+         --  write on the other side of it.
+         --
+         --  Deciding on Connected rather than on Status settles both:
+         --  one outcome, the same on either platform, and it says the
+         --  true thing. Same field the entry guard above reads, and
+         --  read the same way.
+         if not Self.Connected then
+            Log.Debug ("read woke on a poisoned transport");
+            raise Transport_Error with "TCP read on closed transport";
+         end if;
+
          case Status is
             when Completed =>
                null;
@@ -751,17 +769,43 @@ package body AHT.Transport.TCP is
       Self.Connected := False;
       Log.Debug ("poison");
 
-      --  Shutdown (not close) the data socket. This wakes a reader parked
-      --  in Check_Selector on Self.Selector — the socket goes readable and
-      --  Receive_Socket then returns 0 (EOF) — and a parked writer with
-      --  EPIPE, all without freeing the FD or selectors. Closing the
-      --  selectors here would race that concurrent reader (GNAT forbids
-      --  Close_Selector while a task is in Check_Selector); reclamation is
-      --  left to the single-threaded Close, which the Socket /= No_Socket
-      --  guard lets run even though Connected is already False.
+      --  Shutdown (not close) the data socket, without freeing the FD or
+      --  the selectors. Closing the selectors here would race a
+      --  concurrent reader (GNAT forbids Close_Selector while a task is
+      --  in Check_Selector); reclamation is left to the single-threaded
+      --  Close, which the Socket /= No_Socket guard lets run even though
+      --  Connected is already False.
       if Self.Socket /= No_Socket then
          begin
             Shutdown_Socket (Self.Socket, Shut_Read_Write);
+         exception
+            when Socket_Error => null;
+         end;
+      end if;
+
+      --  The shutdown alone does not wake a reader parked in
+      --  Check_Selector, and used to be all this did.
+      --
+      --  On POSIX it looks like it does: shutting a socket down makes it
+      --  readable, so the parked select returns and Receive_Socket then
+      --  reports 0. Winsock does not do that — a locally initiated
+      --  shutdown changes what later calls may do and signals nothing to
+      --  a select already waiting, which only the peer's FIN does.
+      --  Measured, not inferred: a two-line C probe parks a select and
+      --  shuts the socket down under it; POSIX wakes readable with
+      --  recv=0, Windows runs to the select's own timeout.
+      --
+      --  So the wake goes through the selector instead, the same channel
+      --  Abort_Pending uses. That one is portable because GNAT gives
+      --  every selector an explicit signalling channel rather than
+      --  inferring readiness from socket state.
+      --
+      --  Only the read selector. A parked writer cannot be a bystander
+      --  here: the transport contract allows one writer, and that writer
+      --  is whoever called Poison.
+      if Self.Selector_Open then
+         begin
+            Abort_Selector (Self.Selector);
          exception
             when Socket_Error => null;
          end;

@@ -118,6 +118,30 @@ honours `Set_Read_Deadline` and stays interruptible by
 `Abort_Pending`), then a single `Receive_Socket` — `Last := 0`
 whenever the peer has closed cleanly, matching the abstract contract.
 
+A fatal `Write` **poisons** the transport rather than closing it,
+because a reader may be parked inside `Check_Selector` and `GNAT`
+forbids `Close_Selector` while it is. `Poison` marks the transport
+disconnected, shuts the socket down, and wakes the reader through
+`Abort_Selector`; reclaiming the socket and the selectors is left to
+the single-threaded `Close`.
+
+The wake goes through the selector rather than through the shutdown
+on purpose. Shutting a socket down makes it readable on POSIX, so the
+parked `select` returns and `Receive_Socket` reports 0 — but Winsock
+signals nothing to a `select` already waiting for a locally initiated
+shutdown, so on Windows that reader would sit there until its own
+deadline. The selector's signalling channel is explicit and behaves
+the same on both.
+
+A reader woken this way raises `Transport_Error`, and does **not**
+report `Last := 0`. That distinction is deliberate: the connection was
+torn down under the reader by a failing write, which is not the same
+event as the peer closing, and reporting it as EOF would tell the
+caller the wrong thing. It is also what makes the outcome one value
+rather than a race between the two wake mechanisms — the decision is
+made on the transport's own state, not on which `Selector_Status`
+happened to arrive.
+
 `Close` is idempotent: repeated calls after the first are no-ops, and
 `Socket_Error` from `Shutdown_Socket` / `Close_Socket` is swallowed
 because the connection is going away regardless. It also tears down
