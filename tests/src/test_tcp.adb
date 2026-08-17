@@ -1603,13 +1603,7 @@ begin
    --  and raises Transport_Error specifically, the transport ends
    --  disconnected, and nothing hangs.
    --
-   --  What it does NOT cover: the write selector's half of that abort.
-   --  Poison wakes a parked *writer* too, because TLS's Drop_Connection
-   --  poisons from read-side paths where the caller is not the writer —
-   --  but reaching that from here needs a poisoner that is neither of the
-   --  two tasks, which this transport-level test has no way to arrange.
-   --  The argument for that half is structural, and it is symmetric with
-   --  this one rather than independent of it.
+   --  The write selector's half of that abort is case 15b, below.
    declare
       Srv         : Deaf_Server;
       Port        : AHT.URL.Port_Number;
@@ -1659,8 +1653,17 @@ begin
                         Reader_Out := To_Unbounded_String ("timeout");
                      when AHT.Transport.Aborted_Error =>
                         Reader_Out := To_Unbounded_String ("aborted");
-                     when AHT.Transport.Transport_Error =>
-                        Reader_Out := To_Unbounded_String ("transport");
+                     when E : AHT.Transport.Transport_Error =>
+                        --  Which Transport_Error matters. "parked" is
+                        --  the wake this case exists to prove; the
+                        --  pre-park guard's wording would mean the
+                        --  reader never got there, and treating the two
+                        --  alike is how a vacuous run passes.
+                        Reader_Out := To_Unbounded_String
+                          (if Ada.Strings.Fixed.Index
+                             (Ada.Exceptions.Exception_Message (E),
+                              "poisoned while parked") > 0
+                           then "parked" else "not-parked");
                      when E : others =>
                         Reader_Out := To_Unbounded_String
                           ("exn:" & Ada.Exceptions.Exception_Name (E));
@@ -1668,6 +1671,15 @@ begin
                begin
                   --  Let the reader reach Check_Selector before the write
                   --  begins tearing the socket down.
+                  --
+                  --  A delay is not the evidence, and cannot be: nothing
+                  --  observable from out here says a task is inside a
+                  --  selector. The evidence is the message the reader
+                  --  comes back with, which only the in-park branch
+                  --  produces -- so a reader that started late and hit
+                  --  the pre-park guard reports "not-parked" and fails
+                  --  the case rather than passing it for the wrong
+                  --  reason. The delay only makes that outcome rare.
                   delay 0.2;
 
                   T.Set_Write_Deadline (0.3);
@@ -1705,8 +1717,13 @@ begin
                   --  was told. "eof" is the specific wrong answer, since
                   --  a write tearing the connection down is not the peer
                   --  closing.
-                  if Outcome = "transport" then
-                     null;  --  woken, and told the truth about why
+                  if Outcome = "parked" then
+                     null;  --  woken in the park, and told why
+                  elsif Outcome = "not-parked" then
+                     Fail ("write-vs-read: the reader raised the pre-park "
+                           & "guard's Transport_Error, so it never reached "
+                           & "Check_Selector and this run proved nothing "
+                           & "about the wake");
                   elsif Outcome = "eof" or else Outcome = "aborted" then
                      Fail ("write-vs-read: parked reader was woken by the "
                            & "poison but reported """ & Outcome & """ — Read "
@@ -1738,6 +1755,141 @@ begin
       Srv.Wait_Done (Runtime_Err);
       Check_Server_Runtime ("write-vs-read (server)", Runtime_Err);
    end;
+
+   --  Case 15b: the write selector's half of the same abort.
+   --
+   --  Poison must wake a parked WRITER too, and not because the writer
+   --  poisoned itself. TLS's Drop_Connection fires from read-side fatal
+   --  paths, so the poisoner is routinely neither of the two tasks --
+   --  which is why Poison aborts both selectors rather than only the
+   --  read one. An earlier version of this file claimed that case could
+   --  not be arranged here. It can: Poison is public, so the main task
+   --  is the third party.
+   --
+   --  A writer parks on a deaf peer with no deadline near enough to
+   --  rescue it; the main task poisons; the writer must come back
+   --  saying it was poisoned while parked.
+   --
+   --  What that pins, measured by backing each half out separately:
+   --
+   --    - The write loop's Connected check. Removing it fails this case
+   --      with "aborted" — which is incidentally the proof that the
+   --      selector abort is what wins the wake, Aborted being the
+   --      status only it produces.
+   --    - NOT Abort_Selector (Write_Selector). Removing that leaves
+   --      this case passing on both Linux and Windows-under-wine,
+   --      because shutting the socket down wakes a parked writer on
+   --      both. The read side is not like that: there Windows wakes
+   --      only through the selector, and dropping it fails case 15.
+   --
+   --  So the write-selector abort is kept without a test that fails
+   --  when it goes, and this says so rather than leaving the symmetry
+   --  to imply otherwise. It is kept because "shutdown happens to wake
+   --  writers here too" is an observation about two platforms rather
+   --  than a property Poison should rest on — and the read side is
+   --  where that exact assumption was already found to be false.
+   declare
+      Srv         : Deaf_Server;
+      Port        : AHT.URL.Port_Number;
+      Err         : Unbounded_String;
+      Runtime_Err : Unbounded_String;
+   begin
+      Srv.Get_Port (Port, Err);
+      if Length (Err) > 0 then
+         Fail ("poison-vs-write: server setup — " & To_String (Err));
+         Srv.Release;
+      else
+         declare
+            T          : AHT.Transport.TCP.TCP_Transport;
+            Big        : Byte_Array_Access :=
+              new AHT.Bytes.Byte_Array'(1 .. Big_Write_Len => 66);
+            Writer_Out : Unbounded_String;
+         begin
+            begin
+               T.Connect ("127.0.0.1", Port);
+            exception
+               when E : others =>
+                  Fail ("poison-vs-write: Connect — "
+                        & Ada.Exceptions.Exception_Message (E));
+            end;
+
+            if T.Is_Connected then
+               --  Backstop only. Poison should return this write long
+               --  before here; falling through to it means the writer
+               --  was never woken, which is the regression.
+               T.Set_Write_Deadline (10.0);
+
+               declare
+                  task Writer;
+                  task body Writer is
+                  begin
+                     T.Write (Big.all);
+                     Writer_Out := To_Unbounded_String ("returned");
+                  exception
+                     when AHT.Transport.Timeout_Error =>
+                        Writer_Out := To_Unbounded_String ("timeout");
+                     when AHT.Transport.Aborted_Error =>
+                        Writer_Out := To_Unbounded_String ("aborted");
+                     when E : AHT.Transport.Transport_Error =>
+                        Writer_Out := To_Unbounded_String
+                          (if Ada.Strings.Fixed.Index
+                             (Ada.Exceptions.Exception_Message (E),
+                              "poisoned while parked") > 0
+                           then "parked" else "not-parked");
+                     when E : others =>
+                        Writer_Out := To_Unbounded_String
+                          ("exn:" & Ada.Exceptions.Exception_Name (E));
+                  end Writer;
+               begin
+                  --  Same standing as case 15's delay: it makes the
+                  --  writer likely to be parked, and proves nothing.
+                  --  The proof is the message it comes back with.
+                  delay 0.5;
+                  T.Poison;
+                  --  Leaving this block joins Writer. If the poison did
+                  --  not wake it, the wait is bounded by the 10 s write
+                  --  deadline above rather than being forever.
+               end;
+
+               declare
+                  Outcome : constant String := To_String (Writer_Out);
+               begin
+                  if Outcome = "parked" then
+                     null;  --  the point: a third party woke the writer
+                  elsif Outcome = "not-parked" then
+                     Fail ("poison-vs-write: the writer raised the "
+                           & "pre-park guard's Transport_Error, so it "
+                           & "never reached Check_Selector and this run "
+                           & "proved nothing about the wake");
+                  elsif Outcome = "timeout" then
+                     Fail ("poison-vs-write: parked writer was NOT woken "
+                           & "by Poison — it fell through to its own 10 s "
+                           & "backstop deadline, so Poison left the write "
+                           & "selector alone");
+                  elsif Outcome = "returned" then
+                     Fail ("poison-vs-write: the write completed against a "
+                           & "peer that never reads, so no writer was ever "
+                           & "parked — this case proved nothing");
+                  else
+                     Fail ("poison-vs-write: writer raised " & Outcome);
+                  end if;
+               end;
+
+               if T.Is_Connected then
+                  Fail ("poison-vs-write: transport still connected after "
+                        & "Poison");
+               end if;
+            end if;
+
+            Srv.Release;
+            Close_Quietly (T);
+            Free (Big);
+         end;
+      end if;
+      Srv.Wait_Done (Runtime_Err);
+      Check_Server_Runtime ("poison-vs-write (server)", Runtime_Err);
+   end;
+
 
    --  Case 16: a transport is single-use (Codex slice-1 F-E / F-F). A
    --  transport poisoned by a write failure still owns its fd/selectors

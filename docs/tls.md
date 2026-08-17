@@ -29,10 +29,16 @@ gpr externals do not reach action environments.
 Every build combination gets its own output tree
 (`obj/<mode>-<backend>`, `lib/<mode>-<backend>`, test/example `bin/`
 dirs likewise), so switching never clobbers artifacts. `AHT_OS=windows`
-appends `-windows` to that variant, and gets its own mbedTLS tree
-(`third_party/mbedtls-2.28.9-windows`) because mbedTLS builds in-tree
-and the two targets are not configured alike. POSIX keeps the
-unsuffixed names in both places, so existing checkouts are undisturbed.
+appends the cross toolchain's **target triplet** to that variant
+(`obj/debug-mbedtls-x86_64-w64-mingw32`) and gets its own mbedTLS tree
+(`third_party/mbedtls-2.28.9-x86_64-w64-mingw32`), because mbedTLS
+builds in-tree and the targets are not configured alike. The triplet
+rather than the word "windows": an i686 and an x86-64 mingw build are
+as incompatible as a Linux one, and a shared directory would let each
+overwrite the other. `AHT_CROSS_TARGET` selects it, and
+`scripts/fetch_mbedtls.sh` checks it against the compiler's own
+`-dumpmachine`. POSIX keeps the unsuffixed names, so existing
+checkouts are undisturbed.
 
 mbedtls is the backend for `AHT_OS=windows`: the openssl backend wants
 a system OpenSSL 3, and the vendored tree is what makes a cross build
@@ -170,8 +176,9 @@ POSIX enables `MBEDTLS_THREADING_C` and `MBEDTLS_THREADING_PTHREAD`.
 
 **Windows is built threadless**, because mbedTLS 2.28 offers pthread
 or a caller-supplied `THREADING_ALT` and nothing else. That is sound
-rather than convenient: every mutex the library would take is
-unreachable from this client.
+rather than convenient — but not because the mutexes are all
+unreachable. Some are; the rest guard state that only ever has one
+task in it, for reasons this client enforces itself.
 
 | Mutex in 2.28 | Why it cannot matter here |
 |---|---|
@@ -188,16 +195,31 @@ The argument holds only while `MBEDTLS_USE_PSA_CRYPTO` is off: PSA in
 fetch script checks that macro and fails the build if it is ever
 enabled, for both targets.
 
-The RSA row deserves its own sentence, because the obvious reading of
-it is wrong. `mbedtls_rsa_private` is not the only holder of that
-mutex: `mbedtls_rsa_public` takes it too, and certificate verification
-goes straight through `mbedtls_rsa_public`. So "this client has no
-private key" is true and beside the point. What carries it is that the
-RSA context is reached through the session's own `mbedtls_x509_crt`
-chain, which lives in `Backend_State`, and that every `mbedtls_ssl_*`
-call for a session is already serialized under `SSL_Lock`. Two tasks
-never enter one context, so there is nothing for the mutex to
-serialize that is not serialized a level up.
+The RSA row needs spelling out, because two plausible readings of it
+are both wrong.
+
+"This client has no private key" is true and beside the point:
+`mbedtls_rsa_private` is not the only holder of that mutex,
+`mbedtls_rsa_public` takes it too, and certificate verification goes
+straight through `mbedtls_rsa_public`.
+
+"Every engine call is serialized under `SSL_Lock`" is also not it. The
+handshake — which is exactly when certificates are verified — runs
+*unlocked*, deliberately: see the pump in the mbedtls backend, which
+says so in as many words. It can, because at that point the session is
+single-tasked and not yet published, so there is no second task to
+exclude.
+
+The argument that does hold has three parts, and needs all three:
+
+1. Every context is per session, the CA chain and peer certificate
+   included — they hang off `Backend_State`, not off anything shared.
+2. Handshake-time RSA use is single-tasked and the session is
+   unpublished, so no lock is needed and none is taken.
+3. Once the session *is* published and a second task can reach it,
+   every `mbedtls_ssl_*` call goes through `SSL_Lock`.
+
+Two tasks therefore never enter one RSA context, in either phase.
 
 The load-bearing row is still the first one. Making the entropy source
 or the DRBG a library-level singleton — tempting, since seeding is the

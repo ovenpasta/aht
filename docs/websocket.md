@@ -704,10 +704,20 @@ What this costs, precisely:
   explicit signalling channel rather than relying on the abort to
   interrupt anything. `Close`, the forced teardown and the reclamation
   gate all work.
-- A **caller** who aborts a task sitting inside `Send`, `Receive` or
-  `Connect` — by `abort T` or by an asynchronous `select ... then
-  abort` — will hang, because the transfer of control cannot land
-  until the socket call returns. On Linux the same code unwinds.
+- A **caller** who aborts a task sitting inside a call that is parked
+  in a socket operation — by `abort T` or by an asynchronous
+  `select ... then abort` — will hang, because the transfer of control
+  cannot land until that operation returns. On Linux the same code
+  unwinds. `Connect` is the clearest case (parked reading the upgrade
+  response), `Send` the next (parked filling a socket buffer), and
+  `Reconnect` inherits it while redialling.
+- `Receive` is **not** in that list. It waits on the session's
+  protected inbox, which the receiver task fills; the socket read
+  belongs to that task, not to the caller. A protected entry wait is
+  ordinary Ada and is abortable everywhere. The distinction is worth
+  keeping straight, because "aborting a WebSocket operation hangs on
+  Windows" is not true as a blanket statement — it depends on whether
+  the aborted task is the one holding the socket.
 
 `test_ws_abort` skips exactly the two cases that depend on it (2 and
 4) on Windows and says so in its output; the other cases abort tasks

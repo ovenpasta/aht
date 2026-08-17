@@ -403,10 +403,22 @@ package body AHT.Transport.TCP is
                   --  read-side fatal path rather than from here. Same
                   --  reasoning as the read loop: decide on Connected, so
                   --  the outcome does not depend on which wake arrived.
+                  --
+                  --  The message differs from the pre-park guard's on
+                  --  purpose. Both are Transport_Error and both mean the
+                  --  transport is dead, but they are different
+                  --  diagnoses -- one call arrived at a corpse, the
+                  --  other was holding a live connection that was torn
+                  --  down underneath it -- and only the wording tells
+                  --  them apart afterwards. test_tcp requires this one
+                  --  specifically, which is what stops a test that
+                  --  never actually parked from passing as though it
+                  --  had.
                   if not Self.Connected then
                      Log.Debug ("write woke on a poisoned transport");
                      raise Transport_Error
-                       with "TCP write on closed transport";
+                       with "TCP write: connection was poisoned while "
+                            & "parked";
                   end if;
 
                   case Status is
@@ -587,9 +599,18 @@ package body AHT.Transport.TCP is
          --  one outcome, the same on either platform, and it says the
          --  true thing. Same field the entry guard above reads, and
          --  read the same way.
+         --
+         --  Distinct message from that entry guard, and load-bearing:
+         --  "the transport was already dead when you called" and "it
+         --  died while you were parked in it" are different diagnoses,
+         --  and without different wording a test cannot tell which one
+         --  it provoked. test_tcp requires this one, so a run where the
+         --  reader never reached the park cannot pass by taking the
+         --  entry guard instead.
          if not Self.Connected then
             Log.Debug ("read woke on a poisoned transport");
-            raise Transport_Error with "TCP read on closed transport";
+            raise Transport_Error
+              with "TCP read: connection was poisoned while parked";
          end if;
 
          case Status is

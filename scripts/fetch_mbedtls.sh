@@ -203,7 +203,16 @@ stamp_line() {
 # the stamp says the header has not moved since the archives were
 # built, and this says the header means what the build assumed.
 check_config() {
-    probe=${THIRD}/.aht-config-probe.c
+    # mktemp, not a fixed name. Two invocations for different targets
+    # run concurrently often enough -- a posix and a windows build in
+    # parallel is the obvious case -- and a shared probe path means
+    # each compiler reads the other target's assertions. The failures
+    # look like a genuinely misconfigured tree, which is the worst way
+    # for a race to present.
+    #
+    # No .c suffix, because mktemp templates must end in the X's; -x c
+    # tells the compiler what it is looking at instead.
+    probe=$(mktemp "${THIRD}/.aht-config-probe.XXXXXX")
     cat > "$probe" <<'EOF'
 #include <mbedtls/ssl.h>
 #if defined(MBEDTLS_USE_PSA_CRYPTO)
@@ -226,7 +235,7 @@ EOF
 EOF
             ;;
     esac
-    if ! "$CC" -I"${DEST}/include" -fsyntax-only "$probe" 2>&1; then
+    if ! "$CC" -x c -I"${DEST}/include" -fsyntax-only "$probe" 2>&1; then
         rm -f "$probe"
         echo "fetch_mbedtls: FATAL — mbedTLS configuration check failed" \
              "for $DEST" >&2
@@ -293,10 +302,13 @@ fi
 # contains mbedtls-<version>/ -- extracting straight into third_party/
 # while building for windows would land on top of the posix tree and
 # then move it away, destroying a build this invocation never touched.
+#
+# mktemp -d for the same reason the probe uses mktemp: the name has to
+# be unique per invocation, not merely per target. Two windows
+# triplets, or two runs of the same target, would otherwise share it
+# and unpack into each other.
 echo "==> fetch_mbedtls: extracting ($TARGET, $MACHINE)"
-STAGE=${THIRD}/.unpack-${TARGET}
-rm -rf "$STAGE"
-mkdir -p "$STAGE"
+STAGE=$(mktemp -d "${THIRD}/.unpack.XXXXXX")
 tar xzf "$ARCHIVE" -C "$STAGE"
 mv "${STAGE}/mbedtls-${VERSION}" "$DEST"
 rmdir "$STAGE"

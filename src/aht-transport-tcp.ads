@@ -146,7 +146,10 @@ package AHT.Transport.TCP is
    --  mechanism, so the outcome is decided on `Is_Connected` rather than
    --  on which `Selector_Status` won, and it says the true thing: the
    --  connection was torn down underneath the operation, which is
-   --  neither a caller-requested abort nor the peer closing.
+   --  neither a caller-requested abort nor the peer closing. Its message
+   --  says "poisoned while parked", distinct from the message a call
+   --  that arrives after the fact gets — a difference the tests rely on
+   --  to tell a real wake from never having parked.
    --
    --  A poisoned transport is single-use: it cannot be reconnected in place
    --  (`Connect` rejects it — see above). `Close` it and use a fresh object.

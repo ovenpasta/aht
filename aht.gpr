@@ -35,8 +35,11 @@ library project Aht is
    type OS_Kind is ("posix", "windows");
    OS : OS_Kind := external ("AHT_OS", "posix");
 
-   --  AHT_OS=windows selects the Windows body of AHT.Random.Source
-   --  and nothing else; Windows is not a supported configuration.
+   --  AHT_OS selects two things, and only these two: the body of
+   --  AHT.Random.Source, and -- for the mbedtls backend -- the body-less
+   --  AHT.Mbedtls.Link that carries the OS-dependent part of the link
+   --  line. It also puts the target triplet into the output paths
+   --  below. Windows is not a supported configuration.
 
    --  The cross toolchain's target triplet, used only when OS is
    --  windows. It names the object, library and vendored-mbedTLS
