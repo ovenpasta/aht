@@ -6,6 +6,10 @@ Packages:
 - `AHT.Transport.TCP` — plain TCP, used for `http://` / `ws://`.
 - `AHT.Transport.TLS` — TLS over the TCP transport, selected by the
   clients for `https://` / `wss://`.
+- `AHT.Transport.Waits` — the one piece of `Check_Selector`'s timeout
+  contract that is easy to get wrong. Supported surface, so that
+  `test_waits` can drive it directly; see the unit for why
+  `GNAT.Sockets.Forever` is a sentinel rather than a duration.
 
 ## Abstraction
 

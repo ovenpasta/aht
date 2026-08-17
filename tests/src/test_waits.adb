@@ -14,16 +14,21 @@
 --  deadline and re-parking instead of raising -- is NOT, and
 --  reverting either recheck leaves this test green.
 --
---  It is unreachable from a test rather than merely untested. That
---  branch only runs when a remaining budget exceeds Longest_Finite,
---  which on Linux is Duration'Pred (Duration'Last): no budget can be
---  larger. Reaching it would mean making the ceiling injectable, and
---  a production knob whose only purpose is to let a test shrink a
---  timeout is the same trade this project declined for the entropy
---  source. So that half rests on the structural argument -- an
---  expired chunk is not the deadline, and the code asks Clock before
---  deciding -- and is recorded as such rather than counted as
---  covered.
+--  It is deliberately not exercised, which is weaker than
+--  unreachable. That branch runs when a remaining budget exceeds
+--  Longest_Finite: on Linux that is Duration'Pred (Duration'Last) and
+--  nothing can exceed it, but on Windows the ceiling is about 49.7
+--  days, so a test that waited that long would get there. Impractical
+--  rather than impossible.
+--
+--  Getting there sooner needs machinery -- an injectable ceiling, a
+--  test-specific body, a generic -- and none of it is free: a
+--  production knob whose only purpose is letting a test shrink a
+--  timeout is the trade this project declined for the entropy source,
+--  and the alternatives mean the tested build is not the shipped one.
+--  Not worth it here, so that half rests on the structural argument:
+--  an expired chunk is not the deadline, and the code asks Clock
+--  before deciding.
 
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
@@ -78,9 +83,10 @@ begin
 
    --  That the ceiling is strictly below the sentinel is what makes
    --  the checks above non-vacuous. It holds by construction ('Pred),
-   --  so it is an assertion rather than a Fail case -- GNAT folds
-   --  this one statically, though assertions are runtime checks in
-   --  general, and the build enables them.
+   --  so it is an assertion rather than a Fail case. GNAT folds this
+   --  one statically; assertions are runtime checks in general, and
+   --  the default debug test build enables them (-gnata). Release
+   --  does not.
    pragma Assert (W.Longest_Finite < GNAT.Sockets.Forever);
 
    if Failures = 0 then

@@ -435,11 +435,11 @@ package body AHT.Transport.TCP is
                         --  Longest_Finite is served in pieces. Only
                         --  the absolute deadline decides.
                         --
-                        --  Not covered by a test, and cannot be from
-                        --  one: reaching here needs a budget above
-                        --  Longest_Finite, which on Linux is
-                        --  Duration'Pred (Duration'Last). See the note
-                        --  in test_waits.
+                        --  Deliberately not exercised by a test:
+                        --  reaching here needs a budget above
+                        --  Longest_Finite, which on Linux nothing can
+                        --  exceed and on Windows means waiting ~49.7
+                        --  days. See the note in test_waits.
                         if Has_Deadline
                           and then Clock < Deadline_At
                         then
@@ -569,7 +569,7 @@ package body AHT.Transport.TCP is
             when Expired =>
                --  As in Write: an expired chunk is only the deadline
                --  if the absolute deadline has actually arrived, and
-               --  equally unreachable from a test.
+               --  equally impractical to exercise.
                if Has_Deadline and then Clock < Deadline_At then
                   goto Continue_Read;
                end if;
