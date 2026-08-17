@@ -833,7 +833,11 @@ that is not `OK`.
 The current standing is **zero hard failures** — deliberately not
 "full conformance", since 216 cases are `UNIMPLEMENTED`
 (`permessage-deflate`, which this client does not negotiate) and five
-are `NON-STRICT`.
+or six are `NON-STRICT`. That count moves: four cases flap between
+`OK` and `NON-STRICT` from run to run, all of them the
+message-queued-then-connection-failed shape the delivery contract
+describes. The baseline says which, and why the zero is the number to
+read.
 
 Tests that assert a bound are validated by backing the corresponding
 guard out and confirming the test fails — and, where the test depends
