@@ -35,6 +35,9 @@ library project Aht is
    type OS_Kind is ("posix", "windows");
    OS : OS_Kind := external ("AHT_OS", "posix");
 
+   --  AHT_OS=windows selects the Windows body of AHT.Random.Source
+   --  and nothing else; Windows is not a supported configuration.
+
    --  Where the system OpenSSL 3 lives. /usr is right for Linux;
    --  macOS needs the Homebrew prefix (Apple ships no OpenSSL headers):
    --  AHT_OPENSSL_DIR=$(brew --prefix openssl@3)
