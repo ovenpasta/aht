@@ -8,6 +8,26 @@ with AHT.Log.Tag;
 
 package body AHT.Transport.TCP is
 
+   --  Clamp a Duration into the range Check_Selector will accept.
+   --
+   --  GNAT.Sockets.Forever is NOT Duration'Last everywhere. On Linux
+   --  it is (MAX_tv_sec is enormous), but on Windows select takes a
+   --  32-bit millisecond timeout, so Forever is 2**32/1000 -- about
+   --  49.7 days. Passing Duration'Last as "no deadline", which is what
+   --  the unbounded paths here do, is therefore in range on one target
+   --  and a Constraint_Error on the other. It was: a Windows build
+   --  raised at the Check_Selector call in Write.
+   --
+   --  Clamping rather than raising is right for both ends. Above
+   --  Forever the caller wanted "effectively never" and 49.7 days is
+   --  that; below Immediate there is no waiting to do anyway.
+   function Selector_Timeout
+     (D : Duration) return GNAT.Sockets.Selector_Duration
+   is (if D <= GNAT.Sockets.Immediate then GNAT.Sockets.Immediate
+       elsif D >= GNAT.Sockets.Forever then GNAT.Sockets.Forever
+       else GNAT.Sockets.Selector_Duration (D));
+
+
    package Log is new AHT.Log.Tag ("tcp");
 
    procedure To_SEA
@@ -391,7 +411,7 @@ package body AHT.Transport.TCP is
                      R_Socket_Set => R_Set,
                      W_Socket_Set => W_Set,
                      Status       => Status,
-                     Timeout      => Timeout);
+                     Timeout      => Selector_Timeout (Timeout));
 
                   case Status is
                      when Completed =>
@@ -536,7 +556,7 @@ package body AHT.Transport.TCP is
             R_Socket_Set => R_Set,
             W_Socket_Set => W_Set,
             Status       => Status,
-            Timeout      => Timeout);
+            Timeout      => Selector_Timeout (Timeout));
 
          case Status is
             when Completed =>
