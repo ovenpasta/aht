@@ -3,29 +3,12 @@ with Ada.Real_Time; use Ada.Real_Time;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Streams; use Ada.Streams;
 with GNAT.Sockets; use GNAT.Sockets;
+with AHT.Transport.Waits;
 
 with AHT.Log.Tag;
 
 package body AHT.Transport.TCP is
 
-   --  Clamp a Duration into the range Check_Selector will accept.
-   --
-   --  GNAT.Sockets.Forever is NOT Duration'Last everywhere. On Linux
-   --  it is (MAX_tv_sec is enormous), but on Windows select takes a
-   --  32-bit millisecond timeout, so Forever is 2**32/1000 -- about
-   --  49.7 days. Passing Duration'Last as "no deadline", which is what
-   --  the unbounded paths here do, is therefore in range on one target
-   --  and a Constraint_Error on the other. It was: a Windows build
-   --  raised at the Check_Selector call in Write.
-   --
-   --  Clamping rather than raising is right for both ends. Above
-   --  Forever the caller wanted "effectively never" and 49.7 days is
-   --  that; below Immediate there is no waiting to do anyway.
-   function Selector_Timeout
-     (D : Duration) return GNAT.Sockets.Selector_Duration
-   is (if D <= GNAT.Sockets.Immediate then GNAT.Sockets.Immediate
-       elsif D >= GNAT.Sockets.Forever then GNAT.Sockets.Forever
-       else GNAT.Sockets.Selector_Duration (D));
 
 
    package Log is new AHT.Log.Tag ("tcp");
@@ -411,7 +394,10 @@ package body AHT.Transport.TCP is
                      R_Socket_Set => R_Set,
                      W_Socket_Set => W_Set,
                      Status       => Status,
-                     Timeout      => Selector_Timeout (Timeout));
+                     Timeout      =>
+                       (if Has_Deadline
+                        then AHT.Transport.Waits.Bounded (Timeout)
+                        else GNAT.Sockets.Forever));
 
                   case Status is
                      when Completed =>
@@ -444,6 +430,15 @@ package body AHT.Transport.TCP is
                               --  would-block: re-park
                         end;
                      when Expired =>
+                        --  The chunk ran out, which is not necessarily
+                        --  the deadline: a budget longer than
+                        --  Longest_Finite is served in pieces. Only
+                        --  the absolute deadline decides.
+                        if Has_Deadline
+                          and then Clock < Deadline_At
+                        then
+                           goto Continue_Write;
+                        end if;
                         Log.Debug ("write deadline expired");
                         raise Timeout_Error with "TCP write deadline expired";
                      when Aborted =>
@@ -451,6 +446,7 @@ package body AHT.Transport.TCP is
                         raise Aborted_Error with "TCP write aborted";
                   end case;
                end;
+               <<Continue_Write>>
             end loop;
             Pos := Pos + Window;
          end;
@@ -556,12 +552,20 @@ package body AHT.Transport.TCP is
             R_Socket_Set => R_Set,
             W_Socket_Set => W_Set,
             Status       => Status,
-            Timeout      => Selector_Timeout (Timeout));
+            Timeout      =>
+              (if Has_Deadline
+               then AHT.Transport.Waits.Bounded (Timeout)
+               else GNAT.Sockets.Forever));
 
          case Status is
             when Completed =>
                null;
             when Expired =>
+               --  As in Write: an expired chunk is only the deadline
+               --  if the absolute deadline has actually arrived.
+               if Has_Deadline and then Clock < Deadline_At then
+                  goto Continue_Read;
+               end if;
                Log.Debug ("read deadline expired");
                raise Timeout_Error with "TCP read deadline expired";
             when Aborted =>
@@ -598,6 +602,7 @@ package body AHT.Transport.TCP is
                return;
             end if;
          end;
+         <<Continue_Read>>
       end loop;
    exception
       when E : Socket_Error =>
