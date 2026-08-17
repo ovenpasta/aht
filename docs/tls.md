@@ -28,7 +28,17 @@ gpr externals do not reach action environments.
 
 Every build combination gets its own output tree
 (`obj/<mode>-<backend>`, `lib/<mode>-<backend>`, test/example `bin/`
-dirs likewise), so switching never clobbers artifacts.
+dirs likewise), so switching never clobbers artifacts. `AHT_OS=windows`
+appends `-windows` to that variant, and gets its own mbedTLS tree
+(`third_party/mbedtls-2.28.9-windows`) because mbedTLS builds in-tree
+and the two targets are not configured alike. POSIX keeps the
+unsuffixed names in both places, so existing checkouts are undisturbed.
+
+mbedtls is the backend for `AHT_OS=windows`: the openssl backend wants
+a system OpenSSL 3, and the vendored tree is what makes a cross build
+self-contained. Windows is **not a supported configuration** — see
+`AHT_OS` in `aht.gpr` and the note in `CLAUDE.md` for what has been
+measured and what has not.
 
 `AHT_OPENSSL_DIR` (default `/usr`) points at the OpenSSL installation
 prefix. Linux distributions with `libssl-dev` need nothing; macOS
@@ -124,12 +134,12 @@ LibreSSL.
 ## The mbedtls engine
 
 The mbedtls backend is built the same way, and for the same reason.
-An `mbedtls_ssl_context` is **not** safe for two tasks at once:
-`MBEDTLS_THREADING_PTHREAD` protects the library's shared internals
-(the RNG and friends), not one session's state, and `mbedtls_ssl_read`
-may itself write (alerts). Since the WebSocket client runs a receiver
-task in `Read` while senders call `Write`, a blocking-BIO design would
-put two tasks inside one context.
+An `mbedtls_ssl_context` is **not** safe for two tasks at once: the
+library's own mutexes, in a build that has any, guard its shared
+internals and never one session's state, and `mbedtls_ssl_read` may
+itself write (alerts). Since the WebSocket client runs a receiver task
+in `Read` while senders call `Write`, a blocking-BIO design would put
+two tasks inside one context.
 
 So the BIO callbacks never touch the socket either: they move bytes to
 and from two in-memory queues (`Engine_IO`), making every
@@ -140,6 +150,49 @@ structure, the same `SSL_Lock` + `Drain_Lock` ordering, the same
 abort-epoch bounds as above. Network exceptions propagate natively
 from the engine's own `TCP.Read`/`TCP.Write` calls, so nothing has to
 smuggle an Ada exception across a C frame any more.
+
+### How the vendored library is configured
+
+`scripts/fetch_mbedtls.sh` builds one tree per target and writes the
+configuration into that tree's own `include/mbedtls/config.h` rather
+than passing `-D` flags. `aht.gpr` points the glue's `-I` at the same
+header, so the archive and `csrc/mbedtls/aht_mbedtls_glue.c` read
+identical bytes.
+
+That is not tidiness. `MBEDTLS_THREADING_C` adds a mutex member to
+several context structs, so a glue translation unit that disagrees
+with the archive computes a different `sizeof`, under-allocates in its
+`*_new`, and `mbedtls_*_init` writes past the block. Nothing reports
+it. Stating the macros in two files and keeping them in step by
+comment is exactly the arrangement that produces that bug.
+
+POSIX enables `MBEDTLS_THREADING_C` and `MBEDTLS_THREADING_PTHREAD`.
+
+**Windows is built threadless**, because mbedTLS 2.28 offers pthread
+or a caller-supplied `THREADING_ALT` and nothing else. That is sound
+rather than convenient: every mutex the library would take is
+unreachable from this client.
+
+| Mutex in 2.28 | Why it cannot matter here |
+|---|---|
+| `entropy.c`, `ctr_drbg.c` | Both contexts are per transport object (`Backend_State`), never shared between sessions or tasks |
+| `rsa.c` | Guards private-key operations; this client presents no certificate, so it holds no private key |
+| `ssl_cache.c`, `ssl_ticket.c`, `ssl_cookie.c` | Server-side state |
+| `hmac_drbg.c` | Unused — the RNG is CTR_DRBG |
+| `memory_buffer_alloc.c` | `MBEDTLS_MEMORY_BUFFER_ALLOC_C` is off |
+| `x509_crt.c` | The `readdir` mutex guards the POSIX branch of `mbedtls_x509_crt_parse_path`; the `_WIN32` branch uses `FindFirstFileW` with a per-call handle |
+| `platform_util.c` | The `gmtime` mutex guards the `PLATFORM_UTIL_USE_GMTIME` fallback; `_WIN32` uses the thread-safe `gmtime_s` |
+
+The argument holds only while `MBEDTLS_USE_PSA_CRYPTO` is off: PSA in
+2.28 keeps process-global state, and its threading arrived in 3.6. The
+fetch script checks that macro and fails the build if it is ever
+enabled, for both targets.
+
+The load-bearing row is the first one. Making the entropy source or
+the DRBG a library-level singleton — tempting, since seeding is the
+expensive part of connecting — would invalidate the rest silently, and
+the comment on `Backend_State` says so where someone would be about to
+do it.
 
 Two differences from the openssl engine, both from mbedTLS semantics:
 the peer's stream simply ending (`MBEDTLS_ERR_SSL_CONN_EOF`, what a

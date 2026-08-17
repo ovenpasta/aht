@@ -38,6 +38,36 @@ The runner starts the Python fixtures itself and refuses to run if any
 of them fails to come up. If it reports a port already in use, a
 fixture from an earlier run is still alive.
 
+### The Windows cross build
+
+```sh
+AHT_TLS_BACKEND=mbedtls AHT_OS=windows bash tests/run_tests.sh
+```
+
+Cross-compiles with mingw-w64 and runs the resulting `.exe` under
+wine, against the same native fixtures on the same ports — only the
+testee crosses over, so a difference is attributable to the port.
+Needs `x86_64-w64-mingw32-gnat*` and `wine`; override the toolchain
+with `AHT_CROSS_PREFIX`.
+
+**Windows is not a supported configuration** (`windows = false` in
+`alire.toml`), and this is not a substitute for running on Windows —
+wine implements the API AHT calls, not the one Windows has. It is the
+fast loop, and it has already earned its keep: it found a `Poison`
+that could not wake a reader, because Winsock does not signal a parked
+`select` on a locally initiated shutdown.
+
+One test does not pass, and cannot yet: `test_ws_abort` hangs. GNAT on
+Linux interrupts a blocking syscall with a signal, so aborting a task
+parked in `Check_Selector` unwinds it; Windows has no such mechanism,
+so the abort is deferred until the call returns on its own — never,
+for a `Forever` wait. Measured with a standalone probe, not inferred
+from the manual. The library's own teardown paths pair every abort
+with `Abort_Pending`, which wakes the selector explicitly and does not
+depend on this; a caller who instead aborts a task sitting in `Send`
+gets a hang. That is a real narrowing of the abort guarantee, and it
+is why the port is not finished.
+
 ## The testing standard
 
 This is the part that matters, and it is not the usual bar.

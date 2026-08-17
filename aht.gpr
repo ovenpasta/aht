@@ -46,10 +46,21 @@ library project Aht is
    --  Exactly one backend's sources compile: the shared spec
    --  src/aht-transport-tls.ads has one body per backend directory,
    --  alongside that backend's bindings and C glue.
+   --  The mbedtls backend has a second split inside it: AHT.Mbedtls.Link
+   --  carries the OS-dependent part of the link line, because the
+   --  vendored library is not configured the same way for every target
+   --  (see src/tls/mbedtls/os/*/aht-mbedtls-link.ads).
    Tls_Dirs := ();
    case TLS_Backend is
       when "mbedtls" =>
-         Tls_Dirs := ("src/tls/mbedtls", "csrc/mbedtls");
+         case OS is
+            when "posix" =>
+               Tls_Dirs := ("src/tls/mbedtls", "csrc/mbedtls",
+                            "src/tls/mbedtls/os/posix");
+            when "windows" =>
+               Tls_Dirs := ("src/tls/mbedtls", "csrc/mbedtls",
+                            "src/tls/mbedtls/os/windows");
+         end case;
       when "openssl" =>
          Tls_Dirs := ("src/tls/openssl", "csrc/openssl");
    end case;
@@ -99,8 +110,23 @@ library project Aht is
    --  Absolute paths: gprbuild runs the compilers from the object dir, so
    --  a project-relative path would not resolve. Aht'Project_Dir is the
    --  absolute project directory and ends with a directory separator.
-   Mbedtls_Lib_Dir := Aht'Project_Dir & "third_party/mbedtls-2.28.9/library";
-   Mbedtls_Inc_Dir := Aht'Project_Dir & "third_party/mbedtls-2.28.9/include";
+   --
+   --  One tree per target, because mbedTLS builds in-tree and its
+   --  configuration differs between the two (threading is on for
+   --  posix, absent for windows). posix keeps the unsuffixed path so
+   --  existing checkouts are undisturbed -- the same asymmetry as
+   --  Variant above. scripts/fetch_mbedtls.sh composes these same two
+   --  names from AHT_OS; they have to agree, or the build compiles
+   --  against one tree's headers and links the other tree's archives.
+   Mbedtls_Tree := "third_party/mbedtls-2.28.9";
+   case OS is
+      when "posix" =>
+         null;
+      when "windows" =>
+         Mbedtls_Tree := Mbedtls_Tree & "-windows";
+   end case;
+   Mbedtls_Lib_Dir := Aht'Project_Dir & Mbedtls_Tree & "/library";
+   Mbedtls_Inc_Dir := Aht'Project_Dir & Mbedtls_Tree & "/include";
 
    package Compiler is
       case Build_Mode is
@@ -121,17 +147,23 @@ library project Aht is
       case TLS_Backend is
          when "mbedtls" =>
             --  The C glue (csrc/mbedtls/aht_mbedtls_glue.c) needs the
-            --  mbedTLS headers, AND it must see the exact same config
-            --  macros the library was compiled with —
-            --  MBEDTLS_THREADING_C adds a mutex member to several
-            --  context structs, so a glue translation unit that omits
-            --  it computes a smaller sizeof, under-allocates in *_new,
-            --  and mbedtls_*_init then writes past the block (heap
-            --  corruption). Keep these defines in lockstep with the
-            --  CFLAGS in scripts/fetch_mbedtls.sh.
+            --  mbedTLS headers, and it must agree with the archive
+            --  about the configuration macros — MBEDTLS_THREADING_C
+            --  adds a mutex member to several context structs, so a
+            --  glue translation unit that disagrees computes a
+            --  different sizeof, under-allocates in *_new, and
+            --  mbedtls_*_init then writes past the block (heap
+            --  corruption).
+            --
+            --  Which is why there are no -D flags here. The macros
+            --  live in the tree's own include/mbedtls/config.h, edited
+            --  by scripts/fetch_mbedtls.sh before it builds; this -I
+            --  points at that same header, so the glue and the archive
+            --  read identical bytes and cannot drift. Restating the
+            --  macros here would reintroduce exactly the two-places
+            --  problem the header edit removes.
             for Default_Switches ("C") use
-              ("-O2", "-I" & Mbedtls_Inc_Dir,
-               "-DMBEDTLS_THREADING_C", "-DMBEDTLS_THREADING_PTHREAD");
+              ("-O2", "-I" & Mbedtls_Inc_Dir);
          when "openssl" =>
             for Default_Switches ("C") use
               ("-O2", "-I" & Openssl_Dir & "/include");

@@ -7,6 +7,11 @@ with System;
 
 with AHT.Mbedtls.Error;
 with AHT.Mbedtls.Glue;
+--  Withed for its pragma Linker_Options and nothing else -- the unit
+--  declares no entities, so there is nothing here to reference. It has
+--  to be in some binary's closure for the pragma to fire, and this
+--  body is the one unit every mbedTLS-using binary pulls in.
+with AHT.Mbedtls.Link;
 with AHT.Mbedtls.SSL;
 with AHT.Mbedtls.X509;
 with AHT.TLS_Sync;
@@ -23,11 +28,12 @@ with AHT.Transport.TCP;
 --  plain Ada outside the library.
 --
 --  That structure exists for concurrency. An mbedtls_ssl_context is
---  NOT safe for two tasks at once — MBEDTLS_THREADING_PTHREAD protects
---  the library's shared internals (RNG and friends), not one session's
---  state, and mbedtls_ssl_read may itself write (alerts) — yet the
---  WebSocket client runs a receiver task in Read while senders call
---  Write. So every mbedtls_ssl_* call is serialized under SSL_Lock and
+--  NOT safe for two tasks at once — the library's own mutexes, where
+--  the build has any, guard its shared internals and never one
+--  session's state — and mbedtls_ssl_read may itself write (alerts),
+--  yet the WebSocket client runs a receiver task in Read while
+--  senders call Write. So every mbedtls_ssl_* call is serialized under
+--  SSL_Lock and
 --  is non-blocking; wire output is serialized and kept in order by
 --  Drain_Lock (strict order: Drain_Lock outer, SSL_Lock inner); and a
 --  shared coordinator (AHT.TLS_Sync) arbitrates which task performs
@@ -79,6 +85,18 @@ package body AHT.Transport.TLS is
    --  Buffers, and an imported overlay object would be finalized when
    --  the callback returns, freeing storage the session still owns.
 
+   --  Every mbedTLS context this backend owns is per transport object,
+   --  including the entropy source and the DRBG. Nothing is shared
+   --  between sessions, and therefore nothing is shared between tasks
+   --  beyond what SSL_Lock already serializes.
+   --
+   --  That is worth stating because a whole build configuration rests
+   --  on it: the Windows archive is built without MBEDTLS_THREADING_C,
+   --  which is sound precisely because the mutexes it would add all
+   --  guard state this backend does not have. Making CTR_DRBG or
+   --  Entropy a library-level singleton — a tempting optimisation,
+   --  since seeding is the expensive part of connecting — would
+   --  invalidate that argument silently. See docs/tls.md.
    type Backend_State is record
       TCP      : TCP_Access;
       IO       : aliased Engine_IO;

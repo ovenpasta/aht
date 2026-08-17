@@ -41,6 +41,58 @@ export BUILD_MODE
 AHT_TLS_BACKEND=${AHT_TLS_BACKEND:-openssl}
 export AHT_TLS_BACKEND
 
+# Target OS family (posix|windows). Exported for the same two readers
+# as above; keep the default in lockstep with aht.gpr's AHT_OS.
+#
+# AHT_OS=windows cross-builds with a mingw-w64 toolchain and runs the
+# resulting .exe under wine, against these same Python fixtures on
+# these same ports. The fixtures are native either way -- only the
+# testee crosses over, which is the point: the client is what is being
+# ported, and pointing it at an unchanged server is what makes a
+# difference attributable to the port.
+#
+# This is not a substitute for running on Windows. wine implements the
+# API AHT calls, not the one Windows has; it is the fast loop, and
+# docs/tls.md says what still has to be checked on the real thing.
+AHT_OS=${AHT_OS:-posix}
+export AHT_OS
+
+case "$AHT_OS" in
+    posix)
+        VARIANT=$BUILD_MODE-$AHT_TLS_BACKEND
+        EXE=
+        LAUNCH=
+        ;;
+    windows)
+        # Must match the Variant in aht.gpr, which appends -windows
+        # only for the non-default OS.
+        VARIANT=$BUILD_MODE-$AHT_TLS_BACKEND-windows
+        EXE=.exe
+        LAUNCH=${AHT_TEST_LAUNCHER:-wine}
+        # The toolchain prefix names the cross tools; strip the
+        # trailing dash for gprbuild's --target, which wants the
+        # triplet. Keep the default in lockstep with
+        # scripts/fetch_mbedtls.sh.
+        AHT_CROSS_PREFIX=${AHT_CROSS_PREFIX-x86_64-w64-mingw32-}
+        export AHT_CROSS_PREFIX
+        CROSS_TARGET=${AHT_CROSS_PREFIX%-}
+        if ! command -v "${LAUNCH%% *}" >/dev/null 2>&1; then
+            echo "FATAL: AHT_OS=windows needs '$LAUNCH' to run the" \
+                 "cross-built binaries; set AHT_TEST_LAUNCHER or" \
+                 "install wine."
+            exit 2
+        fi
+        # wine chatters on stderr about unimplemented stubs, which
+        # would drown the tests' own output.
+        WINEDEBUG=${WINEDEBUG:--all}
+        export WINEDEBUG
+        ;;
+    *)
+        echo "FATAL: AHT_OS=$AHT_OS is not one of posix, windows"
+        exit 2
+        ;;
+esac
+
 VENV=tests/.venv
 LOG=$(mktemp -t aht-server.XXXXXX.log)
 HTTP_PID=
@@ -109,11 +161,22 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "==> building library"
-alr build
-
-echo "==> building tests"
-alr exec -- gprbuild -P tests/tests.gpr
+echo "==> building library ($VARIANT)"
+if [ "$AHT_OS" = "posix" ]; then
+    alr build
+    echo "==> building tests"
+    alr exec -- gprbuild -P tests/tests.gpr
+else
+    # Alire drives the native toolchain, so the cross build goes
+    # straight to gprbuild -- which means the pre-build action Alire
+    # would have run has to be invoked by hand. Same script, same
+    # gating on AHT_TLS_BACKEND; it picks the per-target mbedTLS tree
+    # from AHT_OS, exported above.
+    sh scripts/fetch_mbedtls.sh
+    gprbuild --target="$CROSS_TARGET" -P aht.gpr
+    echo "==> building tests"
+    gprbuild --target="$CROSS_TARGET" -P tests/tests.gpr
+fi
 
 echo "==> preparing venv (tests/.venv)"
 if [ ! -d "$VENV" ]; then
@@ -273,14 +336,15 @@ CAP="$PY tests/run_one.py $TEST_TIMEOUT"
 FAILED=0
 TOTAL=0
 for name in $NAMES; do
-    bin="tests/bin/$BUILD_MODE-$AHT_TLS_BACKEND/$name"
+    bin="tests/bin/$VARIANT/$name$EXE"
     TOTAL=$((TOTAL + 1))
     if [ ! -x "$bin" ]; then
         echo "  MISSING $name (not built)"
         FAILED=$((FAILED + 1))
         continue
     fi
-    if $CAP "$bin"; then
+    # $LAUNCH is empty for a native run and drops out of the command.
+    if $CAP $LAUNCH "$bin"; then
         :
     else
         status=$?
