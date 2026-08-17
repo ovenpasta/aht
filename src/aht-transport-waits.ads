@@ -19,6 +19,13 @@ with GNAT.Sockets;
 --    * Clamping a long but FINITE budget up to Forever turns a
 --      deadline into an infinite park, and the Expired branch that
 --      exists to notice never runs.
+--  Public, and deliberately, on the same footing as
+--  AHT.Websocket.Send_Guards and AHT.Websocket.Handoffs: test_waits
+--  drives this exact function from its own binary, and a private
+--  child would need a descendant test to do it. It is therefore
+--  supported surface, GNAT.Sockets.Selector_Duration in the profile
+--  included -- that type is already unavoidable for anyone calling
+--  Check_Selector, which is the only reason to want this.
 package AHT.Transport.Waits is
 
    --  The largest wait that is still finite. A bounded operation must
