@@ -1594,13 +1594,22 @@ begin
    --  the *same* transport must not race the reader's selector (Codex slice-1
    --  F-D). This package supports concurrent read+write on one connection, so
    --  Write's failure path must not Close_Selector while a reader is still
-   --  inside Check_Selector — it Poisons instead, shutting the socket down to
-   --  wake the reader with EOF and deferring the selector reclaim to the
+   --  inside Check_Selector — it Poisons instead, shutting the socket down,
+   --  aborting the selectors, and deferring the selector reclaim to the
    --  single-threaded Close. Here a reader parks on a deaf peer; the writer
    --  saturates the send buffer and trips its write deadline, whose handler
    --  poisons the transport. Asserts: the write fails (bounded), the parked
-   --  reader is woken by the poison (not by its own 5 s backstop deadline),
-   --  the transport ends disconnected, and nothing hangs.
+   --  reader is woken by the poison (not by its own 5 s backstop deadline)
+   --  and raises Transport_Error specifically, the transport ends
+   --  disconnected, and nothing hangs.
+   --
+   --  What it does NOT cover: the write selector's half of that abort.
+   --  Poison wakes a parked *writer* too, because TLS's Drop_Connection
+   --  poisons from read-side paths where the caller is not the writer —
+   --  but reaching that from here needs a poisoner that is neither of the
+   --  two tasks, which this transport-level test has no way to arrange.
+   --  The argument for that half is structural, and it is symmetric with
+   --  this one rather than independent of it.
    declare
       Srv         : Deaf_Server;
       Port        : AHT.URL.Port_Number;
@@ -1684,10 +1693,25 @@ begin
                declare
                   Outcome : constant String := To_String (Reader_Out);
                begin
-                  if Outcome = "eof" or else Outcome = "aborted"
-                    or else Outcome = "transport"
-                  then
-                     null;  --  poison unblocked the parked reader (the point)
+                  --  Exactly Transport_Error, not merely "something
+                  --  other than a timeout". Poison can wake this reader
+                  --  two ways -- the socket shutdown makes it readable on
+                  --  POSIX, the selector abort reports Aborted on both --
+                  --  and Read is required to collapse that into one
+                  --  answer by deciding on Is_Connected. Accepting "eof"
+                  --  or "aborted" here would let that collapse be deleted
+                  --  and still pass, which is how this check read before:
+                  --  it proved the reader woke, and nothing about what it
+                  --  was told. "eof" is the specific wrong answer, since
+                  --  a write tearing the connection down is not the peer
+                  --  closing.
+                  if Outcome = "transport" then
+                     null;  --  woken, and told the truth about why
+                  elsif Outcome = "eof" or else Outcome = "aborted" then
+                     Fail ("write-vs-read: parked reader was woken by the "
+                           & "poison but reported """ & Outcome & """ — Read "
+                           & "must decide on Is_Connected, not on which "
+                           & "wake mechanism arrived first");
                   elsif Outcome = "timeout" then
                      Fail ("write-vs-read: parked reader was NOT woken by the "
                            & "poison — it fell through to its own 5 s backstop "

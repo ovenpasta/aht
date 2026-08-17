@@ -399,6 +399,16 @@ package body AHT.Transport.TCP is
                         then AHT.Transport.Waits.Bounded (Timeout)
                         else GNAT.Sockets.Forever));
 
+                  --  Poison may have fired underneath this park, from a
+                  --  read-side fatal path rather than from here. Same
+                  --  reasoning as the read loop: decide on Connected, so
+                  --  the outcome does not depend on which wake arrived.
+                  if not Self.Connected then
+                     Log.Debug ("write woke on a poisoned transport");
+                     raise Transport_Error
+                       with "TCP write on closed transport";
+                  end if;
+
                   case Status is
                      when Completed =>
                         begin
@@ -474,7 +484,8 @@ package body AHT.Transport.TCP is
       when Transport_Error =>
          --  Peer-closed-mid-write (the zero-byte send signal) — the endpoint
          --  is gone, so always poison. (The pre-loop "closed transport"
-         --  guard also lands here; Poison is then a harmless no-op.)
+         --  guard lands here too, as does the poisoned-wake check inside
+         --  the park loop; Poison is then a harmless no-op.)
          Poison (Self);
          raise;
       when others =>
@@ -800,12 +811,21 @@ package body AHT.Transport.TCP is
       --  every selector an explicit signalling channel rather than
       --  inferring readiness from socket state.
       --
-      --  Only the read selector. A parked writer cannot be a bystander
-      --  here: the transport contract allows one writer, and that writer
-      --  is whoever called Poison.
+      --  Both selectors, as Abort_Pending does. The caller is not
+      --  necessarily the writer: TLS's Drop_Connection poisons from
+      --  read-side fatal paths as well, so a writer can be parked in
+      --  Check_Selector on the write selector at this moment and would
+      --  otherwise stay there. Aborting a selector nobody is waiting on
+      --  is harmless -- the transport is dead either way, and every
+      --  later operation is refused before it parks.
       if Self.Selector_Open then
          begin
             Abort_Selector (Self.Selector);
+         exception
+            when Socket_Error => null;
+         end;
+         begin
+            Abort_Selector (Self.Write_Selector);
          exception
             when Socket_Error => null;
          end;

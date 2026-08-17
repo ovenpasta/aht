@@ -127,16 +127,26 @@ package AHT.Transport.TCP is
 
    procedure Poison (Self : in out TCP_Transport);
    --  Mark a desynchronised/dead connection unusable after a fatal
-   --  mid-stream write, *without* freeing OS resources. Sets
-   --  `Is_Connected` False and shuts the socket down (waking a reader
-   --  parked in `Check_Selector` with EOF, and a writer with EPIPE), but
+   --  mid-stream error, *without* freeing OS resources. Sets
+   --  `Is_Connected` False, shuts the socket down, and aborts both
+   --  selectors so that anything parked in `Check_Selector` wakes; it
    --  does NOT `Close_Socket`/`Close_Selector`. Closing the selectors
    --  here would race a concurrent reader still inside `Check_Selector`
    --  (GNAT forbids `Close_Selector` while another task waits on it), so
    --  the FD/selector reclamation is deferred to the single-threaded
    --  lifecycle `Close`. Safe to call while another task is parked in
    --  `Read`/`Abort_Pending` on the same transport — this is the path the
-   --  `Write` failure handler and TLS's `Drop_Connection` take.
+   --  `Write` failure handler and TLS's `Drop_Connection` take. Note the
+   --  second one: `Drop_Connection` fires from read-side fatal paths too,
+   --  so the caller is not necessarily the writer and a writer may well
+   --  be parked at the time. Both selectors are aborted for that reason.
+   --
+   --  A `Read` or `Write` woken by this raises `Transport_Error`, not
+   --  `Aborted_Error` and not an EOF. The wake can arrive by either
+   --  mechanism, so the outcome is decided on `Is_Connected` rather than
+   --  on which `Selector_Status` won, and it says the true thing: the
+   --  connection was torn down underneath the operation, which is
+   --  neither a caller-requested abort nor the peer closing.
    --
    --  A poisoned transport is single-use: it cannot be reconnected in place
    --  (`Connect` rejects it — see above). `Close` it and use a fresh object.
@@ -159,7 +169,21 @@ private
       Deadline_At        : Ada.Real_Time.Time := Ada.Real_Time.Time_First;
       Has_Write_Deadline : Boolean := False;
       Write_Deadline_At  : Ada.Real_Time.Time := Ada.Real_Time.Time_First;
-      Connected          : Boolean := False;
+      Connected          : Boolean := False with Atomic;
+      --  Atomic because it is genuinely written by one task and read by
+      --  another: `Poison` clears it from whichever task hit the fatal
+      --  error, while a reader parked in `Check_Selector` is waiting to
+      --  see exactly that. `Read` decides what a wake means by reading
+      --  this, so it is a synchronization mechanism and has to be one an
+      --  Ada implementation is required to honour -- an ordinary Boolean
+      --  read across tasks is not.
+      --
+      --  The neighbouring flags are NOT atomic, and the difference is
+      --  real rather than an oversight. `Selector_Open`, `Used` and the
+      --  deadline fields are written only by `Connect` and `Close`, which
+      --  the lifecycle contract above already requires to be
+      --  single-threaded with respect to this object. `Connected` is the
+      --  one flag a *concurrent* operation writes.
       Used               : Boolean := False;
       --  Latched True at the first fully-successful Connect and never
       --  cleared (not even by Close). Makes the transport permanently
