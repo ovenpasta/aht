@@ -47,8 +47,11 @@ AHT_TLS_BACKEND=mbedtls AHT_OS=windows bash tests/run_tests.sh
 Cross-compiles with mingw-w64 and runs the resulting `.exe` under
 wine, against the same native fixtures on the same ports — only the
 testee crosses over, so a difference is attributable to the port.
-Needs `x86_64-w64-mingw32-gnat*` and `wine`; override the toolchain
-with `AHT_CROSS_PREFIX`.
+Needs `x86_64-w64-mingw32-gnat*` and `wine`; `AHT_CROSS_TARGET` names
+a different triplet. That one string drives `gprbuild --target`, the
+cross C toolchain, and the object/library/mbedTLS directory names, so
+two architectures cannot land in one tree — and the fetch script
+checks it against the compiler's own `-dumpmachine`.
 
 **Windows is not a supported configuration** (`windows = false` in
 `alire.toml`), and this is not a substitute for running on Windows —
@@ -57,16 +60,22 @@ fast loop, and it has already earned its keep: it found a `Poison`
 that could not wake a reader, because Winsock does not signal a parked
 `select` on a locally initiated shutdown.
 
-One test does not pass, and cannot yet: `test_ws_abort` hangs. GNAT on
-Linux interrupts a blocking syscall with a signal, so aborting a task
-parked in `Check_Selector` unwinds it; Windows has no such mechanism,
-so the abort is deferred until the call returns on its own — never,
-for a `Forever` wait. Measured with a standalone probe, not inferred
-from the manual. The library's own teardown paths pair every abort
-with `Abort_Pending`, which wakes the selector explicitly and does not
-depend on this; a caller who instead aborts a task sitting in `Send`
-gets a hang. That is a real narrowing of the abort guarantee, and it
-is why the port is not finished.
+All 55 pass, with two named skips in `test_ws_abort`. GNAT on Linux
+interrupts a blocking syscall with a signal, so aborting a task parked
+in `Check_Selector` unwinds it; Windows has no such mechanism, so the
+abort is deferred until the call returns on its own — never, for a
+`Forever` wait. Measured with a standalone probe, not inferred from
+the manual. Cases 2 and 4 aim a transfer of control at a task parked
+in a socket call and are skipped; the rest run. **Which two was found
+by running it** — case 4 was skipped first on the assumption that it
+was the only one, and the main still hung.
+
+The library's own teardown paths pair every abort with
+`Abort_Pending`, which wakes the selector explicitly and does not
+depend on this. A caller who instead aborts a task sitting in `Send`
+or `Connect` gets a hang. That is a real narrowing of the abort
+guarantee — see *Abort safety is structural* in `docs/websocket.md` —
+and it is why the port is not finished.
 
 ## The testing standard
 

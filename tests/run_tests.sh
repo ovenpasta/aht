@@ -64,18 +64,17 @@ case "$AHT_OS" in
         LAUNCH=
         ;;
     windows)
-        # Must match the Variant in aht.gpr, which appends -windows
-        # only for the non-default OS.
-        VARIANT=$BUILD_MODE-$AHT_TLS_BACKEND-windows
+        # One triplet drives gprbuild --target, the cross C toolchain
+        # in scripts/fetch_mbedtls.sh, and the directory names all
+        # three meet in. Keep the default in lockstep with aht.gpr and
+        # that script; the script checks it against the compiler's own
+        # -dumpmachine, so a mismatch is reported rather than built.
+        AHT_CROSS_TARGET=${AHT_CROSS_TARGET:-x86_64-w64-mingw32}
+        export AHT_CROSS_TARGET
+        # Must match the Variant in aht.gpr.
+        VARIANT=$BUILD_MODE-$AHT_TLS_BACKEND-$AHT_CROSS_TARGET
         EXE=.exe
         LAUNCH=${AHT_TEST_LAUNCHER:-wine}
-        # The toolchain prefix names the cross tools; strip the
-        # trailing dash for gprbuild's --target, which wants the
-        # triplet. Keep the default in lockstep with
-        # scripts/fetch_mbedtls.sh.
-        AHT_CROSS_PREFIX=${AHT_CROSS_PREFIX-x86_64-w64-mingw32-}
-        export AHT_CROSS_PREFIX
-        CROSS_TARGET=${AHT_CROSS_PREFIX%-}
         if ! command -v "${LAUNCH%% *}" >/dev/null 2>&1; then
             echo "FATAL: AHT_OS=windows needs '$LAUNCH' to run the" \
                  "cross-built binaries; set AHT_TEST_LAUNCHER or" \
@@ -173,9 +172,9 @@ else
     # gating on AHT_TLS_BACKEND; it picks the per-target mbedTLS tree
     # from AHT_OS, exported above.
     sh scripts/fetch_mbedtls.sh
-    gprbuild --target="$CROSS_TARGET" -P aht.gpr
+    gprbuild --target="$AHT_CROSS_TARGET" -P aht.gpr
     echo "==> building tests"
-    gprbuild --target="$CROSS_TARGET" -P tests/tests.gpr
+    gprbuild --target="$AHT_CROSS_TARGET" -P tests/tests.gpr
 fi
 
 echo "==> preparing venv (tests/.venv)"

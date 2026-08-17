@@ -176,7 +176,7 @@ unreachable from this client.
 | Mutex in 2.28 | Why it cannot matter here |
 |---|---|
 | `entropy.c`, `ctr_drbg.c` | Both contexts are per transport object (`Backend_State`), never shared between sessions or tasks |
-| `rsa.c` | Guards private-key operations; this client presents no certificate, so it holds no private key |
+| `rsa.c` | The context is per session and every engine call on it is serialized (see below) |
 | `ssl_cache.c`, `ssl_ticket.c`, `ssl_cookie.c` | Server-side state |
 | `hmac_drbg.c` | Unused — the RNG is CTR_DRBG |
 | `memory_buffer_alloc.c` | `MBEDTLS_MEMORY_BUFFER_ALLOC_C` is off |
@@ -188,11 +188,22 @@ The argument holds only while `MBEDTLS_USE_PSA_CRYPTO` is off: PSA in
 fetch script checks that macro and fails the build if it is ever
 enabled, for both targets.
 
-The load-bearing row is the first one. Making the entropy source or
-the DRBG a library-level singleton — tempting, since seeding is the
-expensive part of connecting — would invalidate the rest silently, and
-the comment on `Backend_State` says so where someone would be about to
-do it.
+The RSA row deserves its own sentence, because the obvious reading of
+it is wrong. `mbedtls_rsa_private` is not the only holder of that
+mutex: `mbedtls_rsa_public` takes it too, and certificate verification
+goes straight through `mbedtls_rsa_public`. So "this client has no
+private key" is true and beside the point. What carries it is that the
+RSA context is reached through the session's own `mbedtls_x509_crt`
+chain, which lives in `Backend_State`, and that every `mbedtls_ssl_*`
+call for a session is already serialized under `SSL_Lock`. Two tasks
+never enter one context, so there is nothing for the mutex to
+serialize that is not serialized a level up.
+
+The load-bearing row is still the first one. Making the entropy source
+or the DRBG a library-level singleton — tempting, since seeding is the
+expensive part of connecting — would invalidate the argument silently,
+and the comment on `Backend_State` says so where someone would be
+about to do it.
 
 Two differences from the openssl engine, both from mbedTLS semantics:
 the peer's stream simply ending (`MBEDTLS_ERR_SSL_CONN_EOF`, what a

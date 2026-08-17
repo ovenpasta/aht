@@ -11,6 +11,9 @@
 --  state it means to test differs, so that is stated per case rather
 --  than claimed uniformly.
 --
+--  Cases 2 and 4 are skipped on Windows, where an abort cannot reach
+--  a task parked in a socket call. See Abortable_Socket_Wait below.
+--
 --    1. Abort the winner of a teardown. Winning stops admission and
 --       makes that caller the only task that can wake the receiver:
 --       every later Close joins and waits. If the abort skips the
@@ -73,6 +76,17 @@ with GNAT.Sockets; use GNAT.Sockets;
 
 with GNAT.SHA1;
 
+--  System.OS_Constants is an internal GNAT unit, and GNAT says so.
+--  Used here only to ask which OS this binary targets, which no
+--  portable unit answers; the alternative is a gpr-fed external, and
+--  a build knob that decides what a test claims is worse than a
+--  target-generated constant.
+pragma Warnings (Off, "*internal GNAT unit*");
+pragma Warnings (Off, "*non-portable and version-dependent*");
+with System.OS_Constants;
+pragma Warnings (On, "*internal GNAT unit*");
+pragma Warnings (On, "*non-portable and version-dependent*");
+
 with AHT.Bytes;
 with AHT.Transport;
 with AHT.URL;
@@ -84,6 +98,31 @@ procedure Test_WS_Abort is
    Echo_URL : constant String := "ws://127.0.0.1:8765/";
 
    Failures : Natural := 0;
+
+   --  Whether `abort` can reach a task parked in a blocking socket
+   --  call. GNAT on Linux interrupts the syscall with a signal, so the
+   --  task unwinds; Windows has no equivalent, so the abort is
+   --  deferred until the call returns on its own -- never, for a
+   --  Forever wait. Measured with a standalone probe rather than read
+   --  off the platform: park a task in Check_Selector, abort it, ask
+   --  'Terminated. Linux terminates; Windows does not.
+   --
+   --  Cases 2 and 4 depend on it, and only those two are skipped.
+   --  The distinction is what the transfer of control has to travel
+   --  through, not which construct asks for it: case 2 uses an
+   --  asynchronous select and case 4 an `abort T`, and both are
+   --  aimed at a task parked inside a socket call -- Connect reading
+   --  a handshake response, a sender filling a socket buffer. Cases 1
+   --  and 5 abort tasks sitting in AHT's own protected actions and
+   --  waits, which are ordinary Ada and unwind everywhere.
+   --
+   --  Established by running it, not by reading the cases: case 4 was
+   --  skipped first on the assumption that it was the only one, and
+   --  the main still hung. Skipping the whole main instead would take
+   --  cases 1 and 5 with it, which have nothing to do with this.
+   use type System.OS_Constants.OS_Type;
+   Abortable_Socket_Wait : constant Boolean :=
+     System.OS_Constants.Target_OS /= System.OS_Constants.Windows;
 
    procedure Fail (Msg : String) is
    begin
@@ -474,44 +513,57 @@ begin
    --  holds both the client's admission and an unpublished session; if
    --  its cleanup does not run, the client is stuck in Connecting and
    --  the next Connect is refused.
-   declare
-      C : AHT.Websocket.Client.Client_Type;
-   begin
+   --  Skipped on Windows for the same reason as case 4, reached by a
+   --  different construct: this one is an asynchronous select rather
+   --  than an `abort T`, but both are asynchronous transfer of
+   --  control, and neither can reach a task sitting in a blocking
+   --  socket call. Here the aborted party is Connect, parked reading
+   --  a handshake response the stall fixture never sends.
+   if not Abortable_Socket_Wait then
+      Put_Line
+        ("test_ws_abort: SKIP connect-abort (case 2) — this target"
+         & " cannot abort a Connect parked reading the handshake"
+         & " response, so the select would never complete.");
+   else
+      declare
+         C : AHT.Websocket.Client.Client_Type;
       begin
-         select
-            delay 0.5;
-         then abort
-            AHT.Websocket.Client.Connect (C, "ws://127.0.0.1:8767/");
-         end select;
-      exception
-         when E : others =>
-            --  The attempt is supposed to still be blocked when the
-            --  abort fires. Anything else means the fixture is not
-            --  what this case assumes, so say so rather than letting
-            --  the assertion below report a misleading cause.
-            Fail ("connect-abort: the attempt ended on its own with "
-                  & Ada.Exceptions.Exception_Name (E) & ": "
-                  & Ada.Exceptions.Exception_Message (E)
-                  & " (is the stall fixture on 8767 up?)");
-      end;
+         begin
+            select
+               delay 0.5;
+            then abort
+               AHT.Websocket.Client.Connect (C, "ws://127.0.0.1:8767/");
+            end select;
+         exception
+            when E : others =>
+               --  The attempt is supposed to still be blocked when the
+               --  abort fires. Anything else means the fixture is not
+               --  what this case assumes, so say so rather than letting
+               --  the assertion below report a misleading cause.
+               Fail ("connect-abort: the attempt ended on its own with "
+                     & Ada.Exceptions.Exception_Name (E) & ": "
+                     & Ada.Exceptions.Exception_Message (E)
+                     & " (is the stall fixture on 8767 up?)");
+         end;
 
-      begin
-         AHT.Websocket.Client.Connect (C, Echo_URL);
-         if not AHT.Websocket.Client.Is_Open (C) then
-            Fail ("connect-abort: reconnect reported not open");
-         end if;
-         AHT.Websocket.Client.Close (C);
-      exception
-         when AHT.Websocket.Handshake_Error =>
-            Fail ("connect-abort: the client stayed admitted to the "
-                  & "aborted attempt — its cleanup did not run");
-         when E : others =>
-            Fail ("connect-abort: second Connect raised "
-                  & Ada.Exceptions.Exception_Name (E) & ": "
-                  & Ada.Exceptions.Exception_Message (E)
-                  & " (is server_ws.py running?)");
+         begin
+            AHT.Websocket.Client.Connect (C, Echo_URL);
+            if not AHT.Websocket.Client.Is_Open (C) then
+               Fail ("connect-abort: reconnect reported not open");
+            end if;
+            AHT.Websocket.Client.Close (C);
+         exception
+            when AHT.Websocket.Handshake_Error =>
+               Fail ("connect-abort: the client stayed admitted to the "
+                     & "aborted attempt — its cleanup did not run");
+            when E : others =>
+               Fail ("connect-abort: second Connect raised "
+                     & Ada.Exceptions.Exception_Name (E) & ": "
+                     & Ada.Exceptions.Exception_Message (E)
+                     & " (is server_ws.py running?)");
+         end;
       end;
-   end;
+   end if;
 
    --  Case 3 is gone, and deliberately not replaced here.
    --
@@ -538,159 +590,175 @@ begin
    --  probe: park a writer in Write by writing more than the socket
    --  buffers hold to a peer that has stopped reading, abort it there,
    --  then require Close to complete once the peer resumes draining.
-   declare
-      Server    : Silent_Server (Deaf_Ms => 2_000);
-      Port      : AHT.URL.Port_Number;
-      Setup_Err : Unbounded_String;
-      C         : aliased AHT.Websocket.Client.Client_Type;
-      Connected : Boolean := False;
+   --  Skipped on Windows, and only this case. See
+   --  Abortable_Socket_Wait above: the abort below has to reach a
+   --  sender parked inside a socket write, which is the one thing a
+   --  Windows abort cannot do. Left as a reported SKIP rather than a
+   --  hang, because the tasks are declared inside the block and Ada
+   --  waits for them at its exit -- an unabortable one would stall
+   --  the main here and take case 5 with it.
+   if not Abortable_Socket_Wait then
+      Put_Line
+        ("test_ws_abort: SKIP guard-abort (case 4) — this target"
+         & " cannot abort a task parked in a blocking socket call,"
+         & " so the aborted sender would never terminate. The"
+         & " Send_Guard property itself is unaffected and is driven"
+         & " directly by test_ws_send_guard.");
+   else
+      declare
+         Server    : Silent_Server (Deaf_Ms => 2_000);
+         Port      : AHT.URL.Port_Number;
+         Setup_Err : Unbounded_String;
+         C         : aliased AHT.Websocket.Client.Client_Type;
+         Connected : Boolean := False;
 
-      --  Far larger than the 4 KB receive buffer the fixture sets for
-      --  its deaf window, so the write provably cannot complete while
-      --  the peer is not reading. On the heap: 4 MB would not fit the
-      --  environment task's stack, and Storage_Error here would look
-      --  like a client bug.
-      type Bulk_Access is access AHT.Bytes.Byte_Array;
-      Bulk : constant Bulk_Access :=
-        new AHT.Bytes.Byte_Array'(1 .. 4 * 1024 * 1024 => 16#5A#);
+         --  Far larger than the 4 KB receive buffer the fixture sets for
+         --  its deaf window, so the write provably cannot complete while
+         --  the peer is not reading. On the heap: 4 MB would not fit the
+         --  environment task's stack, and Storage_Error here would look
+         --  like a client bug.
+         type Bulk_Access is access AHT.Bytes.Byte_Array;
+         Bulk : constant Bulk_Access :=
+           new AHT.Bytes.Byte_Array'(1 .. 4 * 1024 * 1024 => 16#5A#);
 
-      protected Writer_State is
-         procedure Note_Returned (Why : String);
-         function  Returned return Boolean;
-         function  Detail return String;
-      private
-         Done : Boolean := False;
-         Text : Unbounded_String;
-      end Writer_State;
+         protected Writer_State is
+            procedure Note_Returned (Why : String);
+            function  Returned return Boolean;
+            function  Detail return String;
+         private
+            Done : Boolean := False;
+            Text : Unbounded_String;
+         end Writer_State;
 
-      protected body Writer_State is
-         procedure Note_Returned (Why : String) is
+         protected body Writer_State is
+            procedure Note_Returned (Why : String) is
+            begin
+               Done := True;
+               Text := To_Unbounded_String (Why);
+            end Note_Returned;
+            function Returned return Boolean is (Done);
+            function Detail return String is (To_String (Text));
+         end Writer_State;
+
+         --  Gated on an entry: a task declared here would otherwise
+         --  activate at this block's `begin`, i.e. before Connect has
+         --  run, and its Send_Binary would raise Closed_Error at once --
+         --  which is indistinguishable from a write that completed.
+         task Bulk_Writer is
+            entry Go;
+         end Bulk_Writer;
+
+         --  Queues behind the parked writer and is aborted with it, so
+         --  the cancellation path -- an abort arriving while the call is
+         --  still on the entry queue -- is exercised alongside the
+         --  holder's. The narrower window, where the abort arrives just
+         --  as the acquisition completes, is a couple of instructions
+         --  wide and is not reachable from this side of the API; case 5
+         --  pins that one directly.
+         task Queued_Sender is
+            entry Go;
+         end Queued_Sender;
+
+         task body Queued_Sender is
          begin
-            Done := True;
-            Text := To_Unbounded_String (Why);
-         end Note_Returned;
-         function Returned return Boolean is (Done);
-         function Detail return String is (To_String (Text));
-      end Writer_State;
+            accept Go;
+            AHT.Websocket.Client.Send_Text (C, "queued");
+         exception
+            when others => null;
+         end Queued_Sender;
 
-      --  Gated on an entry: a task declared here would otherwise
-      --  activate at this block's `begin`, i.e. before Connect has
-      --  run, and its Send_Binary would raise Closed_Error at once --
-      --  which is indistinguishable from a write that completed.
-      task Bulk_Writer is
-         entry Go;
-      end Bulk_Writer;
-
-      --  Queues behind the parked writer and is aborted with it, so
-      --  the cancellation path -- an abort arriving while the call is
-      --  still on the entry queue -- is exercised alongside the
-      --  holder's. The narrower window, where the abort arrives just
-      --  as the acquisition completes, is a couple of instructions
-      --  wide and is not reachable from this side of the API; case 5
-      --  pins that one directly.
-      task Queued_Sender is
-         entry Go;
-      end Queued_Sender;
-
-      task body Queued_Sender is
-      begin
-         accept Go;
-         AHT.Websocket.Client.Send_Text (C, "queued");
-      exception
-         when others => null;
-      end Queued_Sender;
-
-      task body Bulk_Writer is
-      begin
-         accept Go;
-         AHT.Websocket.Client.Send_Binary (C, Bulk.all);
-         Writer_State.Note_Returned ("returned normally");
-      exception
-         when E : others =>
-            Writer_State.Note_Returned
-              (Ada.Exceptions.Exception_Name (E) & ": "
-               & Ada.Exceptions.Exception_Message (E));
-      end Bulk_Writer;
-
-      Started, Ended : Time;
-      Close_Bound    : constant Duration := 6.0;
-   begin
-      Server.Get_Port (Port, Setup_Err);
-      if Length (Setup_Err) > 0 then
-         Fail ("guard-abort: " & To_String (Setup_Err));
-      else
+         task body Bulk_Writer is
          begin
-            AHT.Websocket.Client.Connect (C, URL_For (Port));
-            Connected := True;
+            accept Go;
+            AHT.Websocket.Client.Send_Binary (C, Bulk.all);
+            Writer_State.Note_Returned ("returned normally");
          exception
             when E : others =>
-               Fail ("guard-abort: Connect raised "
-                     & Ada.Exceptions.Exception_Name (E));
-         end;
-      end if;
+               Writer_State.Note_Returned
+                 (Ada.Exceptions.Exception_Name (E) & ": "
+                  & Ada.Exceptions.Exception_Message (E));
+         end Bulk_Writer;
 
-      if Connected then
-         Bulk_Writer.Go;
-      end if;
-
-      --  Give the writer time to fill the buffers and park. If it
-      --  finished instead, it never held the guard across a block and
-      --  this case would prove nothing -- so say so.
-      delay 1.0;
-
-      if Connected and then Writer_State.Returned then
-         Fail ("guard-abort: the bulk write ended ("
-               & Writer_State.Detail & ") instead of parking, so no"
-               & " sender was ever holding the guard across a block"
-               & " — this case proved nothing");
-         abort Queued_Sender;
-      elsif Connected then
-         --  Put a second sender on the guard's queue, then tear both
-         --  out together: the writer's release and the queued
-         --  sender's acquisition happen in the same instant.
-         Queued_Sender.Go;
-         delay 0.3;
-         abort Bulk_Writer;
-         abort Queued_Sender;
-
-         declare
-            function Gone return Boolean is
-              (Bulk_Writer'Terminated and then Queued_Sender'Terminated);
-            function Await_Gone is new Await (Gone);
-         begin
-            if not Await_Gone (3.0) then
-               Fail ("guard-abort: an aborted sender never terminated");
-            end if;
-         end;
-
-         --  The peer resumes draining at Deaf_Ms, so the only thing
-         --  that can keep Close out now is a guard the aborted writer
-         --  never gave back.
-         Started := Clock;
-         select
-            delay Close_Bound;
-            Fail ("guard-abort: Close never returned within"
-                  & Duration'Image (Close_Bound)
-                  & "s — the aborted writer left Send_Guard latched");
-         then abort
-            AHT.Websocket.Client.Close (C, Timeout => 2.0);
-         end select;
-         Ended := Clock;
-
-         if AHT.Websocket.Client.Is_Open (C) then
-            Fail ("guard-abort: Is_Open true after Close (took"
-                  & Duration'Image (Ended - Started) & "s)");
+         Started, Ended : Time;
+         Close_Bound    : constant Duration := 6.0;
+      begin
+         Server.Get_Port (Port, Setup_Err);
+         if Length (Setup_Err) > 0 then
+            Fail ("guard-abort: " & To_String (Setup_Err));
+         else
+            begin
+               AHT.Websocket.Client.Connect (C, URL_For (Port));
+               Connected := True;
+            exception
+               when E : others =>
+                  Fail ("guard-abort: Connect raised "
+                        & Ada.Exceptions.Exception_Name (E));
+            end;
          end if;
-      end if;
 
-      if not Connected then
-         --  Release the gated tasks so this block can finish.
-         abort Bulk_Writer;
-         abort Queued_Sender;
-      end if;
+         if Connected then
+            Bulk_Writer.Go;
+         end if;
 
-      Server.Wait_Done;
-   end;
+         --  Give the writer time to fill the buffers and park. If it
+         --  finished instead, it never held the guard across a block and
+         --  this case would prove nothing -- so say so.
+         delay 1.0;
+
+         if Connected and then Writer_State.Returned then
+            Fail ("guard-abort: the bulk write ended ("
+                  & Writer_State.Detail & ") instead of parking, so no"
+                  & " sender was ever holding the guard across a block"
+                  & " — this case proved nothing");
+            abort Queued_Sender;
+         elsif Connected then
+            --  Put a second sender on the guard's queue, then tear both
+            --  out together: the writer's release and the queued
+            --  sender's acquisition happen in the same instant.
+            Queued_Sender.Go;
+            delay 0.3;
+            abort Bulk_Writer;
+            abort Queued_Sender;
+
+            declare
+               function Gone return Boolean is
+                 (Bulk_Writer'Terminated and then Queued_Sender'Terminated);
+               function Await_Gone is new Await (Gone);
+            begin
+               if not Await_Gone (3.0) then
+                  Fail ("guard-abort: an aborted sender never terminated");
+               end if;
+            end;
+
+            --  The peer resumes draining at Deaf_Ms, so the only thing
+            --  that can keep Close out now is a guard the aborted writer
+            --  never gave back.
+            Started := Clock;
+            select
+               delay Close_Bound;
+               Fail ("guard-abort: Close never returned within"
+                     & Duration'Image (Close_Bound)
+                     & "s — the aborted writer left Send_Guard latched");
+            then abort
+               AHT.Websocket.Client.Close (C, Timeout => 2.0);
+            end select;
+            Ended := Clock;
+
+            if AHT.Websocket.Client.Is_Open (C) then
+               Fail ("guard-abort: Is_Open true after Close (took"
+                     & Duration'Image (Ended - Started) & "s)");
+            end if;
+         end if;
+
+         if not Connected then
+            --  Release the gated tasks so this block can finish.
+            abort Bulk_Writer;
+            abort Queued_Sender;
+         end if;
+
+         Server.Wait_Done;
+      end;
+   end if;
 
    --  Case 5: abort across ADMISSION, and then insist the client is
    --  still usable.

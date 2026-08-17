@@ -687,6 +687,38 @@ being moved out of the protected action. So the design rests on the
 structural argument — there is no interval — and the suite guards what
 would follow if there were.
 
+**The guarantee is narrower on Windows.** Everything above holds
+wherever an abort can reach the aborted task at all, and that is a
+platform property rather than a property of this design. GNAT on Linux
+interrupts a blocking syscall with a signal, so a task parked in
+`GNAT.Sockets.Check_Selector` unwinds when aborted. Windows has no
+equivalent mechanism, so the abort is deferred until the call returns
+on its own — which, for a `Forever` wait, is never. Measured with a
+standalone probe: park a task in `Check_Selector`, abort it, ask
+`'Terminated`. Linux terminates; Windows does not.
+
+What this costs, precisely:
+
+- The client's **own** teardown paths are unaffected. Every one of them
+  fires `Abort_Pending` first, which wakes the selector through its
+  explicit signalling channel rather than relying on the abort to
+  interrupt anything. `Close`, the forced teardown and the reclamation
+  gate all work.
+- A **caller** who aborts a task sitting inside `Send`, `Receive` or
+  `Connect` — by `abort T` or by an asynchronous `select ... then
+  abort` — will hang, because the transfer of control cannot land
+  until the socket call returns. On Linux the same code unwinds.
+
+`test_ws_abort` skips exactly the two cases that depend on it (2 and
+4) on Windows and says so in its output; the other cases abort tasks
+sitting in ordinary Ada waits and run everywhere. Which two was
+established by running it, not by reading them.
+
+Making the guarantee uniform would mean the client never parking
+without a bound, or exposing a wake that a caller can use before
+aborting. Neither is done today, and Windows is not a supported
+configuration.
+
 ### `Close` before scope exit is required
 
 `Client_Type` is **not** controlled, and finalization deliberately does
