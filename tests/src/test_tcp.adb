@@ -1596,12 +1596,18 @@ begin
    --  Write's failure path must not Close_Selector while a reader is still
    --  inside Check_Selector — it Poisons instead, shutting the socket down,
    --  aborting the selectors, and deferring the selector reclaim to the
-   --  single-threaded Close. Here a reader parks on a deaf peer; the writer
-   --  saturates the send buffer and trips its write deadline, whose handler
-   --  poisons the transport. Asserts: the write fails (bounded), the parked
-   --  reader is woken by the poison (not by its own 5 s backstop deadline)
-   --  and raises Transport_Error specifically, the transport ends
-   --  disconnected, and nothing hangs.
+   --  single-threaded Close. Here a reader sits in Read against a deaf peer;
+   --  the writer saturates the send buffer and trips its write deadline,
+   --  whose handler poisons the transport. Asserts: the write fails
+   --  (bounded), the reader comes back by the poison path rather than by
+   --  EOF, an abort or its own 5 s backstop — that is, the transport was
+   --  live at its entry check and poisoned by the time its selector call
+   --  returned — the transport ends disconnected, and nothing hangs.
+   --
+   --  That ordering is what is established, and not that the reader was
+   --  parked when the poison landed. The note on the delay below says why
+   --  nothing here could establish that, and this header does not get to
+   --  claim more than the code underneath it.
    --
    --  The write selector's half of that abort is case 15b, below.
    declare
@@ -1765,15 +1771,15 @@ begin
                            & "already poisoned when its Read looked, and "
                            & "this run says nothing about the poison path");
                   elsif Outcome = "eof" or else Outcome = "aborted" then
-                     Fail ("write-vs-read: parked reader was woken by the "
-                           & "poison but reported """ & Outcome & """ — Read "
-                           & "must decide on Is_Connected, not on which "
-                           & "wake mechanism arrived first");
+                     Fail ("write-vs-read: the reader came out of the poison "
+                           & "reporting """ & Outcome & """ — Read must "
+                           & "decide on Is_Connected, not on which wake "
+                           & "mechanism arrived first");
                   elsif Outcome = "timeout" then
-                     Fail ("write-vs-read: parked reader was NOT woken by the "
+                     Fail ("write-vs-read: the reader was NOT released by the "
                            & "poison — it fell through to its own 5 s backstop "
-                           & "deadline (write-side teardown raced/ignored the "
-                           & "reader's selector)");
+                           & "deadline, so it was parked and the write-side "
+                           & "teardown raced or ignored its selector");
                   elsif Outcome = "data" then
                      Fail ("write-vs-read: reader saw data from a deaf peer");
                   else
@@ -1919,10 +1925,10 @@ begin
                            & "and this run says nothing about the poison "
                            & "path");
                   elsif Outcome = "timeout" then
-                     Fail ("poison-vs-write: parked writer was NOT woken "
+                     Fail ("poison-vs-write: the writer was NOT released "
                            & "by Poison — it fell through to its own 10 s "
-                           & "backstop deadline, so Poison left the write "
-                           & "selector alone");
+                           & "backstop deadline, so it was parked and "
+                           & "Poison left the write selector alone");
                   elsif Outcome = "returned" then
                      Fail ("poison-vs-write: the write completed against a "
                            & "peer that never reads, so no writer was ever "

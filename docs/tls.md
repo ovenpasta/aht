@@ -224,7 +224,7 @@ in the same session at once.
 |---|---|
 | Handshake | Single-tasked and the session is not yet published, so no lock is needed and none is taken. This is where certificates are verified, so it is where the RSA mutex would otherwise matter. |
 | Published | A second task can reach the session, so every `mbedtls_ssl_*` call goes through `SSL_Lock`. |
-| Teardown | `Close` calls `mbedtls_ssl_close_notify` unlocked, and that is not an omission: `Close` carries a precondition that no other task is inside `Read`/`Write` on the transport, so it is exclusive by the same argument as the handshake — one task, nobody else able to reach the session. |
+| Teardown | `Close` calls `mbedtls_ssl_close_notify` unlocked, and that is not an omission: `Close` carries a precondition that no other task is inside *any* operation on the transport, so it is exclusive by the same argument as the handshake — one task, nobody else able to reach the session. |
 
 The two unlocked phases are unlocked for the same reason rather than
 by oversight, and it is the reason that matters: a lock is absent
@@ -235,14 +235,28 @@ handshake is exclusive by construction — no reference to the session
 has escaped yet, so nothing else can reach it. Teardown is exclusive
 only because `Close`'s precondition says so, and that precondition is
 the caller's to keep; `aht-transport-tls.ads` states it and notes it
-is not enforceable there. `Websocket.Client.Close` keeps it by waiting
-on the receiver task (`Wait_Closed`) before closing the transport, and
-the HTTP client by being synchronous, but those are two clients
-meeting a contract rather than the contract itself. A direct user of
-`AHT.Transport.TLS` who calls `Close` with a reader still running
-breaks the threading argument along with everything else the
-precondition protects — the reader is inside contexts `Close` frees,
-which is a use-after-free before it is a data race.
+is not enforceable there.
+
+It covers every operation, not just `Read` and `Write`. `Close` nulls
+and frees the backend state, and `Is_Connected`, the deadline setters
+and `Abort_Pending` all dereference it, so any of them racing `Close`
+is a use-after-free rather than a stale answer.
+
+Each client meets that contract its own way, and those ways are not
+the contract. The HTTP client is synchronous, so there is never a
+second task. `Websocket.Client` is the interesting one, and it does
+not work the way the name suggests: `Wait_Closed` is a protected entry
+on the connection state, not a join on the receiver task. The receiver
+closes the transport itself, in `Reclaim`, and only after
+`Stop_Admission` has shut the door and `Wait_No_Borrowers` has seen
+the last borrow returned — so exclusivity comes from the borrow
+lifecycle, and a caller blocked on `Wait_Closed` is waiting for that
+to have finished.
+
+A direct user of `AHT.Transport.TLS` has neither mechanism and has to
+quiesce its own tasks. One that calls `Close` with a reader still
+running breaks the threading argument along with everything else the
+precondition protects.
 
 The load-bearing row is still the first one. Making the entropy source
 or the DRBG a library-level singleton — tempting, since seeding is the

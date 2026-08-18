@@ -292,9 +292,14 @@ trap cleanup_lock EXIT
 # and sh runs a trap between statements: a signal arriving during the
 # mkdir is delivered once it returns and before the assignment, where
 # the handler finds HELD_LOCK empty, declines to release, and leaves a
-# lock nobody owns for the timeout below to trip over. Reproducible on
-# demand -- put a `kill -s <sig> $$` between the two statements and the
-# lock survives.
+# lock nobody owns for the timeout below to trip over.
+#
+# To see it: drop the hold_signals call from the loop below and put a
+# `kill -s HUP $$` between the mkdir and the assignment. The script
+# exits 129 and the lock directory is still there. Both steps are
+# needed -- with the hold in place that signal is ignored, which is
+# the point of it, so the instruction is how to reproduce the OLD
+# behaviour rather than something the current code still does.
 #
 # So signals are held off across that pair and armed everywhere else.
 # Held off means ignored, not queued, so a Ctrl-C landing in that

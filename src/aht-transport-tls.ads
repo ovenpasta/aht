@@ -112,14 +112,26 @@ package AHT.Transport.TLS is
    --  contexts. Idempotent.
    --
    --  Precondition (caller's responsibility, not enforceable here): no
-   --  other task may be inside Read/Write — or call Is_Connected —
-   --  on this transport while Close runs. Freeing the backend contexts
-   --  under a live reader would be a use-after-free, so the caller must
-   --  quiesce all read/write tasks first — exactly as
-   --  Websocket.Client.Close does by waiting on the receiver task
-   --  (Wait_Closed) before closing the transport. For the concurrent
-   --  fatal-write case the inner TCP is Poison'ed (reader-safe),
-   --  deferring this reclaim until the reader has exited.
+   --  other task may be inside ANY operation on this transport while
+   --  Close runs.
+   --
+   --  Not just Read and Write. Close nulls and frees the backend state,
+   --  and every other primitive dereferences it — Is_Connected, the
+   --  deadline setters, Abort_Pending — so any of them racing Close is
+   --  a use-after-free, not merely a stale answer. Enumerating the
+   --  operations invites the list to fall behind the body; the rule is
+   --  the whole object, and the caller must quiesce every task using it
+   --  before calling this.
+   --
+   --  Websocket.Client keeps that rule, though not the way it might
+   --  look: Wait_Closed is a protected entry on the connection state,
+   --  not a join on the receiver. It is the RECEIVER that closes the
+   --  transport, in Reclaim, and only after Stop_Admission has shut the
+   --  door and Wait_No_Borrowers has seen the last borrow returned. A
+   --  caller waiting on Wait_Closed is waiting for that to have
+   --  happened. For the concurrent fatal-write case the inner TCP is
+   --  Poison'ed (reader-safe), deferring this reclaim until the reader
+   --  has exited.
 
    overriding function Is_Connected (Self : TLS_Transport) return Boolean;
    --  True after a successful Connect until Close — except that a
