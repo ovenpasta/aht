@@ -406,15 +406,15 @@ package body AHT.Transport.TCP is
                   --
                   --  Distinct message from the pre-loop guard's, for the
                   --  reason the read loop gives at length -- including
-                  --  the caveat: this says the poison was observed after
-                  --  the call began, not that the caller was blocked
-                  --  when it happened.
+                  --  both caveats: the entry check is the landmark, not
+                  --  the call, and this says nothing about whether the
+                  --  caller was blocked when the poison landed.
                   if not Self.Connected then
                      Log.Debug
                        ("write found the transport poisoned after entry");
                      raise Transport_Error
                        with "TCP write: connection was poisoned after "
-                            & "this call began";
+                            & "its entry check";
                   end if;
 
                   case Status is
@@ -597,24 +597,31 @@ package body AHT.Transport.TCP is
          --  read the same way.
          --
          --  Distinct message from that entry guard, and load-bearing:
-         --  "the transport was already dead when you called" and "it
-         --  died after this call began" are different diagnoses, and
-         --  without different wording a test cannot tell which one it
-         --  provoked.
+         --  without different wording a test cannot tell which of the
+         --  two it provoked.
          --
-         --  Note what it does NOT say. It does not say the caller was
-         --  parked. Abort_Selector queues an event that satisfies the
-         --  next Check_Selector as readily as a current one, so a task
-         --  that passed the guard above, lost the CPU, and reached the
-         --  selector only after Poison had run gets here without ever
-         --  having blocked. The honest claim is the ordering -- the
-         --  poison was observed after this call started -- and the
-         --  wording says exactly that so tests cannot borrow more.
+         --  The two are separated by the entry check, and by nothing
+         --  else. Reaching here means Connected was True there and
+         --  False now. Reaching the guard's raise means it was already
+         --  False there -- which does NOT mean the poison preceded the
+         --  call, since the caller may have entered, been descheduled,
+         --  and been poisoned before it got as far as looking.
+         --
+         --  Nor does reaching here mean the caller was parked.
+         --  Abort_Selector queues an event that satisfies the next
+         --  Check_Selector as readily as a current one, so a task that
+         --  passed the guard, lost the CPU, and arrived at the selector
+         --  after Poison had run lands here without ever having
+         --  blocked.
+         --
+         --  So the wording names the entry check rather than the call
+         --  or the wait, because the entry check is the only landmark
+         --  either side of this actually establishes.
          if not Self.Connected then
             Log.Debug ("read found the transport poisoned after entry");
             raise Transport_Error
-              with "TCP read: connection was poisoned after this call "
-                   & "began";
+              with "TCP read: connection was poisoned after its entry "
+                   & "check";
          end if;
 
          case Status is

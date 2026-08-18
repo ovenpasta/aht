@@ -1655,15 +1655,17 @@ begin
                         Reader_Out := To_Unbounded_String ("aborted");
                      when E : AHT.Transport.Transport_Error =>
                         --  Which Transport_Error matters. The two
-                        --  wordings separate "the transport was already
-                        --  dead when this call started" from "it died
-                        --  after it started", and only the second is
-                        --  this case's subject.
+                        --  wordings separate "already dead at the entry
+                        --  check" from "live there, dead by the
+                        --  selector call", and only the second is this
+                        --  case's subject. The entry check, not the
+                        --  start of the call: a task can enter and be
+                        --  descheduled before it looks.
                         Reader_Out := To_Unbounded_String
                           (if Ada.Strings.Fixed.Index
                              (Ada.Exceptions.Exception_Message (E),
-                              "poisoned after this call began") > 0
-                           then "after-entry" else "before-entry");
+                              "poisoned after its entry check") > 0
+                           then "live-at-guard" else "dead-at-guard");
                      when E : others =>
                         Reader_Out := To_Unbounded_String
                           ("exn:" & Ada.Exceptions.Exception_Name (E));
@@ -1681,14 +1683,21 @@ begin
                   --  at the selector after the poison reports the same
                   --  thing without ever having blocked.
                   --
-                  --  What is proven: the reader began on a live
-                  --  transport (it passed the guard), and it came out
+                  --  What is proven: the transport was live when the
+                  --  reader's entry check looked at it and dead by the
+                  --  time its selector call returned, and it came out
                   --  by the poison path rather than by EOF, an abort,
                   --  or its own deadline. That rules out the wrong
-                  --  answers this case exists to catch. It does not
-                  --  establish that the wake interrupted a wait, and
-                  --  nothing available here would -- there is no
-                  --  observable for "a task is inside a selector".
+                  --  answers this case exists to catch.
+                  --
+                  --  The landmark is that entry check, not the start of
+                  --  the Read. A reader can enter and be descheduled
+                  --  before it looks, so the other outcome does not
+                  --  even mean the poison preceded the call. And
+                  --  neither outcome establishes that the wake
+                  --  interrupted a wait; nothing available here would,
+                  --  since there is no observable for "a task is inside
+                  --  a selector".
                   --
                   --  The parked path is not unevidenced, just not
                   --  evidenced *here*: before Poison aborted the
@@ -1732,12 +1741,12 @@ begin
                   --  was told. "eof" is the specific wrong answer, since
                   --  a write tearing the connection down is not the peer
                   --  closing.
-                  if Outcome = "after-entry" then
+                  if Outcome = "live-at-guard" then
                      null;  --  came out by the poison path, as required
-                  elsif Outcome = "before-entry" then
+                  elsif Outcome = "dead-at-guard" then
                      Fail ("write-vs-read: the reader raised the entry "
                            & "guard's Transport_Error, so the transport was "
-                           & "already poisoned before its Read began and "
+                           & "already poisoned when its Read looked, and "
                            & "this run says nothing about the poison path");
                   elsif Outcome = "eof" or else Outcome = "aborted" then
                      Fail ("write-vs-read: parked reader was woken by the "
@@ -1849,8 +1858,8 @@ begin
                         Writer_Out := To_Unbounded_String
                           (if Ada.Strings.Fixed.Index
                              (Ada.Exceptions.Exception_Message (E),
-                              "poisoned after this call began") > 0
-                           then "after-entry" else "before-entry");
+                              "poisoned after its entry check") > 0
+                           then "live-at-guard" else "dead-at-guard");
                      when E : others =>
                         Writer_Out := To_Unbounded_String
                           ("exn:" & Ada.Exceptions.Exception_Name (E));
@@ -1870,12 +1879,12 @@ begin
                declare
                   Outcome : constant String := To_String (Writer_Out);
                begin
-                  if Outcome = "after-entry" then
+                  if Outcome = "live-at-guard" then
                      null;  --  the point: a third party ended the write
-                  elsif Outcome = "before-entry" then
+                  elsif Outcome = "dead-at-guard" then
                      Fail ("poison-vs-write: the writer raised the entry "
                            & "guard's Transport_Error, so the transport "
-                           & "was already poisoned before its Write began "
+                           & "was already poisoned when its Write looked, "
                            & "and this run says nothing about the poison "
                            & "path");
                   elsif Outcome = "timeout" then

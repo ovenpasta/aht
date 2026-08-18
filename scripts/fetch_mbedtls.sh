@@ -277,9 +277,9 @@ mkdir -p "$THIRD"
 LOCK=${DEST}.lock
 HELD_LOCK=
 
-# Armed before the lock is taken, so an interrupt cannot land between
-# acquiring and being able to release; HELD_LOCK is what tells the
-# handler whether there is anything to release.
+# HELD_LOCK is what tells the handler whether there is anything to
+# release -- the lock directory's existence cannot, since another
+# process's lock looks exactly the same from here.
 cleanup_lock() {
     if [ -n "$HELD_LOCK" ]; then
         rmdir "$LOCK" 2>/dev/null || true
@@ -287,11 +287,35 @@ cleanup_lock() {
     fi
 }
 trap cleanup_lock EXIT
-trap 'cleanup_lock; exit 130' INT
-trap 'cleanup_lock; exit 143' TERM
+
+# Taking the lock and recording that we hold it are two statements,
+# and sh runs a trap between statements: a signal arriving during the
+# mkdir is delivered once it returns and before the assignment, where
+# the handler finds HELD_LOCK empty, declines to release, and leaves a
+# lock nobody owns for the timeout below to trip over.
+#
+# So signals are held off across that pair and armed everywhere else.
+# Held off means ignored, not queued, so a Ctrl-C landing in that
+# two-statement window is dropped and has to be repeated -- which is
+# the trade, and the right way round: a stale lock blocks every later
+# build of this target until someone deletes it by hand.
+hold_signals() { trap '' INT TERM; }
+arm_signals() {
+    trap 'cleanup_lock; exit 130' INT
+    trap 'cleanup_lock; exit 143' TERM
+}
+arm_signals
 
 LOCK_WAIT=0
-while ! mkdir "$LOCK" 2>/dev/null; do
+while :; do
+    hold_signals
+    if mkdir "$LOCK" 2>/dev/null; then
+        HELD_LOCK=1
+        arm_signals
+        break
+    fi
+    arm_signals
+
     if [ "$LOCK_WAIT" -ge 600 ]; then
         echo "fetch_mbedtls: FATAL — waited 600s for $LOCK" >&2
         echo "  Another build of this target is either still running" \
@@ -306,7 +330,6 @@ while ! mkdir "$LOCK" 2>/dev/null; do
     sleep 1
     LOCK_WAIT=$((LOCK_WAIT + 1))
 done
-HELD_LOCK=1
 
 # Recheck under the lock. Losing the race is the common case when two
 # builds start together, and the loser has nothing left to do.

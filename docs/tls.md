@@ -210,24 +210,25 @@ says so in as many words. It can, because at that point the session is
 single-tasked and not yet published, so there is no second task to
 exclude.
 
-The argument that does hold has three parts, and needs all three:
+The argument that does hold is one invariant over the session's whole
+life, plus what makes it true in each phase of that life.
 
-1. Every context is per session, the CA chain and peer certificate
-   included — they hang off `Backend_State`, not off anything shared.
-2. **Handshake**: single-tasked and the session is unpublished, so no
-   lock is needed and none is taken. This is where certificates are
-   verified, so it is where the RSA mutex would otherwise matter.
-3. **Published**: a second task can reach the session, so every
-   `mbedtls_ssl_*` call goes through `SSL_Lock`.
-4. **Teardown**: `Close` calls `mbedtls_ssl_close_notify` unlocked, and
-   that is not an omission. `Close` is documented single-threaded and
-   runs after admission has stopped and every borrower has drained, so
-   it is exclusive by the same argument the handshake is — one task,
-   no one else able to reach the session.
+**The invariant.** Every context is per session, the CA chain and peer
+certificate included — they hang off `Backend_State`, not off anything
+shared. So the only way two tasks meet in one context is by both being
+in the same session at once.
 
-Two tasks therefore never enter one context in any of the three
-phases, and the two unlocked phases are unlocked for the same reason
-rather than by oversight.
+**The phases**, which is where that is ruled out:
+
+| Phase | Why no two tasks |
+|---|---|
+| Handshake | Single-tasked and the session is not yet published, so no lock is needed and none is taken. This is where certificates are verified, so it is where the RSA mutex would otherwise matter. |
+| Published | A second task can reach the session, so every `mbedtls_ssl_*` call goes through `SSL_Lock`. |
+| Teardown | `Close` calls `mbedtls_ssl_close_notify` unlocked, and that is not an omission: `Close` is documented single-threaded and runs after admission has stopped and every borrower has drained. Exclusive by the same argument as the handshake — one task, nobody else able to reach the session. |
+
+The two unlocked phases are unlocked for the same reason rather than
+by oversight, and it is the reason that matters: a lock is absent
+where exclusivity comes from the lifecycle instead.
 
 The load-bearing row is still the first one. Making the entropy source
 or the DRBG a library-level singleton — tempting, since seeding is the
