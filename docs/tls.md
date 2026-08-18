@@ -214,12 +214,20 @@ The argument that does hold has three parts, and needs all three:
 
 1. Every context is per session, the CA chain and peer certificate
    included — they hang off `Backend_State`, not off anything shared.
-2. Handshake-time RSA use is single-tasked and the session is
-   unpublished, so no lock is needed and none is taken.
-3. Once the session *is* published and a second task can reach it,
-   every `mbedtls_ssl_*` call goes through `SSL_Lock`.
+2. **Handshake**: single-tasked and the session is unpublished, so no
+   lock is needed and none is taken. This is where certificates are
+   verified, so it is where the RSA mutex would otherwise matter.
+3. **Published**: a second task can reach the session, so every
+   `mbedtls_ssl_*` call goes through `SSL_Lock`.
+4. **Teardown**: `Close` calls `mbedtls_ssl_close_notify` unlocked, and
+   that is not an omission. `Close` is documented single-threaded and
+   runs after admission has stopped and every borrower has drained, so
+   it is exclusive by the same argument the handshake is — one task,
+   no one else able to reach the session.
 
-Two tasks therefore never enter one RSA context, in either phase.
+Two tasks therefore never enter one context in any of the three
+phases, and the two unlocked phases are unlocked for the same reason
+rather than by oversight.
 
 The load-bearing row is still the first one. Making the entropy source
 or the DRBG a library-level singleton — tempting, since seeding is the

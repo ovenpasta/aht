@@ -1654,32 +1654,47 @@ begin
                      when AHT.Transport.Aborted_Error =>
                         Reader_Out := To_Unbounded_String ("aborted");
                      when E : AHT.Transport.Transport_Error =>
-                        --  Which Transport_Error matters. "parked" is
-                        --  the wake this case exists to prove; the
-                        --  pre-park guard's wording would mean the
-                        --  reader never got there, and treating the two
-                        --  alike is how a vacuous run passes.
+                        --  Which Transport_Error matters. The two
+                        --  wordings separate "the transport was already
+                        --  dead when this call started" from "it died
+                        --  after it started", and only the second is
+                        --  this case's subject.
                         Reader_Out := To_Unbounded_String
                           (if Ada.Strings.Fixed.Index
                              (Ada.Exceptions.Exception_Message (E),
-                              "poisoned while parked") > 0
-                           then "parked" else "not-parked");
+                              "poisoned after this call began") > 0
+                           then "after-entry" else "before-entry");
                      when E : others =>
                         Reader_Out := To_Unbounded_String
                           ("exn:" & Ada.Exceptions.Exception_Name (E));
                   end Reader;
                begin
-                  --  Let the reader reach Check_Selector before the write
-                  --  begins tearing the socket down.
+                  --  Give the reader a chance to reach Check_Selector
+                  --  before the write starts tearing the socket down.
                   --
-                  --  A delay is not the evidence, and cannot be: nothing
-                  --  observable from out here says a task is inside a
-                  --  selector. The evidence is the message the reader
-                  --  comes back with, which only the in-park branch
-                  --  produces -- so a reader that started late and hit
-                  --  the pre-park guard reports "not-parked" and fails
-                  --  the case rather than passing it for the wrong
-                  --  reason. The delay only makes that outcome rare.
+                  --  Read that as it is written. The delay is not
+                  --  evidence and the message the reader returns is not
+                  --  evidence *of parking* either -- Abort_Selector
+                  --  queues an event the next Check_Selector consumes
+                  --  as readily as a current one, so a reader that
+                  --  passed its entry guard, lost the CPU, and arrived
+                  --  at the selector after the poison reports the same
+                  --  thing without ever having blocked.
+                  --
+                  --  What is proven: the reader began on a live
+                  --  transport (it passed the guard), and it came out
+                  --  by the poison path rather than by EOF, an abort,
+                  --  or its own deadline. That rules out the wrong
+                  --  answers this case exists to catch. It does not
+                  --  establish that the wake interrupted a wait, and
+                  --  nothing available here would -- there is no
+                  --  observable for "a task is inside a selector".
+                  --
+                  --  The parked path is not unevidenced, just not
+                  --  evidenced *here*: before Poison aborted the
+                  --  selector, this case failed on Windows with
+                  --  "timeout", which only a genuinely parked reader
+                  --  can produce.
                   delay 0.2;
 
                   T.Set_Write_Deadline (0.3);
@@ -1717,13 +1732,13 @@ begin
                   --  was told. "eof" is the specific wrong answer, since
                   --  a write tearing the connection down is not the peer
                   --  closing.
-                  if Outcome = "parked" then
-                     null;  --  woken in the park, and told why
-                  elsif Outcome = "not-parked" then
-                     Fail ("write-vs-read: the reader raised the pre-park "
-                           & "guard's Transport_Error, so it never reached "
-                           & "Check_Selector and this run proved nothing "
-                           & "about the wake");
+                  if Outcome = "after-entry" then
+                     null;  --  came out by the poison path, as required
+                  elsif Outcome = "before-entry" then
+                     Fail ("write-vs-read: the reader raised the entry "
+                           & "guard's Transport_Error, so the transport was "
+                           & "already poisoned before its Read began and "
+                           & "this run says nothing about the poison path");
                   elsif Outcome = "eof" or else Outcome = "aborted" then
                      Fail ("write-vs-read: parked reader was woken by the "
                            & "poison but reported """ & Outcome & """ — Read "
@@ -1834,16 +1849,17 @@ begin
                         Writer_Out := To_Unbounded_String
                           (if Ada.Strings.Fixed.Index
                              (Ada.Exceptions.Exception_Message (E),
-                              "poisoned while parked") > 0
-                           then "parked" else "not-parked");
+                              "poisoned after this call began") > 0
+                           then "after-entry" else "before-entry");
                      when E : others =>
                         Writer_Out := To_Unbounded_String
                           ("exn:" & Ada.Exceptions.Exception_Name (E));
                   end Writer;
                begin
-                  --  Same standing as case 15's delay: it makes the
-                  --  writer likely to be parked, and proves nothing.
-                  --  The proof is the message it comes back with.
+                  --  Same standing, and same caveat, as case 15's
+                  --  delay: it makes the writer likely to be parked and
+                  --  proves nothing, and the message it returns proves
+                  --  an ordering rather than a park. See the note there.
                   delay 0.5;
                   T.Poison;
                   --  Leaving this block joins Writer. If the poison did
@@ -1854,13 +1870,14 @@ begin
                declare
                   Outcome : constant String := To_String (Writer_Out);
                begin
-                  if Outcome = "parked" then
-                     null;  --  the point: a third party woke the writer
-                  elsif Outcome = "not-parked" then
-                     Fail ("poison-vs-write: the writer raised the "
-                           & "pre-park guard's Transport_Error, so it "
-                           & "never reached Check_Selector and this run "
-                           & "proved nothing about the wake");
+                  if Outcome = "after-entry" then
+                     null;  --  the point: a third party ended the write
+                  elsif Outcome = "before-entry" then
+                     Fail ("poison-vs-write: the writer raised the entry "
+                           & "guard's Transport_Error, so the transport "
+                           & "was already poisoned before its Write began "
+                           & "and this run says nothing about the poison "
+                           & "path");
                   elsif Outcome = "timeout" then
                      Fail ("poison-vs-write: parked writer was NOT woken "
                            & "by Poison — it fell through to its own 10 s "

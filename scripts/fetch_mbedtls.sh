@@ -244,26 +244,97 @@ EOF
     rm -f "$probe"
 }
 
-# Fast path: all three archives present, built for this target by this
-# toolchain, from a config.h that has not changed since, and that the
-# compiler still agrees with.
-if [ -s "$LIB_TLS" ] && [ -s "$LIB_X509" ] && [ -s "$LIB_CRYPTO" ] \
-   && [ -f "$STAMP" ] && [ -f "$CFG" ] \
-   && [ "$(cat "$STAMP")" = "$(stamp_line "$(compute_sha256 "$CFG")")" ]
-then
+# All three archives present, built for this target by this toolchain,
+# from a config.h that has not changed since. A function because it is
+# asked twice: once before waiting for the build lock, and once after,
+# by which time whoever held the lock may have done the work.
+tree_is_current() {
+    [ -s "$LIB_TLS" ] && [ -s "$LIB_X509" ] && [ -s "$LIB_CRYPTO" ] \
+        && [ -f "$STAMP" ] && [ -f "$CFG" ] \
+        && [ "$(cat "$STAMP")" = "$(stamp_line "$(compute_sha256 "$CFG")")" ]
+}
+
+# Fast path.
+if tree_is_current; then
     check_config
     exit 0
 fi
 
 mkdir -p "$THIRD"
 
-# Download (resumable: write to .part then rename on success). Shared
-# between targets -- it is the same tarball, verified once per fetch.
+# From here on the tree is going to be rewritten, and that is not
+# something two processes can do at once. Extraction, the config edits
+# and the build are a long non-atomic sequence over a fixed path, so
+# two runs of the same target interleave into one broken tree -- and
+# the `mv` that publishes it would move a finished tree *inside* the
+# other's rather than over it.
+#
+# mkdir is the lock, because it is atomic on every POSIX filesystem
+# and needs no tool that macOS might not ship (flock does not exist
+# there). Per DEST, so different targets still build in parallel --
+# which is the case that matters, since that is what the test runner
+# does.
+LOCK=${DEST}.lock
+HELD_LOCK=
+
+# Armed before the lock is taken, so an interrupt cannot land between
+# acquiring and being able to release; HELD_LOCK is what tells the
+# handler whether there is anything to release.
+cleanup_lock() {
+    if [ -n "$HELD_LOCK" ]; then
+        rmdir "$LOCK" 2>/dev/null || true
+        HELD_LOCK=
+    fi
+}
+trap cleanup_lock EXIT
+trap 'cleanup_lock; exit 130' INT
+trap 'cleanup_lock; exit 143' TERM
+
+LOCK_WAIT=0
+while ! mkdir "$LOCK" 2>/dev/null; do
+    if [ "$LOCK_WAIT" -ge 600 ]; then
+        echo "fetch_mbedtls: FATAL — waited 600s for $LOCK" >&2
+        echo "  Another build of this target is either still running" \
+             "or was killed without releasing it. If nothing is" \
+             "building, remove that directory and re-run." >&2
+        exit 2
+    fi
+    if [ "$LOCK_WAIT" = 0 ]; then
+        echo "==> fetch_mbedtls: waiting for a concurrent build of" \
+             "$TARGET"
+    fi
+    sleep 1
+    LOCK_WAIT=$((LOCK_WAIT + 1))
+done
+HELD_LOCK=1
+
+# Recheck under the lock. Losing the race is the common case when two
+# builds start together, and the loser has nothing left to do.
+if tree_is_current; then
+    check_config
+    exit 0
+fi
+
+# Download to a unique name, then rename. The archive is shared
+# between targets and the build lock above is per target, so two cold
+# builds for different targets can be here at the same time; a fixed
+# .part name would have them writing the same file and renaming it out
+# from under each other.
+#
+# No lock needed even so. Each writes its own file, rename within one
+# directory is atomic, and the tarball is hash-pinned -- so whichever
+# rename lands last, every reader sees one complete archive whose
+# contents are then verified anyway.
 if [ ! -s "$ARCHIVE" ]; then
     echo "==> fetch_mbedtls: downloading v${VERSION}"
-    curl --fail --silent --show-error --location \
-        -o "${ARCHIVE}.part" "$URL"
-    mv "${ARCHIVE}.part" "$ARCHIVE"
+    part=$(mktemp "${ARCHIVE}.XXXXXX")
+    if ! curl --fail --silent --show-error --location -o "$part" "$URL"
+    then
+        rm -f "$part"
+        echo "fetch_mbedtls: FATAL — download failed" >&2
+        exit 2
+    fi
+    mv "$part" "$ARCHIVE"
 fi
 
 # Pinned-hash verification. Refuse to proceed on mismatch so a

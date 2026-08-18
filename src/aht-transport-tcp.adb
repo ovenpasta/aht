@@ -404,21 +404,17 @@ package body AHT.Transport.TCP is
                   --  reasoning as the read loop: decide on Connected, so
                   --  the outcome does not depend on which wake arrived.
                   --
-                  --  The message differs from the pre-park guard's on
-                  --  purpose. Both are Transport_Error and both mean the
-                  --  transport is dead, but they are different
-                  --  diagnoses -- one call arrived at a corpse, the
-                  --  other was holding a live connection that was torn
-                  --  down underneath it -- and only the wording tells
-                  --  them apart afterwards. test_tcp requires this one
-                  --  specifically, which is what stops a test that
-                  --  never actually parked from passing as though it
-                  --  had.
+                  --  Distinct message from the pre-loop guard's, for the
+                  --  reason the read loop gives at length -- including
+                  --  the caveat: this says the poison was observed after
+                  --  the call began, not that the caller was blocked
+                  --  when it happened.
                   if not Self.Connected then
-                     Log.Debug ("write woke on a poisoned transport");
+                     Log.Debug
+                       ("write found the transport poisoned after entry");
                      raise Transport_Error
-                       with "TCP write: connection was poisoned while "
-                            & "parked";
+                       with "TCP write: connection was poisoned after "
+                            & "this call began";
                   end if;
 
                   case Status is
@@ -602,15 +598,23 @@ package body AHT.Transport.TCP is
          --
          --  Distinct message from that entry guard, and load-bearing:
          --  "the transport was already dead when you called" and "it
-         --  died while you were parked in it" are different diagnoses,
-         --  and without different wording a test cannot tell which one
-         --  it provoked. test_tcp requires this one, so a run where the
-         --  reader never reached the park cannot pass by taking the
-         --  entry guard instead.
+         --  died after this call began" are different diagnoses, and
+         --  without different wording a test cannot tell which one it
+         --  provoked.
+         --
+         --  Note what it does NOT say. It does not say the caller was
+         --  parked. Abort_Selector queues an event that satisfies the
+         --  next Check_Selector as readily as a current one, so a task
+         --  that passed the guard above, lost the CPU, and reached the
+         --  selector only after Poison had run gets here without ever
+         --  having blocked. The honest claim is the ordering -- the
+         --  poison was observed after this call started -- and the
+         --  wording says exactly that so tests cannot borrow more.
          if not Self.Connected then
-            Log.Debug ("read woke on a poisoned transport");
+            Log.Debug ("read found the transport poisoned after entry");
             raise Transport_Error
-              with "TCP read: connection was poisoned while parked";
+              with "TCP read: connection was poisoned after this call "
+                   & "began";
          end if;
 
          case Status is

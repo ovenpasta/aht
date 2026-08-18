@@ -147,9 +147,15 @@ package AHT.Transport.TCP is
    --  on which `Selector_Status` won, and it says the true thing: the
    --  connection was torn down underneath the operation, which is
    --  neither a caller-requested abort nor the peer closing. Its message
-   --  says "poisoned while parked", distinct from the message a call
-   --  that arrives after the fact gets — a difference the tests rely on
-   --  to tell a real wake from never having parked.
+   --  says "poisoned after this call began", distinct from the message a
+   --  call that arrives at an already-dead transport gets.
+   --
+   --  That distinction is an ordering, and only an ordering. It does not
+   --  mean the caller was blocked: `Abort_Selector` queues an event that
+   --  the *next* `Check_Selector` consumes just as happily as a current
+   --  one, so an operation that passes the entry guard, loses the CPU,
+   --  and reaches the selector after the poison lands gets the same
+   --  message without ever having waited.
    --
    --  A poisoned transport is single-use: it cannot be reconnected in place
    --  (`Connect` rejects it — see above). `Close` it and use a fresh object.
