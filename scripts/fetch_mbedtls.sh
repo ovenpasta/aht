@@ -292,17 +292,25 @@ trap cleanup_lock EXIT
 # and sh runs a trap between statements: a signal arriving during the
 # mkdir is delivered once it returns and before the assignment, where
 # the handler finds HELD_LOCK empty, declines to release, and leaves a
-# lock nobody owns for the timeout below to trip over.
+# lock nobody owns for the timeout below to trip over. Reproducible on
+# demand -- put a `kill -s <sig> $$` between the two statements and the
+# lock survives.
 #
 # So signals are held off across that pair and armed everywhere else.
 # Held off means ignored, not queued, so a Ctrl-C landing in that
 # two-statement window is dropped and has to be repeated -- which is
 # the trade, and the right way round: a stale lock blocks every later
 # build of this target until someone deletes it by hand.
-hold_signals() { trap '' INT TERM; }
+#
+# HUP belongs here as much as INT and TERM: a build started over ssh
+# or from a terminal that goes away gets it, which is exactly the
+# unattended case where a lock left behind is discovered much later by
+# somebody else.
+hold_signals() { trap '' INT TERM HUP; }
 arm_signals() {
     trap 'cleanup_lock; exit 130' INT
     trap 'cleanup_lock; exit 143' TERM
+    trap 'cleanup_lock; exit 129' HUP
 }
 arm_signals
 

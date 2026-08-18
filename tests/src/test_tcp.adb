@@ -1661,11 +1661,27 @@ begin
                         --  case's subject. The entry check, not the
                         --  start of the call: a task can enter and be
                         --  descheduled before it looks.
-                        Reader_Out := To_Unbounded_String
-                          (if Ada.Strings.Fixed.Index
-                             (Ada.Exceptions.Exception_Message (E),
-                              "poisoned after its entry check") > 0
-                           then "live-at-guard" else "dead-at-guard");
+                        --
+                        --  Both are matched positively, and anything
+                        --  else is carried through with its message
+                        --  rather than folded into one of them. A
+                        --  socket failure is not evidence about the
+                        --  poison path in either direction, and
+                        --  treating "not the post-check wording" as
+                        --  "the entry guard" would report it as one.
+                        declare
+                           M : constant String :=
+                             Ada.Exceptions.Exception_Message (E);
+                           function Says (S : String) return Boolean is
+                             (Ada.Strings.Fixed.Index (M, S) > 0);
+                        begin
+                           Reader_Out := To_Unbounded_String
+                             (if Says ("poisoned after its entry check")
+                              then "live-at-guard"
+                              elsif Says ("TCP read on closed transport")
+                              then "dead-at-guard"
+                              else "transport:" & M);
+                        end;
                      when E : others =>
                         Reader_Out := To_Unbounded_String
                           ("exn:" & Ada.Exceptions.Exception_Name (E));
@@ -1790,9 +1806,14 @@ begin
    --  not be arranged here. It can: Poison is public, so the main task
    --  is the third party.
    --
-   --  A writer parks on a deaf peer with no deadline near enough to
-   --  rescue it; the main task poisons; the writer must come back
-   --  saying it was poisoned while parked.
+   --  A writer sits in Write against a deaf peer, with no deadline
+   --  near enough to rescue it; the main task poisons; the writer must
+   --  come back saying the transport was live at its entry check and
+   --  poisoned by the time its selector call returned.
+   --
+   --  That is an ordering, not a parking proof, exactly as in case 15
+   --  — the note on the delay below says why, and this header does not
+   --  get to claim more than the code underneath it.
    --
    --  What that pins, measured by backing each half out separately:
    --
@@ -1855,11 +1876,21 @@ begin
                      when AHT.Transport.Aborted_Error =>
                         Writer_Out := To_Unbounded_String ("aborted");
                      when E : AHT.Transport.Transport_Error =>
-                        Writer_Out := To_Unbounded_String
-                          (if Ada.Strings.Fixed.Index
-                             (Ada.Exceptions.Exception_Message (E),
-                              "poisoned after its entry check") > 0
-                           then "live-at-guard" else "dead-at-guard");
+                        --  Both matched positively, anything else
+                        --  carried through; see case 15's note.
+                        declare
+                           M : constant String :=
+                             Ada.Exceptions.Exception_Message (E);
+                           function Says (S : String) return Boolean is
+                             (Ada.Strings.Fixed.Index (M, S) > 0);
+                        begin
+                           Writer_Out := To_Unbounded_String
+                             (if Says ("poisoned after its entry check")
+                              then "live-at-guard"
+                              elsif Says ("TCP write on closed transport")
+                              then "dead-at-guard"
+                              else "transport:" & M);
+                        end;
                      when E : others =>
                         Writer_Out := To_Unbounded_String
                           ("exn:" & Ada.Exceptions.Exception_Name (E));
