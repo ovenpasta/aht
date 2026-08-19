@@ -777,9 +777,19 @@ begin
    --  it did not publish — which is what the loop below is here to
    --  catch if it comes back.
    --
-   --  Loop the scenario so a re-introduced clobber reliably hangs
-   --  (caught by the suite timeout) rather than slipping through; with
-   --  the fix every iteration tears down promptly.
+   --  What catches a re-introduced clobber is the one-second bound on
+   --  Close below, not the suite timeout, and it no longer hangs to
+   --  get there: the select around Wait_Closed is bounded by the
+   --  handshake Timeout, and Teardown_Pin.Finalize republishes Closed
+   --  on the way out regardless.
+   --
+   --  Measured, by putting the old unconditional transition back:
+   --  iteration 1 fails with "Close took 5.000736000s", the whole 5 s
+   --  Timeout having elapsed before Abort_Pending forced the receiver
+   --  out. So the loop is not what makes the failure reliable -- the
+   --  race lands on the first attempt -- it is there to keep
+   --  exercising a teardown ordering that only ever happens by
+   --  coincidence.
    declare
       Iterations : constant := 50;
    begin
