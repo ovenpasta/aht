@@ -132,10 +132,13 @@ package AHT.Transport.TLS is
    --      that borrow protocol.
    --    * An attempt that never published -- a failed or aborted
    --      Connect -- is closed by Attempt_Owner.Finalize, on the
-   --      connecting task itself. Exclusivity holds because the session
-   --      was never handed over: the receiver task exists (it is a
-   --      component of the client and outlives any one connection) but
-   --      never accepted this session and has no way to reach it, so
+   --      connecting task itself. Exclusivity holds because ownership
+   --      never completed. The receiver task exists -- it is a
+   --      component of the client and outlives any one connection --
+   --      and may even have accepted the Start rendezvous, since
+   --      Cur_Sess is assigned inside it and Publish can still raise
+   --      afterwards; what matters is that the handler then drops the
+   --      pointer, so the receiver retains no path to this session and
    --      the connecting task is its only owner. Which is why the owner
    --      checks Attempt_Handed_Off first and does nothing if it fired.
    --

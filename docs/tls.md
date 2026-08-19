@@ -253,13 +253,16 @@ session ever became reachable by a second task:
   lifecycle.
 - **An attempt that never published** — a failed or aborted `Connect`
   — is closed by `Attempt_Owner.Finalize`, on the connecting task
-  itself. The receiver task still exists; it is a component of the
-  client, not of a connection, so it outlives any one of them. What
-  makes this exclusive is that it never accepted *this* session and
-  has no way to reach it, leaving the connecting task its only owner.
-  The owner checks `Attempt_Handed_Off` first and does nothing if it
-  fired, which is what keeps the two routes from both firing on one
-  session.
+  itself. The receiver task still exists — it is a component of the
+  client, not of a connection, so it outlives any one of them — and it
+  may even have accepted the `Start` rendezvous, since `Cur_Sess` is
+  assigned inside the accept body and `Publish` can raise after that.
+  What makes this exclusive is not that acceptance never happened but
+  that *ownership never completed*: the rendezvous handler drops the
+  pointer, so the receiver retains no path to the session and the
+  connecting task is its only owner. The owner checks
+  `Attempt_Handed_Off` first and does nothing if it fired, which is
+  what keeps the two routes from both firing on one session.
 
 `Wait_Closed` is easy to mistake for that point and is not it.
 `Reclaim` publishes `Closed` — which opens that entry — *before* it

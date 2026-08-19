@@ -763,14 +763,21 @@ begin
    --  (Hold => 0.0), so the receiver task hits EOF and winds up to
    --  Closed while Close is still mid-handshake. The old Close did an
    --  unconditional State.Set (Closing) after sending its Close frame,
-   --  clobbering the Closed the receiver had just published — and since
-   --  that was the receiver's only Closed transition for this
-   --  connection, nothing would ever republish it and Wait_Closed
-   --  (barrier Current = Closed) parked forever. Not because the
-   --  receiver had gone: it may well have been in Reclaim, blocked in
-   --  Wait_No_Borrowers behind the very caller's teardown borrow. What
-   --  matters is that its one transition had already happened. That deadlocked ~1-in-5 process
-   --  runs. Loop the scenario so a re-introduced clobber reliably hangs
+   --  clobbering the Closed the receiver had just published — and that
+   --  publication was the last one the receiver of the day would make,
+   --  so nothing came after it to repair the clobber and Wait_Closed
+   --  (barrier Current = Closed) parked forever. That deadlocked
+   --  ~1-in-5 process runs.
+   --
+   --  Stated as the historical fact it is, because neither half of it
+   --  describes the code this test now runs against: that receiver had
+   --  no Reclaim and set Closed as it wound down, whereas today's
+   --  publishes Closed from Reclaim and a teardown pin can publish it
+   --  too. What survives is the shape — a caller overwriting a Closed
+   --  it did not publish — which is what the loop below is here to
+   --  catch if it comes back.
+   --
+   --  Loop the scenario so a re-introduced clobber reliably hangs
    --  (caught by the suite timeout) rather than slipping through; with
    --  the fix every iteration tears down promptly.
    declare

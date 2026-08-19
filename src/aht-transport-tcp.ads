@@ -101,10 +101,12 @@ package AHT.Transport.TCP is
    --  Precondition (caller's responsibility, not enforceable here): no other
    --  task may be inside ANY operation on this transport when `Close` runs.
    --  The whole object, as the parent contract in `AHT.Transport` says, and
-   --  for the same reason it stopped enumerating: `Close` reclaims the
-   --  socket, both selectors and the deadline state, and `Poison` and the
-   --  deadline setters reach all of that too, so a list of primitives goes
-   --  stale the moment one is added.
+   --  for the same reason it stopped enumerating. `Close` reclaims the
+   --  socket, both selectors and the deadline state; `Poison` reaches the
+   --  socket and the selectors; the deadline setters reach the deadline
+   --  fields. No single primitive overlaps everything `Close` touches,
+   --  which is exactly why naming a few of them reads as a complete list
+   --  and is not one.
    --
    --  The sharpest instance is the selector: GNAT forbids `Close_Selector`
    --  while another task is parked in `Check_Selector`, so a `Close` that
