@@ -792,12 +792,14 @@ begin
    --
    --  That shows the bound doing its job, and no more. It is what the
    --  intended shape produces — the receiver published Closed, the
-   --  clobber overwrote it, and nothing was left to republish it — but
-   --  it does not distinguish that from a receiver that had simply not
-   --  published within the five seconds, which looks identical from
-   --  out here. So this run does not say where the receiver was when
-   --  the bound expired, and nothing here says whether Abort_Pending
-   --  found it in transport I/O or not.
+   --  clobber overwrote it, and nothing republished it *inside the
+   --  wait*, which is all the shape needs; Finalize does republish it,
+   --  but not until Close_Handshake has already given up. What the run
+   --  does not do is distinguish that from a receiver which had simply
+   --  not published within those five seconds, since the two look
+   --  identical from out here. So it does not say where the receiver
+   --  was when the bound expired, and nothing here says whether
+   --  Abort_Pending found it in transport I/O or not.
    --
    --  What holds either way is structural. Reclamation cannot pass
    --  Wait_No_Borrowers while the closer holds its teardown pin, so
