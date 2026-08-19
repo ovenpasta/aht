@@ -783,13 +783,21 @@ begin
    --  handshake Timeout, and Teardown_Pin.Finalize republishes Closed
    --  on the way out regardless.
    --
-   --  Measured, by putting the old unconditional transition back:
-   --  iteration 1 fails with "Close took 5.000736000s", the whole 5 s
-   --  Timeout having elapsed before Abort_Pending forced the receiver
-   --  out. So the loop is not what makes the failure reliable -- the
-   --  race lands on the first attempt -- it is there to keep
-   --  exercising a teardown ordering that only ever happens by
-   --  coincidence.
+   --  Measured, by putting the old unconditional transition back: that
+   --  run failed at iteration 1 with "Close took 5.000736000s". The
+   --  five seconds are the Timeout elapsing with nothing able to open
+   --  Wait_Closed — the receiver had already published its Closed from
+   --  Reclaim and was parked in Wait_No_Borrowers behind this very
+   --  closer's teardown pin. Abort_Pending does fire when the bound
+   --  expires, but it reaches a receiver that is not in transport I/O
+   --  and is not what ends this: Teardown_Pin.Finalize is, republishing
+   --  Closed and then releasing the borrow so reclamation can finish.
+   --
+   --  Which iteration trips is not fixed, and that run reaching it
+   --  immediately says nothing about the next one. Whether the
+   --  receiver's EOF beats the caller's Close is a scheduling
+   --  question — that is the whole point of the case — so the loop is
+   --  here to keep offering the ordering chances to happen.
    declare
       Iterations : constant := 50;
    begin
