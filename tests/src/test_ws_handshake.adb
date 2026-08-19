@@ -787,27 +787,27 @@ begin
    --  on the way out regardless.
    --
    --  Measured, by putting the old unconditional transition back: that
-   --  run failed at iteration 1 with "Close took 5.000736000s".
+   --  run failed at iteration 1 with "Close took 5.000736000s" — the
+   --  whole Timeout.
    --
-   --  The five seconds are the Timeout elapsing with nothing able to
-   --  open Wait_Closed, and that is itself what tells us the receiver's
-   --  Closed had already been published and clobbered — a Closed
-   --  arriving afterwards would have opened the barrier and returned
-   --  Close promptly. Meanwhile reclamation could not get past
-   --  Wait_No_Borrowers, because this very closer held its teardown
-   --  pin. That is a structural fact about the gate, not a claim about
-   --  where the receiver task was sitting: nothing here observes task
-   --  residency, any more than the transport tests can observe selector
-   --  residency.
+   --  That shows the bound doing its job, and no more. It is what the
+   --  intended shape produces — the receiver published Closed, the
+   --  clobber overwrote it, and nothing was left to republish it — but
+   --  it does not distinguish that from a receiver that had simply not
+   --  published within the five seconds, which looks identical from
+   --  out here. So this run does not say where the receiver was when
+   --  the bound expired, and nothing here says whether Abort_Pending
+   --  found it in transport I/O or not.
    --
-   --  Abort_Pending does fire when the bound expires, but the receiver
-   --  is not in transport I/O for it to end. What ends this is
-   --  Teardown_Pin.Finalize — republishing Closed, then releasing the
-   --  borrow as its last statement, which is what lets reclamation
-   --  proceed.
+   --  What holds either way is structural. Reclamation cannot pass
+   --  Wait_No_Borrowers while the closer holds its teardown pin, so
+   --  Teardown_Pin.Finalize — republishing Closed, then releasing that
+   --  borrow as its last statement — is on the path in both shapes.
+   --  Which is the part that matters here: a re-introduced clobber
+   --  ends in a failed one-second assertion rather than a hung run.
    --
-   --  Which iteration trips is not fixed, and that run reaching it
-   --  immediately says nothing about the next one. Whether the
+   --  Which iteration trips is not fixed either, and that run failing
+   --  at its first says nothing about the next one. Whether the
    --  receiver's EOF beats the caller's Close is a scheduling
    --  question — that is the whole point of the case — so the loop is
    --  here to keep offering the ordering chances to happen.
