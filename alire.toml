@@ -27,9 +27,51 @@ project-files = ["aht.gpr"]
 windows = false
 '...' = true
 
+# Windows is not available yet, and the flag above is the only thing
+# saying so. When it flips it does not become `windows = true`: the
+# supported target is x86-64 specifically, since AHT_CROSS_TARGET
+# defaults to x86_64-w64-mingw32 and scripts/fetch_mbedtls.sh refuses
+# a toolchain whose -dumpmachine disagrees. An i686 MSYS2 would fail
+# that check rather than build something wrong, but failing at the
+# pre-build action is a worse way to learn it than not resolving. So
+# the replacement is:
+#
+#   [available.'case(os)'.windows.'case(host-arch)']
+#   x86_64 = true
+#   '...'  = false
+#
+#   [available.'case(os)'.'...']
+#   '...' = true
+#
+# Claiming any other Windows architecture means deriving its triplet
+# rather than defaulting one, which nothing here does today.
+
 [gpr-externals]
 BUILD_MODE = ["debug", "release"]
 AHT_TLS_BACKEND = ["openssl", "mbedtls"]
+AHT_OS = ["posix", "windows"]
+
+# Set for the BUILD ENVIRONMENT, which is not the same thing as
+# [gpr-externals] above and is why both exist.
+#
+# A gpr external reaches the project file and nothing else. The
+# pre-build action is a separate process, and it needs AHT_TLS_BACKEND
+# to know whether to fetch mbedTLS at all and AHT_OS to know which
+# per-target tree to build. Measured rather than assumed: a probe
+# action printing its environment under `alr build` sees the variables
+# set here, and sees AHT_TLS_BACKEND as UNSET when it is declared only
+# as a gpr external.
+#
+# Windows only, deliberately. On Windows there is no choice to make --
+# the openssl backend wants a system OpenSSL 3 that MSYS2 does not
+# provide the way this build expects, so mbedtls is the backend and
+# the Windows body of AHT.Random.Source is the only one that links.
+# Elsewhere there IS a choice, and `.set` would overwrite it: pinning
+# these on Linux or macOS would break `AHT_TLS_BACKEND=mbedtls alr
+# build`, which is the documented way to select the other backend.
+[environment.'case(os)'.windows]
+AHT_OS.set = "windows"
+AHT_TLS_BACKEND.set = "mbedtls"
 
 [build-switches]
 "*".ada_version = "Ada2022"
