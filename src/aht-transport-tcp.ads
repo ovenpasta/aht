@@ -105,9 +105,11 @@ package AHT.Transport.TCP is
    --  contract violation — the selector teardown can only be best-effort and
    --  the object is then left permanently non-reusable (see `Used`). For the
    --  concurrent fatal-write case use `Poison` (reader-safe) and defer
-   --  `Close` until the reader has exited. `Websocket.Client` follows this:
-   --  it waits on the receiver task (`Wait_Closed`) *before* closing the
-   --  transport.
+   --  `Close` until the reader has exited. `Websocket.Client` follows this,
+   --  though not by waiting anywhere: the receiver closes the transport
+   --  itself during reclamation, after it has stopped handing out borrows
+   --  and seen the outstanding ones reach zero, so the reader has left
+   --  `Read` by construction rather than by a handshake between tasks.
 
    overriding function Is_Connected (Self : TCP_Transport) return Boolean;
 

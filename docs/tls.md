@@ -244,10 +244,19 @@ is a use-after-free rather than a stale answer.
 
 Each client meets that contract its own way, and those ways are not
 the contract. The HTTP client is synchronous, so there is never a
-second task. `Websocket.Client` never calls `Close` on the transport
-from a user's task at all: the receiver closes it, in `Reclaim`, after
-`Stop_Admission` has shut the door and `Wait_No_Borrowers` has seen
-the last borrow returned. Exclusivity comes from the borrow lifecycle.
+second task. `Websocket.Client` has two ways, split by whether the
+session ever became reachable by a second task:
+
+- **Published sessions** are closed by the receiver, in `Reclaim`,
+  after `Stop_Admission` has shut the door and `Wait_No_Borrowers` has
+  seen the last borrow returned. Exclusivity comes from the borrow
+  lifecycle.
+- **An attempt that never published** — a failed or aborted `Connect`
+  — is closed by `Attempt_Owner.Finalize`, on the connecting task
+  itself. Exclusivity is trivial: no receiver exists, and that task is
+  the session's only owner. The owner checks `Attempt_Handed_Off`
+  first and does nothing if it fired, which is what keeps the two
+  routes from both firing on one session.
 
 `Wait_Closed` is easy to mistake for that point and is not it.
 `Reclaim` publishes `Closed` — which opens that entry — *before* it

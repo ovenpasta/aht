@@ -1722,14 +1722,17 @@ begin
                   --  a selector".
                   --
                   --  The parked path is not unevidenced, just not
-                  --  evidenced *here*. Before Poison aborted the
-                  --  selector, this case failed on Windows by taking
-                  --  the whole 5 s read deadline. Timeout_Error alone
-                  --  would not show where it waited -- the deadline is
-                  --  checked before the park as well as after -- but
-                  --  consuming five seconds does: nothing else in the
-                  --  loop takes any time, so the reader spent them in
-                  --  the selector.
+                  --  evidenced *here* -- and not proven anywhere.
+                  --  Before Poison aborted the selector, this case
+                  --  failed on Windows by taking the whole 5 s read
+                  --  deadline, which is strong evidence: the only
+                  --  thing in that loop that consumes time is the
+                  --  selector wait. Evidence, not proof. A task
+                  --  descheduled for five seconds before it ever
+                  --  reached the park would look the same from out
+                  --  here -- implausible, not impossible. There is no
+                  --  observable for selector residency, so this is
+                  --  where the claim stops.
                   delay 0.2;
 
                   T.Set_Write_Deadline (0.3);

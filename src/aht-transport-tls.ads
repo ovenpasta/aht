@@ -123,11 +123,19 @@ package AHT.Transport.TLS is
    --  the whole object, and the caller must quiesce every task using it
    --  before calling this.
    --
-   --  Websocket.Client keeps that rule without any caller ever calling
-   --  this: it is the RECEIVER that closes the transport, in Reclaim,
-   --  and only after Stop_Admission has shut the door and
-   --  Wait_No_Borrowers has seen the last borrow returned. Exclusivity
-   --  comes from that borrow protocol.
+   --  Websocket.Client keeps that rule two different ways, depending on
+   --  whether the session ever became reachable by a second task:
+   --
+   --    * Published sessions are closed by the RECEIVER, in Reclaim,
+   --      after Stop_Admission has shut the door and Wait_No_Borrowers
+   --      has seen the last borrow returned. Exclusivity comes from
+   --      that borrow protocol.
+   --    * An attempt that never published -- a failed or aborted
+   --      Connect -- is closed by Attempt_Owner.Finalize, on the
+   --      connecting task itself. Exclusivity is trivial there: the
+   --      session was never handed over, so no receiver exists and that
+   --      task is its only owner. Which is why the owner checks
+   --      Attempt_Handed_Off first and does nothing if it fired.
    --
    --  Wait_Closed is NOT that point, and cannot be. It is a protected
    --  entry that opens when the connection state reaches Closed, which

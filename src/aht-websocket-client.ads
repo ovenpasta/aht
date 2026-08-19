@@ -262,8 +262,19 @@ private
    --    Connecting → Open    : on successful handshake.
    --    Open       → Closing : on a Close frame sent (locally or
    --                           echoed by the receiver).
-   --    *          → Closed  : receiver has exited; no more
+   --    *          → Closed  : the connection is finished; no more
    --                           messages will arrive.
+   --
+   --  Closed says that and no more. It does NOT mean the receiver has
+   --  exited, nor that the transport has been closed, nor that nobody
+   --  will touch it again: reclamation still has to run Abort_Pending,
+   --  close the transport and free the session, and it publishes Closed
+   --  before draining borrowers rather than after. Nor is the receiver
+   --  necessarily the one that published it -- Teardown_Pin.Finalize
+   --  sets it from whichever task drove the teardown.
+   --
+   --  What waits for reclamation to have finished is
+   --  Ctl.Wait_Generation_Done, not Wait_Closed below.
    --  Not to be confused with Client_State below, which is the
    --  *client*-level lifecycle and outlives any single connection.
    type State_Kind is (Connecting, Open, Closing, Closed);
@@ -274,12 +285,15 @@ private
       entry     Wait_Closed;
       --  Atomically move Open/Closing -> Closing without ever
       --  downgrading a Closed the receiver published concurrently.
-      --  Returns Already_Closed = True iff Current is already Closed
-      --  (the receiver has marked the connection closed -- via its
-      --  EOF/echo/protocol-failure paths -- and will not touch the
-      --  transport again); the caller must then skip the close
-      --  handshake, since Wait_Closed is already open and no further
-      --  Closed will ever be published.
+      --  Returns Already_Closed = True iff Current is already Closed --
+      --  the connection is finished, whether the receiver marked it so
+      --  on one of its EOF/echo/protocol-failure paths or a teardown pin
+      --  did. The caller must then skip the close handshake: there is
+      --  nobody left to exchange it with, Wait_Closed is already open,
+      --  and no further Closed will ever be published.
+      --
+      --  It does not mean the transport is closed or done being used;
+      --  see the note on State_Kind above.
       procedure Begin_Closing (Already_Closed : out Boolean);
       --  Atomic "did we already send a Close on the wire?". Both
       --  the user-initiated Close path and the receiver's echo
