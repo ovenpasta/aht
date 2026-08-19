@@ -132,10 +132,12 @@ package AHT.Transport.TLS is
    --      that borrow protocol.
    --    * An attempt that never published -- a failed or aborted
    --      Connect -- is closed by Attempt_Owner.Finalize, on the
-   --      connecting task itself. Exclusivity is trivial there: the
-   --      session was never handed over, so no receiver exists and that
-   --      task is its only owner. Which is why the owner checks
-   --      Attempt_Handed_Off first and does nothing if it fired.
+   --      connecting task itself. Exclusivity holds because the session
+   --      was never handed over: the receiver task exists (it is a
+   --      component of the client and outlives any one connection) but
+   --      never accepted this session and has no way to reach it, so
+   --      the connecting task is its only owner. Which is why the owner
+   --      checks Attempt_Handed_Off first and does nothing if it fired.
    --
    --  Wait_Closed is NOT that point, and cannot be. It is a protected
    --  entry that opens when the connection state reaches Closed, which

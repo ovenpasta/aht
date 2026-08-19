@@ -764,8 +764,12 @@ begin
    --  Closed while Close is still mid-handshake. The old Close did an
    --  unconditional State.Set (Closing) after sending its Close frame,
    --  clobbering the Closed the receiver had just published — and since
-   --  the receiver was already gone, Wait_Closed (barrier Current =
-   --  Closed) then parked forever. That deadlocked ~1-in-5 process
+   --  that was the receiver's only Closed transition for this
+   --  connection, nothing would ever republish it and Wait_Closed
+   --  (barrier Current = Closed) parked forever. Not because the
+   --  receiver had gone: it may well have been in Reclaim, blocked in
+   --  Wait_No_Borrowers behind the very caller's teardown borrow. What
+   --  matters is that its one transition had already happened. That deadlocked ~1-in-5 process
    --  runs. Loop the scenario so a re-introduced clobber reliably hangs
    --  (caught by the suite timeout) rather than slipping through; with
    --  the fix every iteration tears down promptly.

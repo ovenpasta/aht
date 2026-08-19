@@ -99,17 +99,26 @@ package AHT.Transport.TCP is
    --  clean or poisoned object.
    --
    --  Precondition (caller's responsibility, not enforceable here): no other
-   --  task may be inside `Read`/`Write`/`Abort_Pending` on this transport
-   --  when `Close` runs. GNAT forbids `Close_Selector` while another task is
-   --  parked in `Check_Selector`, so a `Close` that races a live reader is a
-   --  contract violation — the selector teardown can only be best-effort and
-   --  the object is then left permanently non-reusable (see `Used`). For the
-   --  concurrent fatal-write case use `Poison` (reader-safe) and defer
-   --  `Close` until the reader has exited. `Websocket.Client` follows this,
-   --  though not by waiting anywhere: the receiver closes the transport
-   --  itself during reclamation, after it has stopped handing out borrows
-   --  and seen the outstanding ones reach zero, so the reader has left
-   --  `Read` by construction rather than by a handshake between tasks.
+   --  task may be inside ANY operation on this transport when `Close` runs.
+   --  The whole object, as the parent contract in `AHT.Transport` says, and
+   --  for the same reason it stopped enumerating: `Close` reclaims the
+   --  socket, both selectors and the deadline state, and `Poison` and the
+   --  deadline setters reach all of that too, so a list of primitives goes
+   --  stale the moment one is added.
+   --
+   --  The sharpest instance is the selector: GNAT forbids `Close_Selector`
+   --  while another task is parked in `Check_Selector`, so a `Close` that
+   --  races a live reader is a contract violation — the selector teardown
+   --  can only be best-effort and the object is then left permanently
+   --  non-reusable (see `Used`). For the concurrent fatal-write case use
+   --  `Poison` (reader-safe) and defer `Close` until the reader has exited.
+   --
+   --  `Websocket.Client` follows this, but not by any caller waiting on the
+   --  receiver: the receiver closes the transport itself during
+   --  reclamation, having first stopped handing out borrows and then
+   --  waited, in `Wait_No_Borrowers`, for the outstanding ones to reach
+   --  zero. There is a wait — it is just on the borrow count, performed by
+   --  the same task that then closes, rather than a handshake between two.
 
    overriding function Is_Connected (Self : TCP_Transport) return Boolean;
 

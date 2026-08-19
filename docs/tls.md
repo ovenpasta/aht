@@ -253,10 +253,13 @@ session ever became reachable by a second task:
   lifecycle.
 - **An attempt that never published** — a failed or aborted `Connect`
   — is closed by `Attempt_Owner.Finalize`, on the connecting task
-  itself. Exclusivity is trivial: no receiver exists, and that task is
-  the session's only owner. The owner checks `Attempt_Handed_Off`
-  first and does nothing if it fired, which is what keeps the two
-  routes from both firing on one session.
+  itself. The receiver task still exists; it is a component of the
+  client, not of a connection, so it outlives any one of them. What
+  makes this exclusive is that it never accepted *this* session and
+  has no way to reach it, leaving the connecting task its only owner.
+  The owner checks `Attempt_Handed_Off` first and does nothing if it
+  fired, which is what keeps the two routes from both firing on one
+  session.
 
 `Wait_Closed` is easy to mistake for that point and is not it.
 `Reclaim` publishes `Closed` — which opens that entry — *before* it
