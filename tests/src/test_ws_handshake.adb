@@ -760,14 +760,17 @@ begin
 
    --  Case 14: close-during-receiver-EOF race (regression). The fake
    --  server completes the handshake then immediately drops the socket
-   --  (Hold => 0.0), so the receiver task hits EOF and winds up to
-   --  Closed while Close is still mid-handshake. The old Close did an
-   --  unconditional State.Set (Closing) after sending its Close frame,
-   --  clobbering the Closed the receiver had just published — and that
-   --  publication was the last one the receiver of the day would make,
-   --  so nothing came after it to repair the clobber and Wait_Closed
-   --  (barrier Current = Closed) parked forever. That deadlocked
-   --  ~1-in-5 process runs.
+   --  (Hold => 0.0), which gives the receiver a chance to hit EOF and
+   --  reach Closed while Close is still mid-handshake. A chance and not
+   --  a guarantee -- which of the two gets there first is up to the
+   --  scheduler, and is exactly what this case is about.
+   --
+   --  The old Close did an unconditional State.Set (Closing) after
+   --  sending its Close frame, clobbering the Closed the receiver had
+   --  just published — and that publication was the last one the
+   --  receiver of the day would make, so nothing came after it to
+   --  repair the clobber and Wait_Closed (barrier Current = Closed)
+   --  parked forever. That deadlocked ~1-in-5 process runs.
    --
    --  Stated as the historical fact it is, because neither half of it
    --  describes the code this test now runs against: that receiver had
@@ -784,14 +787,24 @@ begin
    --  on the way out regardless.
    --
    --  Measured, by putting the old unconditional transition back: that
-   --  run failed at iteration 1 with "Close took 5.000736000s". The
-   --  five seconds are the Timeout elapsing with nothing able to open
-   --  Wait_Closed — the receiver had already published its Closed from
-   --  Reclaim and was parked in Wait_No_Borrowers behind this very
-   --  closer's teardown pin. Abort_Pending does fire when the bound
-   --  expires, but it reaches a receiver that is not in transport I/O
-   --  and is not what ends this: Teardown_Pin.Finalize is, republishing
-   --  Closed and then releasing the borrow so reclamation can finish.
+   --  run failed at iteration 1 with "Close took 5.000736000s".
+   --
+   --  The five seconds are the Timeout elapsing with nothing able to
+   --  open Wait_Closed, and that is itself what tells us the receiver's
+   --  Closed had already been published and clobbered — a Closed
+   --  arriving afterwards would have opened the barrier and returned
+   --  Close promptly. Meanwhile reclamation could not get past
+   --  Wait_No_Borrowers, because this very closer held its teardown
+   --  pin. That is a structural fact about the gate, not a claim about
+   --  where the receiver task was sitting: nothing here observes task
+   --  residency, any more than the transport tests can observe selector
+   --  residency.
+   --
+   --  Abort_Pending does fire when the bound expires, but the receiver
+   --  is not in transport I/O for it to end. What ends this is
+   --  Teardown_Pin.Finalize — republishing Closed, then releasing the
+   --  borrow as its last statement, which is what lets reclamation
+   --  proceed.
    --
    --  Which iteration trips is not fixed, and that run reaching it
    --  immediately says nothing about the next one. Whether the
