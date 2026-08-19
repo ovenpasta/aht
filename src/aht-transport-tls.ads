@@ -123,15 +123,25 @@ package AHT.Transport.TLS is
    --  the whole object, and the caller must quiesce every task using it
    --  before calling this.
    --
-   --  Websocket.Client keeps that rule, though not the way it might
-   --  look: Wait_Closed is a protected entry on the connection state,
-   --  not a join on the receiver. It is the RECEIVER that closes the
-   --  transport, in Reclaim, and only after Stop_Admission has shut the
-   --  door and Wait_No_Borrowers has seen the last borrow returned. A
-   --  caller waiting on Wait_Closed is waiting for that to have
-   --  happened. For the concurrent fatal-write case the inner TCP is
-   --  Poison'ed (reader-safe), deferring this reclaim until the reader
-   --  has exited.
+   --  Websocket.Client keeps that rule without any caller ever calling
+   --  this: it is the RECEIVER that closes the transport, in Reclaim,
+   --  and only after Stop_Admission has shut the door and
+   --  Wait_No_Borrowers has seen the last borrow returned. Exclusivity
+   --  comes from that borrow protocol.
+   --
+   --  Wait_Closed is NOT that point, and cannot be. It is a protected
+   --  entry that opens when the connection state reaches Closed, which
+   --  Reclaim publishes *before* it drains borrowers — and the caller
+   --  waits on it while still holding its own teardown borrow, so a
+   --  Wait_Closed that meant "reclaimed" would deadlock against the
+   --  drain it is part of. The caller learns that the transport is
+   --  closed and the session freed from Wait_Generation_Done, which it
+   --  reaches only after leaving the pin's scope and giving that borrow
+   --  back.
+   --
+   --  For the concurrent fatal-write case the inner TCP is Poison'ed
+   --  (reader-safe), deferring this reclaim until the reader has
+   --  exited.
 
    overriding function Is_Connected (Self : TLS_Transport) return Boolean;
    --  True after a successful Connect until Close — except that a

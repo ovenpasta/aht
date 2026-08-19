@@ -1722,10 +1722,14 @@ begin
                   --  a selector".
                   --
                   --  The parked path is not unevidenced, just not
-                  --  evidenced *here*: before Poison aborted the
-                  --  selector, this case failed on Windows with
-                  --  "timeout", which only a genuinely parked reader
-                  --  can produce.
+                  --  evidenced *here*. Before Poison aborted the
+                  --  selector, this case failed on Windows by taking
+                  --  the whole 5 s read deadline. Timeout_Error alone
+                  --  would not show where it waited -- the deadline is
+                  --  checked before the park as well as after -- but
+                  --  consuming five seconds does: nothing else in the
+                  --  loop takes any time, so the reader spent them in
+                  --  the selector.
                   delay 0.2;
 
                   T.Set_Write_Deadline (0.3);
@@ -1776,10 +1780,11 @@ begin
                            & "decide on Is_Connected, not on which wake "
                            & "mechanism arrived first");
                   elsif Outcome = "timeout" then
-                     Fail ("write-vs-read: the reader was NOT released by the "
-                           & "poison — it fell through to its own 5 s backstop "
-                           & "deadline, so it was parked and the write-side "
-                           & "teardown raced or ignored its selector");
+                     Fail ("write-vs-read: the reader ended on its own 5 s "
+                           & "read deadline rather than on the poison, so "
+                           & "the poison never reached it (the deadline "
+                           & "check fires both before and after the park, "
+                           & "so this says nothing about where it was)");
                   elsif Outcome = "data" then
                      Fail ("write-vs-read: reader saw data from a deaf peer");
                   else
@@ -1925,14 +1930,18 @@ begin
                            & "and this run says nothing about the poison "
                            & "path");
                   elsif Outcome = "timeout" then
-                     Fail ("poison-vs-write: the writer was NOT released "
-                           & "by Poison — it fell through to its own 10 s "
-                           & "backstop deadline, so it was parked and "
-                           & "Poison left the write selector alone");
+                     Fail ("poison-vs-write: the writer ended on its own "
+                           & "10 s write deadline rather than on Poison, so "
+                           & "Poison never reached it (the deadline check "
+                           & "fires both before and after the park, so this "
+                           & "says nothing about where it was)");
                   elsif Outcome = "returned" then
                      Fail ("poison-vs-write: the write completed against a "
-                           & "peer that never reads, so no writer was ever "
-                           & "parked — this case proved nothing");
+                           & "peer that never reads, so there was no write "
+                           & "still outstanding when Poison ran and this "
+                           & "run proves nothing (it may have waited and "
+                           & "finished anyway — what failed is the premise, "
+                           & "not a claim about where it waited)");
                   else
                      Fail ("poison-vs-write: writer raised " & Outcome);
                   end if;

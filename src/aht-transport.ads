@@ -98,10 +98,13 @@ package AHT.Transport is
    --  poison/shutdown-only path: a poison-only finalizer would leak the
    --  fd, both selectors and (for TLS) the mbedTLS contexts on every
    --  normal scope exit, since nothing else would ever free them. That
-   --  means Finalize inherits `Close`'s single-threaded precondition (no
-   --  task may be inside Read/Write/Abort_Pending on this transport while
-   --  it runs). For the owners in this library that is satisfied
-   --  structurally, not by luck:
+   --  means Finalize inherits `Close`'s single-threaded precondition: no
+   --  other task may be inside ANY operation on this transport while it
+   --  runs. The whole object rather than a list of primitives, because
+   --  a list falls behind the body — the TLS `Close` frees state that
+   --  `Is_Connected` and the deadline setters dereference too, so those
+   --  race it just as fatally as a `Read` does. For the owners in this
+   --  library the rule is satisfied structurally, not by luck:
    --    * Standalone transports (the HTTP client's fresh-per-request
    --      `T`) are used on one task only — no concurrent reader exists at
    --      scope exit.

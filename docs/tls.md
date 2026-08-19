@@ -244,14 +244,19 @@ is a use-after-free rather than a stale answer.
 
 Each client meets that contract its own way, and those ways are not
 the contract. The HTTP client is synchronous, so there is never a
-second task. `Websocket.Client` is the interesting one, and it does
-not work the way the name suggests: `Wait_Closed` is a protected entry
-on the connection state, not a join on the receiver task. The receiver
-closes the transport itself, in `Reclaim`, and only after
+second task. `Websocket.Client` never calls `Close` on the transport
+from a user's task at all: the receiver closes it, in `Reclaim`, after
 `Stop_Admission` has shut the door and `Wait_No_Borrowers` has seen
-the last borrow returned — so exclusivity comes from the borrow
-lifecycle, and a caller blocked on `Wait_Closed` is waiting for that
-to have finished.
+the last borrow returned. Exclusivity comes from the borrow lifecycle.
+
+`Wait_Closed` is easy to mistake for that point and is not it.
+`Reclaim` publishes `Closed` — which opens that entry — *before* it
+drains borrowers, and `Websocket.Client.Close` waits there while still
+holding its own teardown borrow. An entry that meant "reclaimed" would
+therefore deadlock against the drain it is part of. What a caller
+waits on for the transport to be closed and the session freed is
+`Wait_Generation_Done`, reached only after the pin's scope ends and
+that borrow goes back.
 
 A direct user of `AHT.Transport.TLS` has neither mechanism and has to
 quiesce its own tasks. One that calls `Close` with a reader still
