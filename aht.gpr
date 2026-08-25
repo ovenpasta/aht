@@ -96,7 +96,11 @@ library project Aht is
          Os_Dirs := ("src/os/windows");
    end case;
 
-   for Source_Dirs use ("src") & Tls_Dirs & Os_Dirs;
+   --  csrc/dns is not part of either split: the shim is one file with
+   --  both platforms inside it, because the two halves differ only in
+   --  which thread API they name and splitting them would duplicate
+   --  the refcount handoff, which is the only part worth reviewing.
+   for Source_Dirs use ("src", "csrc/dns") & Tls_Dirs & Os_Dirs;
 
    --  Output dirs are per-mode AND per-backend so no combination ever
    --  clobbers another (a release build used to overwrite the debug
