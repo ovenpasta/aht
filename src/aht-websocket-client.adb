@@ -1447,14 +1447,17 @@ package body AHT.Websocket.Client is
    ---------------------------------------------------------------
 
    procedure Connect
-     (Self          : in out Client_Type;
-      URL           : String;
-      Extra_Headers : AHT.HTTP.Headers.Map;
-      Subprotocols  : String := "";
-      Origin        : String := "";
-      Insecure      : Boolean := False;
-      CA_Path       : String := "";
-      CA_PEM        : String := "")
+     (Self               : in out Client_Type;
+      URL                : String;
+      Extra_Headers      : AHT.HTTP.Headers.Map;
+      Subprotocols       : String := "";
+      Origin             : String := "";
+      Insecure           : Boolean := False;
+      CA_Path            : String := "";
+      CA_PEM             : String := "";
+      Connect_Timeout    : Duration := Duration'Last;
+      Handshake_Deadline : Duration := Duration'Last;
+      Upgrade_Deadline   : Duration := Duration'Last)
    is
       Parsed : constant AHT.URL.URL_Type := AHT.URL.Parse (URL);
 
@@ -1609,19 +1612,34 @@ package body AHT.Websocket.Client is
                when Secure_Transport =>
                   AHT.Transport.TLS.Connect
                     (Attempt.Sess.Secure,
-                     Host     => To_String (Parsed.Host),
-                     Port     => Parsed.Port,
-                     Insecure => Insecure,
-                     CA_Path  => CA_Path,
-                     CA_PEM   => CA_PEM);
+                     Host               => To_String (Parsed.Host),
+                     Port               => Parsed.Port,
+                     Insecure           => Insecure,
+                     CA_Path            => CA_Path,
+                     Connect_Timeout    => Connect_Timeout,
+                     Handshake_Deadline => Handshake_Deadline,
+                     CA_PEM             => CA_PEM);
                when Plain_Transport =>
+                  --  No Handshake_Deadline here: ws:// runs no TLS
+                  --  handshake, so there is nothing for it to bound.
                   AHT.Transport.TCP.Connect
                     (Attempt.Sess.Plain,
-                     Host => To_String (Parsed.Host),
-                     Port => Parsed.Port);
+                     Host            => To_String (Parsed.Host),
+                     Port            => Parsed.Port,
+                     Connect_Timeout => Connect_Timeout);
             end case;
 
             begin
+               --  Both directions, armed before the request goes out
+               --  rather than one each side of it, so a single budget
+               --  covers the whole exchange -- a peer that completes
+               --  the connect and then stops draining blocks the
+               --  Write just as surely as one that never answers
+               --  blocks the Read, and only one of those two would be
+               --  bounded by a read deadline alone.
+               Active (Attempt.Sess).Set_Write_Deadline (Upgrade_Deadline);
+               Active (Attempt.Sess).Set_Read_Deadline (Upgrade_Deadline);
+
                AHT.HTTP.Request.Write (Req, Active (Attempt.Sess).all);
                AHT.HTTP.Response.Read
                  (Resp, Active (Attempt.Sess).all,
@@ -1699,10 +1717,24 @@ package body AHT.Websocket.Client is
                   Attempt.Sess.Selected_Protocol := To_Unbounded_String (Got);
                end;
 
-               --  Handshake good — flip the connection's own state
-               --  machine and hand the session to the receiver. The
-               --  controller publishes it inside the rendezvous, so
-               --  ownership transfer and visibility are one step.
+               --  Handshake good. Disarm the upgrade budget BEFORE
+               --  publishing, and not merely as tidiness: both
+               --  deadlines are compound and measured from the setter
+               --  call (see AHT.Transport), so one left armed does
+               --  not go on bounding the upgrade -- the upgrade is
+               --  over -- it expires under the receiver partway
+               --  through a healthy session and surfaces as a
+               --  Timeout_Error on a connection that was never in
+               --  trouble. Nothing between the Response.Read above
+               --  and here touches the transport, so this is the
+               --  whole of the exposure.
+               Active (Attempt.Sess).Set_Read_Deadline (Duration'Last);
+               Active (Attempt.Sess).Set_Write_Deadline (Duration'Last);
+
+               --  Flip the connection's own state machine and hand
+               --  the session to the receiver. The controller
+               --  publishes it inside the rendezvous, so ownership
+               --  transfer and visibility are one step.
                Attempt.Sess.State.Set (Open);
                --  'Unchecked_Access is safe by the same argument as
                --  Async_Handle: the Receiver task is itself a
@@ -1722,6 +1754,22 @@ package body AHT.Websocket.Client is
                   --  admission release all happen in Attempt's
                   --  Finalize, so no exit path can skip them.
                   raise;
+               when AHT.Transport.Timeout_Error =>
+                  --  Upgrade_Deadline expired, reported as itself
+                  --  rather than wrapped. The two bounds ahead of
+                  --  this one raise Timeout_Error straight out of the
+                  --  transport, and wrapping only this third one
+                  --  would make "the peer never answered" arrive as
+                  --  Handshake_Error, which means the opposite: that
+                  --  it answered and the answer was wrong.
+                  --
+                  --  This block arms no other deadline and the
+                  --  transport is fresh, so Timeout_Error here can
+                  --  only be that one. With Upgrade_Deadline left at
+                  --  its default the case is unreachable, which is
+                  --  why adding it changes nothing for callers who
+                  --  do not pass one.
+                  raise;
                when E : others =>
                   raise AHT.Websocket.Handshake_Error
                     with "Websocket.Client.Connect: "
@@ -1733,21 +1781,27 @@ package body AHT.Websocket.Client is
    end Connect;
 
    procedure Connect
-     (Self     : in out Client_Type;
-      URL      : String;
-      Insecure : Boolean := False;
-      CA_Path  : String := "";
-      CA_PEM   : String := "")
+     (Self               : in out Client_Type;
+      URL                : String;
+      Insecure           : Boolean := False;
+      CA_Path            : String := "";
+      CA_PEM             : String := "";
+      Connect_Timeout    : Duration := Duration'Last;
+      Handshake_Deadline : Duration := Duration'Last;
+      Upgrade_Deadline   : Duration := Duration'Last)
    is
       No_Extras : AHT.HTTP.Headers.Map;
    begin
       Connect
         (Self,
-         URL           => URL,
-         Extra_Headers => No_Extras,
-         Insecure      => Insecure,
-         CA_Path       => CA_Path,
-         CA_PEM        => CA_PEM);
+         URL                => URL,
+         Extra_Headers      => No_Extras,
+         Insecure           => Insecure,
+         CA_Path            => CA_Path,
+         CA_PEM             => CA_PEM,
+         Connect_Timeout    => Connect_Timeout,
+         Handshake_Deadline => Handshake_Deadline,
+         Upgrade_Deadline   => Upgrade_Deadline);
    end Connect;
 
    --  Called by every operation that would wait on the receiver.
@@ -1779,9 +1833,12 @@ package body AHT.Websocket.Client is
    end Configure;
 
    procedure Reconnect
-     (Self          : in out Client_Type;
-      Timeout       : Duration := 5.0;
-      Drain_Timeout : Duration := Default_Drain_Timeout)
+     (Self               : in out Client_Type;
+      Timeout            : Duration := 5.0;
+      Drain_Timeout      : Duration := Default_Drain_Timeout;
+      Connect_Timeout    : Duration := Duration'Last;
+      Handshake_Deadline : Duration := Duration'Last;
+      Upgrade_Deadline   : Duration := Duration'Last)
    is
       P  : Connect_Params;
       OK : Boolean;
@@ -1805,15 +1862,20 @@ package body AHT.Websocket.Client is
       --  over it is the one thing this must never do.
       Close (Self, Timeout => Timeout, Drain_Timeout => Drain_Timeout);
 
+      --  The saved params say WHAT to dial; the bounds come from this
+      --  call, not from the attempt being repeated.
       Connect
-        (Self          => Self,
-         URL           => To_String (P.URL),
-         Extra_Headers => P.Extra,
-         Subprotocols  => To_String (P.Subprotocols),
-         Origin        => To_String (P.Origin),
-         Insecure      => P.Insecure,
-         CA_Path       => To_String (P.CA_Path),
-         CA_PEM        => To_String (P.CA_PEM));
+        (Self               => Self,
+         URL                => To_String (P.URL),
+         Extra_Headers      => P.Extra,
+         Subprotocols       => To_String (P.Subprotocols),
+         Origin             => To_String (P.Origin),
+         Insecure           => P.Insecure,
+         CA_Path            => To_String (P.CA_Path),
+         CA_PEM             => To_String (P.CA_PEM),
+         Connect_Timeout    => Connect_Timeout,
+         Handshake_Deadline => Handshake_Deadline,
+         Upgrade_Deadline   => Upgrade_Deadline);
    end Reconnect;
 
    function Is_Open (Self : Client_Type) return Boolean is

@@ -26,21 +26,76 @@ package AHT.Websocket.Client is
    type On_Error_Callback   is access procedure (Message : String);
 
    procedure Connect
-     (Self          : in out Client_Type;
-      URL           : String;
-      Extra_Headers : AHT.HTTP.Headers.Map;
-      Subprotocols  : String := "";
-      Origin        : String := "";
-      Insecure      : Boolean := False;
-      CA_Path       : String := "";
-      CA_PEM        : String := "");
+     (Self               : in out Client_Type;
+      URL                : String;
+      Extra_Headers      : AHT.HTTP.Headers.Map;
+      Subprotocols       : String := "";
+      Origin             : String := "";
+      Insecure           : Boolean := False;
+      CA_Path            : String := "";
+      CA_PEM             : String := "";
+      Connect_Timeout    : Duration := Duration'Last;
+      Handshake_Deadline : Duration := Duration'Last;
+      Upgrade_Deadline   : Duration := Duration'Last);
 
    procedure Connect
-     (Self     : in out Client_Type;
-      URL      : String;
-      Insecure : Boolean := False;
-      CA_Path  : String := "";
-      CA_PEM   : String := "");
+     (Self               : in out Client_Type;
+      URL                : String;
+      Insecure           : Boolean := False;
+      CA_Path            : String := "";
+      CA_PEM             : String := "";
+      Connect_Timeout    : Duration := Duration'Last;
+      Handshake_Deadline : Duration := Duration'Last;
+      Upgrade_Deadline   : Duration := Duration'Last);
+   --  Three bounds on a dial, each covering a different stage, all
+   --  defaulting to Duration'Last — unbounded, which is what a dial
+   --  was before they existed. They are separate knobs because a
+   --  caller willing to wait out a slow TLS handshake may still
+   --  refuse to wait on a peer that never answers the upgrade.
+   --
+   --    Connect_Timeout     the TCP connect, as ONE total budget
+   --                        across every address DNS resolved to, not
+   --                        a per-candidate one. See
+   --                        AHT.Transport.TCP.Connect. Applies to
+   --                        ws:// and wss:// alike.
+   --
+   --    Handshake_Deadline  the TLS handshake alone, and so only on
+   --                        wss://; a ws:// dial runs none and
+   --                        ignores it. See AHT.Transport.TLS.Connect.
+   --
+   --    Upgrade_Deadline    the HTTP exchange that follows: writing
+   --                        the GET and reading the 101. Armed on
+   --                        both directions before the request goes
+   --                        out, so it bounds a peer that stops
+   --                        draining as well as one that never
+   --                        replies, and cleared once the response
+   --                        has been validated — a live connection
+   --                        never inherits it.
+   --
+   --  They are appended to the parameter list rather than placed
+   --  beside the ones they relate to, so that existing positional
+   --  callers keep compiling and keep meaning what they meant.
+   --
+   --  Exhaustion of any of the three raises Timeout_Error — the same
+   --  AHT.Transport.Timeout_Error that Close raises, not
+   --  Handshake_Error. The distinction is the point: Handshake_Error
+   --  means the peer answered and the answer was wrong, Timeout_Error
+   --  means it did not answer in time, and a caller deciding whether
+   --  to retry should not have to read the message text to tell them
+   --  apart.
+   --
+   --  A timed-out Connect leaves the client where admission found it
+   --  (Idle or Disconnected), releases the admission and closes the
+   --  half-built session, exactly as any other failed attempt does —
+   --  so a retry is legal and builds fresh transports.
+   --
+   --  What is NOT bounded: DNS resolution, which runs before any of
+   --  these is armed and is bounded only by the OS. A name that
+   --  resolves slowly still blocks. Resolving in the application and
+   --  passing an IP literal is not a fix — per AHT.Transport.TLS, an
+   --  IP-literal host sends no SNI and is verified against IP SANs,
+   --  which typical certificates do not carry, so it silently
+   --  weakens wss://.
 
    --  How decoded messages reach the application.
    --
@@ -168,17 +223,33 @@ package AHT.Websocket.Client is
    --                  explicitly rather than silently — Connect
    --                  refuses instead.
    --
-   --  The bounds are Close's, and mean the same things: Timeout for
-   --  the peer, Drain_Timeout for our own receiver. If the drain does
-   --  not finish in time this raises Timeout_Error WITHOUT redialing,
-   --  leaving the teardown to continue; a later Reconnect joins it.
+   --  Reconnect has five bounds, and they split two-and-three at the
+   --  drain/redial seam.
+   --
+   --  Timeout and Drain_Timeout are Close's, and mean exactly what
+   --  they mean there: Timeout for the peer's Close echo,
+   --  Drain_Timeout for our own receiver. They bound the drain only.
+   --  If the drain does not finish in time this raises Timeout_Error
+   --  WITHOUT redialing, leaving the teardown to continue; a later
+   --  Reconnect joins it.
+   --
+   --  Connect_Timeout, Handshake_Deadline and Upgrade_Deadline are
+   --  Connect's, and bound the redial that follows. They are
+   --  parameters of this call rather than replayed from the last
+   --  successful Connect: what Reconnect repeats is the connection —
+   --  URL, headers, trust anchors — and how long to wait for it is a
+   --  decision the caller is entitled to make differently each time,
+   --  not a property the session froze.
    --
    --  Raises Reentrant_Error from inside a callback, for the same
    --  reason Close does.
    procedure Reconnect
-     (Self          : in out Client_Type;
-      Timeout       : Duration := 5.0;
-      Drain_Timeout : Duration := Default_Drain_Timeout);
+     (Self               : in out Client_Type;
+      Timeout            : Duration := 5.0;
+      Drain_Timeout      : Duration := Default_Drain_Timeout;
+      Connect_Timeout    : Duration := Duration'Last;
+      Handshake_Deadline : Duration := Duration'Last;
+      Upgrade_Deadline   : Duration := Duration'Last);
 
 
    --  Blocking pull API: blocks up to Timeout for the next decoded message.

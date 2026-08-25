@@ -51,6 +51,7 @@ project Tests is
       "test_ws_frames.adb",
       "test_ws_utf8.adb",
       "test_ws_handshake.adb",
+      "test_ws_connect_bounds.adb",
       "test_ws_echo.adb",
       "test_ws_ping.adb",
       "test_ws_send_closed.adb",
