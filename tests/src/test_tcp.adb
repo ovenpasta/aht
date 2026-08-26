@@ -713,7 +713,8 @@ begin
       Check_Server_Runtime ("literal 127.0.0.1 (server)", Runtime_Err);
    end;
 
-   --  Case 2: DNS path — Inet_Addr fails, Get_Host_By_Name iterates.
+   --  Case 2: DNS path — Inet_Addr fails, so the name goes to
+   --  AHT.DNS.Resolve and its literals become the candidate list.
    declare
       Srv         : Echo_Server;
       Port        : AHT.URL.Port_Number;

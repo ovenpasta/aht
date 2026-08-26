@@ -60,12 +60,20 @@ package AHT.DNS is
    --  Substituting a literal INTO the URL instead is the trap: an
    --  IP-literal host sends no SNI and is verified against IP SANs,
    --  which ordinary certificates do not carry.
+   --  A negative Timeout is a caller error rather than a shorthand,
+   --  and is refused here instead of being passed on: the shim reads
+   --  any negative millisecond count as "no bound", so an unchecked
+   --  -1.0 would produce an unbounded wait — the exact opposite of
+   --  what asking for a negative timeout could possibly mean. Same
+   --  shape as AHT.Transport's deadline setters, which bound their
+   --  own argument the same way.
    procedure Resolve
      (Host    : String;
       Service : String;
       Timeout : Duration;
       Result  : out Address_Array;
       Count   : out Address_Count;
-      Status  : out Resolve_Status);
+      Status  : out Resolve_Status)
+     with Pre => Timeout >= 0.0;
 
 end AHT.DNS;

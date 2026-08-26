@@ -235,7 +235,7 @@ package AHT.Websocket.Client is
    --                  explicitly rather than silently — Connect
    --                  refuses instead.
    --
-   --  Reconnect has five bounds, and they split two-and-three at the
+   --  Reconnect has six bounds, and they split two-and-four at the
    --  drain/redial seam.
    --
    --  Timeout and Drain_Timeout are Close's, and mean exactly what
@@ -245,8 +245,9 @@ package AHT.Websocket.Client is
    --  WITHOUT redialing, leaving the teardown to continue; a later
    --  Reconnect joins it.
    --
-   --  Connect_Timeout, Handshake_Deadline and Upgrade_Deadline are
-   --  Connect's, and bound the redial that follows. They are
+   --  Resolve_Timeout, Connect_Timeout, Handshake_Deadline and
+   --  Upgrade_Deadline are Connect's, and bound the redial that
+   --  follows, stage by stage in that order. They are
    --  parameters of this call rather than replayed from the last
    --  successful Connect: what Reconnect repeats is the connection —
    --  URL, headers, trust anchors — and how long to wait for it is a

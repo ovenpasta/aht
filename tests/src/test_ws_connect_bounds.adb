@@ -101,6 +101,7 @@ procedure Test_WS_Connect_Bounds is
    --  This one operator still has to be made visible for the
    --  subtraction in case 7.
    use type Ada.Real_Time.Time;
+   use type Interfaces.C.int;
 
    Failures : Natural := 0;
 
@@ -127,6 +128,10 @@ procedure Test_WS_Connect_Bounds is
    procedure Restore_Real
      with Import, Convention => C,
           External_Name => "aht_dns_restore_real_for_test";
+
+   function Fake_Completions return Interfaces.C.int
+     with Import, Convention => C,
+          External_Name => "aht_dns_fake_completions_for_test";
 
    --  Dial the stall fixture with an upgrade budget and report how
    --  long the dial took. Returns 0.0 and records a failure if
@@ -385,7 +390,7 @@ begin
    --  name is deliberately one that could never resolve for real, so
    --  a build that bypassed the seam fails here rather than passing
    --  against an accidental answer.
-   Install_Fake (5_000, 1);
+   Install_Fake (3_000, 1);
    declare
       C       : AHT.Websocket.Client.Client_Type;
       Started : constant Ada.Real_Time.Time := Ada.Real_Time.Clock;
@@ -411,6 +416,30 @@ begin
          Fail ("resolve-deadline: expected Timeout_Error, got "
                & Ada.Exceptions.Exception_Name (E) & ": "
                & Ada.Exceptions.Exception_Message (E));
+   end;
+
+   --  That dial left a worker still inside the fake, and the next
+   --  case reinstalls it with different settings. Those settings are
+   --  plain globals, so writing them while the outgoing worker is
+   --  still reading them is a data race — benign in its effect here,
+   --  since the worker's answer is already discarded, but a race all
+   --  the same and squarely in what dns_asan.sh's UBSan pass looks
+   --  for. Waiting for the worker removes it rather than reasoning
+   --  about why it would not matter. test_dns waits at the same
+   --  point, for the same reason.
+   declare
+      Before : constant Interfaces.C.int := Fake_Completions;
+      Waited : Duration := 0.0;
+   begin
+      while Fake_Completions = Before and then Waited < 10.0 loop
+         delay 0.1;
+         Waited := Waited + 0.1;
+      end loop;
+      if Fake_Completions = Before then
+         Fail ("resolve-deadline: the abandoned lookup never completed "
+               & "within" & Duration'Image (Waited)
+               & "s — the worker was lost, not abandoned");
+      end if;
    end;
 
    --  Case 8: and the addresses it returns are the ones dialled.

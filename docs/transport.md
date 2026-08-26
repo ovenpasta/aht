@@ -82,8 +82,9 @@ Thin wrapper over `GNAT.Sockets`. `Connect (Host, Port)`:
    the parse succeeds, only that single address is tried: a literal
    that doesn't answer is a hard failure, not a prompt to start
    resolving DNS for it.
-2. Otherwise calls `Get_Host_By_Name`, builds an `Endpoint_List` of
-   every resolved address paired with `Port`, and delegates to
+2. Otherwise calls `AHT.DNS.Resolve` — bounded by `Resolve_Timeout`,
+   which `Get_Host_By_Name` could not be — builds an `Endpoint_List`
+   of every returned literal paired with `Port`, and delegates to
    `Connect_Candidates`, which iterates **all** candidates in order,
    closing the half-open socket from any failed attempt before trying
    the next. The first `Connect_Socket` that succeeds wins.
