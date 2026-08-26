@@ -15,13 +15,31 @@ package AHT.Transport.TCP is
      (Self            : in out TCP_Transport;
       Host            : String;
       Port            : AHT.URL.Port_Number;
-      Connect_Timeout : Duration := Duration'Last);
+      Connect_Timeout : Duration := Duration'Last;
+      Resolve_Timeout : Duration := Duration'Last);
    --  `Connect_Timeout` is a single total budget for the TCP connect
    --  phase, shared across every address DNS resolves to — not a
    --  per-candidate timeout. If the budget runs out before any
    --  candidate connects, raises `Timeout_Error`. `Duration'Last`
-   --  (the default) leaves connect unbounded. DNS resolution itself
-   --  is bounded only by the OS, not by this budget.
+   --  (the default) leaves connect unbounded.
+   --
+   --  `Resolve_Timeout` bounds the DNS lookup that runs *before* it,
+   --  via `AHT.DNS` — a separate budget because it is a separate
+   --  wait, and because folding it into `Connect_Timeout` would
+   --  silently change what that parameter has always meant for
+   --  callers already passing one. Exhaustion raises `Timeout_Error`,
+   --  distinct from the `Transport_Error` a lookup that *answered*
+   --  with no usable address raises: a slow resolver and a bad name
+   --  deserve different retry decisions. `Duration'Last` (the
+   --  default) leaves resolution unbounded, which is what it was
+   --  before this existed.
+   --
+   --  Neither budget is consulted when `Host` is already an IP
+   --  literal for the resolve half — there is nothing to look up.
+   --
+   --  Resolution goes through `getaddrinfo`, so an `AAAA` answer is
+   --  used where one exists; candidates are then tried in the order
+   --  the resolver returned them, with the usual fallback.
    --
    --  A transport is **permanently single-use**: once it has been
    --  successfully connected, every later Connect raises `Transport_Error`

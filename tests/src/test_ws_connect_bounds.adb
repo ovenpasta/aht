@@ -1,8 +1,10 @@
---  Bounds on Websocket.Client.Connect: Connect_Timeout,
---  Handshake_Deadline and Upgrade_Deadline. Before these existed the
---  client dialled with all three at Duration'Last, so a peer that
---  accepted the TCP connection and then went silent parked the caller
---  forever, with no API-level way to bound or cancel it.
+--  Bounds on Websocket.Client.Connect: Resolve_Timeout,
+--  Connect_Timeout, Handshake_Deadline and Upgrade_Deadline. Before
+--  these existed the client dialled with all four at Duration'Last,
+--  so a peer that accepted the TCP connection and then went silent
+--  parked the caller forever, with no API-level way to bound or
+--  cancel it — and a name that would not resolve did the same before
+--  a socket ever existed.
 --
 --  Routing:
 --    * ws://127.0.0.1:8767/  — server_stall.py. Accepts TCP, then
@@ -70,13 +72,20 @@
 --  records for its own budget-exhausted case. Case 4 drives the
 --  pre-attempt budget check instead, which proves the parameter
 --  reaches AHT.Transport.TCP.Connect and no more; it does not prove a
---  stalled connect is interrupted. DNS resolution is bounded by none
---  of the three (it runs before any is armed) and is not tested here.
+--  stalled connect is interrupted.
+--
+--  Resolution is covered by cases 7 to 9, through the same C seam
+--  test_dns uses. What is not covered there is a stall in the real
+--  getaddrinfo, for the reason test_dns records: making one happen
+--  means pointing the process at a black-hole nameserver, which is
+--  global state shared with the rest of the machine.
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;
 with Ada.Exceptions;
+with Ada.Real_Time;
 with Ada.Text_IO; use Ada.Text_IO;
+with Interfaces.C;
 
 with AHT.Bytes;
 with AHT.Transport;
@@ -86,6 +95,12 @@ with AHT.Websocket.Client;
 procedure Test_WS_Connect_Bounds is
 
    use type AHT.Websocket.Message_Kind;
+
+   --  Ada.Calendar is use'd above and both packages export Time and
+   --  Clock, so Ada.Real_Time is named explicitly rather than use'd.
+   --  This one operator still has to be made visible for the
+   --  subtraction in case 7.
+   use type Ada.Real_Time.Time;
 
    Failures : Natural := 0;
 
@@ -101,6 +116,17 @@ procedure Test_WS_Connect_Bounds is
 
    function To_String (V : AHT.Bytes.Buffer) return String is
      (AHT.Bytes.To_String (V));
+
+   --  The resolver seam, as in test_dns: imported deliberately rather
+   --  than exposed by AHT.DNS. Used only by cases 7 to 9, and undone
+   --  before the run ends.
+   procedure Install_Fake (Sleep_Ms, N_Addrs : Interfaces.C.int)
+     with Import, Convention => C,
+          External_Name => "aht_dns_install_fake_for_test";
+
+   procedure Restore_Real
+     with Import, Convention => C,
+          External_Name => "aht_dns_restore_real_for_test";
 
    --  Dial the stall fixture with an upgrade budget and report how
    --  long the dial took. Returns 0.0 and records a failure if
@@ -342,6 +368,103 @@ begin
                   & "admission");
       end;
    end;
+
+   --  Cases 7 to 9 cover the fourth bound, Resolve_Timeout, which is
+   --  the one that cannot be reached with a fixture: the wait it
+   --  bounds happens before any socket exists. They drive it through
+   --  the same C seam test_dns uses, installed here so the path under
+   --  test is the real one — Client.Connect to TCP/TLS.Connect to
+   --  AHT.DNS to the resolver — with only the lookup replaced.
+   --
+   --  The fake answers with 127.0.0.1, which is what makes case 8 an
+   --  end-to-end check rather than a mock: the dial names a host that
+   --  does not exist, and reaches the echo fixture anyway, because
+   --  the address the resolver returned is the address that was used.
+
+   --  Case 7: a resolver that stalls must not park the dial. The host
+   --  name is deliberately one that could never resolve for real, so
+   --  a build that bypassed the seam fails here rather than passing
+   --  against an accidental answer.
+   Install_Fake (5_000, 1);
+   declare
+      C       : AHT.Websocket.Client.Client_Type;
+      Started : constant Ada.Real_Time.Time := Ada.Real_Time.Clock;
+      Took    : Duration;
+   begin
+      AHT.Websocket.Client.Connect
+        (C, "ws://nonexistent.invalid:8765/", Resolve_Timeout => 0.5);
+      Fail ("resolve-deadline: Connect returned normally against a "
+            & "resolver that never answers");
+      AHT.Websocket.Client.Close (C);
+   exception
+      when AHT.Transport.Timeout_Error =>
+         Took := Ada.Real_Time.To_Duration (Ada.Real_Time.Clock - Started);
+         if Took < 0.498 then
+            Fail ("resolve-deadline: returned after"
+                  & Duration'Image (Took)
+                  & "s, before the budget could have expired");
+         elsif Took > 3.0 then
+            Fail ("resolve-deadline: took" & Duration'Image (Took)
+                  & "s — bounded, but not by this budget");
+         end if;
+      when E : others =>
+         Fail ("resolve-deadline: expected Timeout_Error, got "
+               & Ada.Exceptions.Exception_Name (E) & ": "
+               & Ada.Exceptions.Exception_Message (E));
+   end;
+
+   --  Case 8: and the addresses it returns are the ones dialled.
+   --  Without this, case 7 would pass equally against a client that
+   --  always failed to resolve.
+   Install_Fake (0, 1);
+   declare
+      C   : AHT.Websocket.Client.Client_Type;
+      Msg : AHT.Websocket.Client.Message_Type;
+   begin
+      AHT.Websocket.Client.Connect
+        (C, "ws://nonexistent.invalid:8765/", Resolve_Timeout => 5.0);
+      AHT.Websocket.Client.Send_Text (C, "resolved");
+      AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
+      if To_String (Msg.Payload) /= "resolved" then
+         Fail ("resolve-used: payload = """
+               & To_String (Msg.Payload) & """");
+      end if;
+      AHT.Websocket.Client.Close (C);
+   exception
+      when E : others =>
+         Fail ("resolve-used: dialling a name that resolves to "
+               & "127.0.0.1 raised "
+               & Ada.Exceptions.Exception_Name (E) & ": "
+               & Ada.Exceptions.Exception_Message (E));
+   end;
+
+   --  Case 9: an IP literal is not resolved at all. The stalling fake
+   --  from case 7 is reinstalled and would hang any dial that
+   --  consulted it; a literal URL must connect regardless, which is
+   --  what proves the short-circuit rather than assuming it.
+   Install_Fake (30_000, 1);
+   declare
+      C   : AHT.Websocket.Client.Client_Type;
+      Msg : AHT.Websocket.Client.Message_Type;
+   begin
+      AHT.Websocket.Client.Connect (C, Echo_WS, Resolve_Timeout => 1.0);
+      AHT.Websocket.Client.Send_Text (C, "literal");
+      AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
+      if To_String (Msg.Payload) /= "literal" then
+         Fail ("literal-skips-resolve: payload = """
+               & To_String (Msg.Payload) & """");
+      end if;
+      AHT.Websocket.Client.Close (C);
+   exception
+      when E : others =>
+         Fail ("literal-skips-resolve: dialling an IP literal raised "
+               & Ada.Exceptions.Exception_Name (E) & ": "
+               & Ada.Exceptions.Exception_Message (E)
+               & " — the resolver was consulted for an address that "
+               & "needed no lookup");
+   end;
+
+   Restore_Real;
 
    if Failures = 0 then
       Put_Line ("test_ws_connect_bounds: OK");

@@ -36,7 +36,8 @@ package AHT.Websocket.Client is
       CA_PEM             : String := "";
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
-      Upgrade_Deadline   : Duration := Duration'Last);
+      Upgrade_Deadline   : Duration := Duration'Last;
+      Resolve_Timeout    : Duration := Duration'Last);
 
    procedure Connect
      (Self               : in out Client_Type;
@@ -46,12 +47,23 @@ package AHT.Websocket.Client is
       CA_PEM             : String := "";
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
-      Upgrade_Deadline   : Duration := Duration'Last);
-   --  Three bounds on a dial, each covering a different stage, all
+      Upgrade_Deadline   : Duration := Duration'Last;
+      Resolve_Timeout    : Duration := Duration'Last);
+   --  Four bounds on a dial, each covering a different stage, all
    --  defaulting to Duration'Last — unbounded, which is what a dial
    --  was before they existed. They are separate knobs because a
    --  caller willing to wait out a slow TLS handshake may still
    --  refuse to wait on a peer that never answers the upgrade.
+   --
+   --  Set all four and the dial is bounded end to end. Set none and
+   --  it behaves exactly as it always has.
+   --
+   --    Resolve_Timeout     the DNS lookup, which runs before any of
+   --                        the others and so cannot be bounded by
+   --                        them. Nothing to bound when the URL
+   --                        carries an IP literal. See AHT.DNS: the
+   --                        bound is on this caller, not on the
+   --                        lookup, which nothing can interrupt.
    --
    --    Connect_Timeout     the TCP connect, as ONE total budget
    --                        across every address DNS resolved to, not
@@ -89,13 +101,13 @@ package AHT.Websocket.Client is
    --  half-built session, exactly as any other failed attempt does —
    --  so a retry is legal and builds fresh transports.
    --
-   --  What is NOT bounded: DNS resolution, which runs before any of
-   --  these is armed and is bounded only by the OS. A name that
-   --  resolves slowly still blocks. Resolving in the application and
-   --  passing an IP literal is not a fix — per AHT.Transport.TLS, an
-   --  IP-literal host sends no SNI and is verified against IP SANs,
-   --  which typical certificates do not carry, so it silently
-   --  weakens wss://.
+   --  Resolving is done for you, and deliberately not by the caller:
+   --  Host stays the name for SNI and certificate verification, so
+   --  bounding the lookup costs nothing. An application that resolved
+   --  on its own and put the literal in the URL would silently drop
+   --  SNI and be verified against IP SANs, which typical certificates
+   --  do not carry — that is why Resolve_Timeout is a parameter here
+   --  rather than advice to resolve elsewhere.
 
    --  How decoded messages reach the application.
    --
@@ -249,7 +261,8 @@ package AHT.Websocket.Client is
       Drain_Timeout      : Duration := Default_Drain_Timeout;
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
-      Upgrade_Deadline   : Duration := Duration'Last);
+      Upgrade_Deadline   : Duration := Duration'Last;
+      Resolve_Timeout    : Duration := Duration'Last);
 
 
    --  Blocking pull API: blocks up to Timeout for the next decoded message.

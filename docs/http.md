@@ -331,9 +331,15 @@ exactly as it already ignores `CA_Path`.
   gets the full value as its own budget. `Timeout_Seconds = 0` disables
   all of them. The phases are the same for `http://` and `https://`
   (the TLS handshake phase is simply absent for plain HTTP):
-  1. *DNS resolution* — **not** bounded by AHT; only the OS resolver's
-     own timeout applies. Multi-candidate fallback (every A/AAAA record)
-     happens here, in the TCP transport.
+  1. *DNS resolution* — **bounded** via `Connect`'s `Resolve_Timeout`,
+     which resolves through `AHT.DNS` rather than a blocking
+     `getaddrinfo` the caller cannot leave. The bound is on the
+     *caller*: on expiry `Timeout_Error` is raised and the lookup
+     itself carries on, because nothing can cancel it. A lookup that
+     answers with no usable address is `Transport_Error` instead —
+     a slow resolver and a bad name are different problems.
+     Multi-candidate fallback (every A/AAAA record) happens here, in
+     the TCP transport.
   2. *TCP connect* — **bounded** as a single total budget shared across
      every resolved candidate (not per-candidate), forwarded as
      `Connect`'s `Connect_Timeout`. If the budget runs out before any

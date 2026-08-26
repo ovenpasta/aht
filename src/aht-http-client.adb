@@ -183,7 +183,8 @@ package body AHT.HTTP.Client is
                  (T,
                   Host            => To_String (Req.Target.Host),
                   Port            => Req.Target.Port,
-                  Connect_Timeout => Budget);
+                  Connect_Timeout => Budget,
+                  Resolve_Timeout => Budget);
 
                --  Race window: Cancel could fire between Connect
                 --  returning and Bind running. Bind itself
@@ -226,6 +227,7 @@ package body AHT.HTTP.Client is
                   CA_Path            => To_String (Self.CA_Path),
                   Connect_Timeout    => Budget,
                   Handshake_Deadline => Budget,
+                  Resolve_Timeout    => Budget,
                   CA_PEM             => To_String (Self.CA_PEM));
 
                --  Same Cancel bind/unbind discipline as the HTTP

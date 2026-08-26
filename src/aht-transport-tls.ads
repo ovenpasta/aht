@@ -25,7 +25,8 @@ package AHT.Transport.TLS is
       CA_Path            : String  := "";
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
-      CA_PEM             : String  := "");
+      CA_PEM             : String  := "";
+      Resolve_Timeout    : Duration := Duration'Last);
    --  TCP-connect to Host:Port, then run the TLS handshake. For a DNS
    --  name the handshake sends SNI = Host and verifies the peer
    --  certificate against Host; for an IP-literal Host the certificate
@@ -72,6 +73,15 @@ package AHT.Transport.TLS is
    --  total budget across resolved candidates (see
    --  AHT.Transport.TCP.Connect); exhaustion raises Timeout_Error.
    --  Duration'Last leaves the TCP connect unbounded.
+   --
+   --  Resolve_Timeout is likewise forwarded, and bounds the DNS lookup
+   --  that runs ahead of the connect. It is safe here in a way that
+   --  resolving in the *caller* is not: Host stays the name
+   --  throughout, so SNI and certificate verification are unaffected.
+   --  An application that resolved on its own and passed the literal
+   --  in Host instead would silently drop SNI and be verified against
+   --  IP SANs, which is the trap this parameter exists to make
+   --  unnecessary.
    --
    --  Handshake_Deadline bounds the **TLS handshake only**: a peer that
    --  stalls mid-handshake raises Timeout_Error instead of blocking

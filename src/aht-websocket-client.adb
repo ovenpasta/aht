@@ -1457,7 +1457,8 @@ package body AHT.Websocket.Client is
       CA_PEM             : String := "";
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
-      Upgrade_Deadline   : Duration := Duration'Last)
+      Upgrade_Deadline   : Duration := Duration'Last;
+      Resolve_Timeout    : Duration := Duration'Last)
    is
       Parsed : constant AHT.URL.URL_Type := AHT.URL.Parse (URL);
 
@@ -1618,7 +1619,8 @@ package body AHT.Websocket.Client is
                      CA_Path            => CA_Path,
                      Connect_Timeout    => Connect_Timeout,
                      Handshake_Deadline => Handshake_Deadline,
-                     CA_PEM             => CA_PEM);
+                     CA_PEM             => CA_PEM,
+                     Resolve_Timeout    => Resolve_Timeout);
                when Plain_Transport =>
                   --  No Handshake_Deadline here: ws:// runs no TLS
                   --  handshake, so there is nothing for it to bound.
@@ -1626,7 +1628,8 @@ package body AHT.Websocket.Client is
                     (Attempt.Sess.Plain,
                      Host            => To_String (Parsed.Host),
                      Port            => Parsed.Port,
-                     Connect_Timeout => Connect_Timeout);
+                     Connect_Timeout => Connect_Timeout,
+                     Resolve_Timeout => Resolve_Timeout);
             end case;
 
             begin
@@ -1788,7 +1791,8 @@ package body AHT.Websocket.Client is
       CA_PEM             : String := "";
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
-      Upgrade_Deadline   : Duration := Duration'Last)
+      Upgrade_Deadline   : Duration := Duration'Last;
+      Resolve_Timeout    : Duration := Duration'Last)
    is
       No_Extras : AHT.HTTP.Headers.Map;
    begin
@@ -1801,7 +1805,8 @@ package body AHT.Websocket.Client is
          CA_PEM             => CA_PEM,
          Connect_Timeout    => Connect_Timeout,
          Handshake_Deadline => Handshake_Deadline,
-         Upgrade_Deadline   => Upgrade_Deadline);
+         Upgrade_Deadline   => Upgrade_Deadline,
+         Resolve_Timeout    => Resolve_Timeout);
    end Connect;
 
    --  Called by every operation that would wait on the receiver.
@@ -1838,7 +1843,8 @@ package body AHT.Websocket.Client is
       Drain_Timeout      : Duration := Default_Drain_Timeout;
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
-      Upgrade_Deadline   : Duration := Duration'Last)
+      Upgrade_Deadline   : Duration := Duration'Last;
+      Resolve_Timeout    : Duration := Duration'Last)
    is
       P  : Connect_Params;
       OK : Boolean;
@@ -1875,7 +1881,8 @@ package body AHT.Websocket.Client is
          CA_PEM             => To_String (P.CA_PEM),
          Connect_Timeout    => Connect_Timeout,
          Handshake_Deadline => Handshake_Deadline,
-         Upgrade_Deadline   => Upgrade_Deadline);
+         Upgrade_Deadline   => Upgrade_Deadline,
+         Resolve_Timeout    => Resolve_Timeout);
    end Reconnect;
 
    function Is_Open (Self : Client_Type) return Boolean is

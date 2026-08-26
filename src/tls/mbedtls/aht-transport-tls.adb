@@ -523,7 +523,8 @@ package body AHT.Transport.TLS is
       CA_Path            : String  := "";
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
-      CA_PEM             : String  := "")
+      CA_PEM             : String  := "";
+      Resolve_Timeout    : Duration := Duration'Last)
    is
       use Ada.Real_Time;
 
@@ -626,7 +627,8 @@ package body AHT.Transport.TLS is
       Self.State.TCP := new AHT.Transport.TCP.TCP_Transport;
       AHT.Transport.TCP.Connect
         (Self.State.TCP.all, Host, Port,
-         Connect_Timeout => Connect_Timeout);
+         Connect_Timeout => Connect_Timeout,
+         Resolve_Timeout => Resolve_Timeout);
 
       --  2. Allocate the mbedTLS contexts (sized by the C glue).
       Self.State.Entropy  := AHT.Mbedtls.Glue.Entropy_New;

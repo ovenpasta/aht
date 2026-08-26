@@ -33,9 +33,10 @@ Exceptions, all declared in `AHT.Websocket`:
 | `Reentrant_Error` | an operation that waits for the receiver was called *from* the receiver, i.e. from inside a callback |
 
 `AHT.Transport.Timeout_Error` and `AHT.Transport.Aborted_Error` also
-surface here. `Timeout_Error` comes from five bounds — the three dial
-bounds `Connect_Timeout`, `Handshake_Deadline` and `Upgrade_Deadline`
-on `Connect` / `Reconnect`; `Receive`'s own `Timeout`; and
+surface here. `Timeout_Error` comes from six bounds — the four dial
+bounds `Resolve_Timeout`, `Connect_Timeout`, `Handshake_Deadline` and
+`Upgrade_Deadline` on `Connect` / `Reconnect`; `Receive`'s own
+`Timeout`; and
 `Drain_Timeout` on `Close` / `Reconnect`. The close handshake's
 `Timeout` is the one bound that expires *without* raising; see
 *Bounds*. `Aborted_Error` means I/O was cancelled by a teardown.
@@ -256,7 +257,8 @@ procedure Connect
    CA_PEM             : String := "";
    Connect_Timeout    : Duration := Duration'Last;
    Handshake_Deadline : Duration := Duration'Last;
-   Upgrade_Deadline   : Duration := Duration'Last);
+   Upgrade_Deadline   : Duration := Duration'Last;
+   Resolve_Timeout    : Duration := Duration'Last);
 
 --  Convenience form — no extra headers.
 procedure Connect
@@ -267,7 +269,8 @@ procedure Connect
    CA_PEM             : String := "";
    Connect_Timeout    : Duration := Duration'Last;
    Handshake_Deadline : Duration := Duration'Last;
-   Upgrade_Deadline   : Duration := Duration'Last);
+   Upgrade_Deadline   : Duration := Duration'Last;
+   Resolve_Timeout    : Duration := Duration'Last);
 
 procedure Reconnect
   (Self               : in out Client_Type;
@@ -275,7 +278,8 @@ procedure Reconnect
    Drain_Timeout      : Duration := Default_Drain_Timeout;
    Connect_Timeout    : Duration := Duration'Last;
    Handshake_Deadline : Duration := Duration'Last;
-   Upgrade_Deadline   : Duration := Duration'Last);
+   Upgrade_Deadline   : Duration := Duration'Last;
+   Resolve_Timeout    : Duration := Duration'Last);
 
 procedure Send_Text   (Self : in out Client_Type; Text : String);
 procedure Send_Binary (Self : in out Client_Type; Data : Byte_Array);
@@ -499,9 +503,9 @@ Default_Drain_Timeout : constant Duration := 5.0;
 
 `Close` and `Reconnect` bound the teardown with two clocks, because
 they measure different things and only one of them can raise.
-(`Reconnect` carries three more, but they belong to the dial that
+(`Reconnect` carries four more, but they belong to the dial that
 follows and are covered in *Bounds on a dial* below. The split is at
-the drain/redial seam: two for the teardown, three for the redial.)
+the drain/redial seam: two for the teardown, four for the redial.)
 
 **`Timeout` is a compound budget for getting our Close frame out and
 hearing the answer.** It covers all three of: acquiring the send
@@ -548,18 +552,20 @@ which no caller can shorten.
 
 ### Bounds on a dial
 
-A dial has three stages that can block, and one knob each.
-`Connect_Timeout` bounds the TCP connect as a single total budget
-across every address DNS resolved to; `Handshake_Deadline` bounds the
-TLS handshake, and so does nothing on `ws://`, which runs none;
-`Upgrade_Deadline` bounds the HTTP exchange that follows. All three
-default to `Duration'Last`.
+A dial has four stages that can block, and one knob each.
+`Resolve_Timeout` bounds the DNS lookup; `Connect_Timeout` bounds the
+TCP connect as a single total budget across every address that lookup
+returned; `Handshake_Deadline` bounds the TLS handshake, and so does
+nothing on `ws://`, which runs none; `Upgrade_Deadline` bounds the
+HTTP exchange that follows. All four default to `Duration'Last`, so a
+caller who sets none gets exactly the behaviour that predates them,
+and a caller who sets all four is bounded end to end.
 
-They are three knobs and not one because they are three different
-waits with different plausible budgets — a caller happy to sit through
-a slow handshake on a congested link may still refuse to wait on a
-peer that has stopped answering. The transports already implemented
-the first two (`AHT.Transport.TCP.Connect`,
+They are four knobs and not one because they are four different waits
+with different plausible budgets — a caller happy to sit through a
+slow handshake on a congested link may still refuse to wait on a peer
+that has stopped answering. The transports already implemented the
+two middle ones (`AHT.Transport.TCP.Connect`,
 `AHT.Transport.TLS.Connect`); the client's job is to forward them.
 
 `Upgrade_Deadline` is armed on **both** directions before the request
@@ -582,7 +588,7 @@ with a one-second upgrade budget, idles past it, and requires a full
 round trip afterwards; backed out, it fails there.
 
 **Expiry raises `Timeout_Error`, not `Handshake_Error`**, for all
-three — including the upgrade, whose failure originates inside the
+four — including the upgrade, whose failure originates inside the
 block that otherwise wraps everything. The distinction is the point:
 `Handshake_Error` means the peer answered and the answer was wrong,
 `Timeout_Error` means it did not answer in time, and a caller deciding
@@ -590,14 +596,21 @@ whether to retry should not have to parse a message to tell them
 apart. A timed-out attempt releases its admission and closes its
 half-built session like any other failure, so the retry is legal.
 
-**DNS is not bounded by any of them.** Resolution runs before the
-first is armed, so a name that resolves slowly still blocks, and the
-`Connect` call as a whole is bounded only for a host already resolved
-or given as a literal. Closing that gap needs a resolver with an
-abandonment policy, not another parameter. Resolving in the
-application and passing an IP literal is not a workaround: an
-IP-literal host sends no SNI and is verified against IP SANs, which
-typical certificates do not carry, so it silently weakens `wss://`.
+**`Resolve_Timeout` bounds the caller, not the lookup**, and the
+distinction is the contract rather than a caveat. `getaddrinfo` takes
+no deadline and cannot be cancelled on either platform, so a resolve
+that expires has stopped waiting; the lookup carries on in the worker
+that `AHT.DNS` abandoned, until the platform resolver gives up by
+itself. What the caller gets back is control, on time.
+
+Resolving inside the library rather than telling applications to do it
+is what keeps the fix from costing anything: `Host` stays the name all
+the way through, so SNI and certificate verification are untouched. An
+application resolving on its own and putting the literal in the URL
+would send no SNI and be verified against IP SANs, which typical
+certificates do not carry — it would trade a hang for a quietly weaker
+`wss://`. There is nothing to bound when the URL already carries a
+literal, and that path skips the resolver entirely.
 
 The bounds matter most where `abort` cannot substitute for them. On
 Windows a task parked in `Connect` cannot be aborted at all (see *The
@@ -633,8 +646,10 @@ outside.
      parameters or you'll emit duplicate header lines.
 3. Dial one transport for the scheme — TCP for `ws://`, TLS for
    `wss://` (threading `Insecure` / `CA_Path` / `CA_PEM` into the TLS
-   handshake, and `Connect_Timeout` / `Handshake_Deadline` into the
-   waits). The request is built before the dial, not after.
+   handshake, and `Resolve_Timeout` / `Connect_Timeout` /
+   `Handshake_Deadline` into the waits). The name is resolved here,
+   through `AHT.DNS`, and stays the name for SNI and verification.
+   The request is built before the dial, not after.
 4. Arm `Upgrade_Deadline` on both directions, then
    `AHT.HTTP.Request.Write` the request over the new transport.
 5. `AHT.HTTP.Response.Read` the status line + headers.
@@ -910,7 +925,7 @@ caller-initiated closes should not retry by default.
 
 ## Tests
 
-The WebSocket layer is covered by twenty-four test mains. `test_ws_send_guard`
+The WebSocket layer is covered by twenty-five test mains. `test_ws_send_guard`
 runs **first** by construction: what it checks shows up everywhere else
 as a hang, so nothing may sit ahead of it that could hang and stop it
 running at all.
@@ -923,7 +938,8 @@ running at all.
 | `test_ws_frames` | pure codec — length forms, masking, control-frame validation, the `Allowance` and `Fragment` cases | none (in-process) |
 | `test_ws_utf8` | text validation | none (in-process) |
 | `test_ws_handshake` | the HTTP upgrade: base64 vectors, 101 / Upgrade / Connection / Accept, subprotocol checks | `server_ws.py`, `server.py`, `server_tls.py` + in-process fake |
-| `test_ws_connect_bounds` | the three dial bounds: each fires, the upgrade wait tracks the value rather than some fixed bound, the budget does not outlive the upgrade, a timed-out attempt is retryable | `server_stall.py`, `server_ws.py` |
+| `test_ws_connect_bounds` | the four dial bounds: each fires, the upgrade wait tracks the value rather than some fixed bound, the budget does not outlive the upgrade, a timed-out attempt is retryable, an IP literal skips the resolver | `server_stall.py`, `server_ws.py` + the resolver seam |
+| `test_dns` | bounded resolution: the caller returns on time, and the abandoned lookup is observed completing afterwards rather than assumed to have | none (in-process, resolver seam) |
 | `test_ws_echo` | frame I/O: text / binary round-trips, `Receive` timeout, ordering, push callbacks | `server_ws.py` |
 | `test_ws_ping` | ping / pong echo | `server_ws.py` |
 | `test_ws_send_closed` | sending on a closed connection | `server_ws.py` |

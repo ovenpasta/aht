@@ -3,6 +3,7 @@ with Ada.Real_Time; use Ada.Real_Time;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Streams; use Ada.Streams;
 with GNAT.Sockets; use GNAT.Sockets;
+with AHT.DNS;
 with AHT.Transport.Waits;
 
 with AHT.Log.Tag;
@@ -287,37 +288,66 @@ package body AHT.Transport.TCP is
      (Self            : in out TCP_Transport;
       Host            : String;
       Port            : AHT.URL.Port_Number;
-      Connect_Timeout : Duration := Duration'Last)
+      Connect_Timeout : Duration := Duration'Last;
+      Resolve_Timeout : Duration := Duration'Last)
    is
    begin
       if Is_IP_Literal (Host) then
+         --  Nothing to resolve, so Resolve_Timeout has nothing to
+         --  bound and is not consulted.
          Connect_Candidates
            (Self,
             [1 => (Host => To_Unbounded_String (Host), Port => Port)],
             Connect_Timeout => Connect_Timeout);
       else
          declare
-            Entry_Info : constant Host_Entry_Type := Get_Host_By_Name (Host);
-            N          : constant Natural := Addresses_Length (Entry_Info);
-            List       : Endpoint_List (1 .. Positive'Max (1, N));
+            Addrs  : AHT.DNS.Address_Array;
+            N      : AHT.DNS.Address_Count;
+            Status : AHT.DNS.Resolve_Status;
          begin
-            if N = 0 then
-               raise Transport_Error with
-                 "TCP connect to " & Host & ": no addresses resolved";
-            end if;
-            for I in 1 .. N loop
-               List (I) :=
-                 (Host => To_Unbounded_String
-                            (Image (Addresses (Entry_Info, I))),
-                  Port => Port);
-            end loop;
-            Connect_Candidates
-              (Self, List (1 .. N), Connect_Timeout => Connect_Timeout);
-         exception
-            when E : Host_Error =>
-               raise Transport_Error with
-                 "TCP connect to " & Host & ": DNS lookup failed: "
-                 & Ada.Exceptions.Exception_Message (E);
+            --  Through AHT.DNS rather than Get_Host_By_Name, which
+            --  has no deadline: the budget has to exist before the
+            --  call, since nothing can interrupt one already running.
+            --  This also reaches IPv6, which gethostbyname does not.
+            AHT.DNS.Resolve
+              (Host    => Host,
+               Service => "",
+               Timeout => Resolve_Timeout,
+               Result  => Addrs,
+               Count   => N,
+               Status  => Status);
+
+            case Status is
+               when AHT.DNS.Resolved =>
+                  null;
+               when AHT.DNS.Timed_Out =>
+                  --  Timeout_Error and not Transport_Error: the name
+                  --  may be perfectly good and the resolver merely
+                  --  slow, which is a different thing from a lookup
+                  --  that answered "no such host" — and the two want
+                  --  different retry decisions.
+                  raise Timeout_Error with
+                    "TCP connect to " & Host
+                    & ": DNS lookup did not answer within"
+                    & Duration'Image (Resolve_Timeout) & "s";
+               when AHT.DNS.Failed =>
+                  raise Transport_Error with
+                    "TCP connect to " & Host & ": DNS lookup failed";
+               when AHT.DNS.Internal_Error =>
+                  raise Transport_Error with
+                    "TCP connect to " & Host
+                    & ": the resolver could not be started";
+            end case;
+
+            declare
+               List : Endpoint_List (1 .. N);
+            begin
+               for I in 1 .. N loop
+                  List (I) := (Host => Addrs (I), Port => Port);
+               end loop;
+               Connect_Candidates
+                 (Self, List, Connect_Timeout => Connect_Timeout);
+            end;
          end;
       end if;
    end Connect;

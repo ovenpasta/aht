@@ -178,9 +178,11 @@ client socket.
 
 1. **literal** — `Connect ("127.0.0.1", Port)`: `Inet_Addr` parses,
    single-candidate path.
-2. **DNS** — `Connect ("localhost", Port)`: `Inet_Addr` fails,
-   `Get_Host_By_Name` iterates. On dual-stack boxes this also
-   exercises the IPv4/IPv6 fallback.
+2. **DNS** — `Connect ("localhost", Port)`: `Inet_Addr` fails, so the
+   name goes to `AHT.DNS` and the literals it returns become the
+   candidate list. On dual-stack boxes this also exercises the
+   IPv4/IPv6 fallback — `getaddrinfo` is asked for both families,
+   which `Get_Host_By_Name` could not do.
 3. **multi-addr [bad, good]** — drives `Connect_Candidates` directly
    with `[(127.0.0.1, bad_port), (127.0.0.1, good_port)]`, where
    `bad_port` is reserved by a bound-but-not-listening socket so
