@@ -71,6 +71,15 @@ case "$AHT_OS" in
         # -dumpmachine, so a mismatch is reported rather than built.
         AHT_CROSS_TARGET=${AHT_CROSS_TARGET:-x86_64-w64-mingw32}
         export AHT_CROSS_TARGET
+        # A stored traceback faults on every raise on 32-bit x86; see
+        # Traceback_Kind in aht.gpr. Chosen from the triplet because
+        # the symptom is an access violation in unrelated tests, which
+        # points nowhere near a binder switch.
+        case "$AHT_CROSS_TARGET" in
+            i?86-*) AHT_TRACEBACK=${AHT_TRACEBACK:-none} ;;
+            *)      AHT_TRACEBACK=${AHT_TRACEBACK:-stored} ;;
+        esac
+        export AHT_TRACEBACK
         # Must match the Variant in aht.gpr.
         VARIANT=$BUILD_MODE-$AHT_TLS_BACKEND-$AHT_CROSS_TARGET
         EXE=.exe

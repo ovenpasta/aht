@@ -43,8 +43,9 @@ not read either one's answer as the other's:
   that XP never had and cannot be given. It is the fast loop, not the
   shipping shape.
 - **i686 via CROSS_PREFIX** — the toolchain that actually ships, and the target
-  where `Stdcall` diverges from C. This one carries the XP
-  import-table assertion.
+  where `Stdcall` diverges from C. This one carries the import-table
+  assertion, which settles which DLLs are named: a necessary part of
+  XP loadability and not the whole of it.
 
 ### x86-64, system cross-GNAT — behaviour only
 
@@ -57,7 +58,7 @@ x86_64-w64-mingw32-gnatmake -gnat2022 -D /tmp/winobj64 \
 WINEDEBUG=-all wine /tmp/winobj64/winrand.exe
 ```
 
-### i686 via CROSS_PREFIX — shipping toolchain, and the XP assertion
+### i686 via CROSS_PREFIX — shipping toolchain, and the import-table assertion
 
 ```sh
 set -e
@@ -117,9 +118,8 @@ What this established, on 2026-08-27, with CROSS_PREFIX
 - `SystemFunction036` binds under `Stdcall` and returns distinct
   16-byte draws under wine on both, with the shared counters reading
   `draws = 2, bytes = 32` and exit 0;
-- the i686 import table is exactly `ADVAPI32.dll`, `KERNEL32.dll` and
-  `msvcrt.dll` — no `bcrypt.dll`, no UCRT — which is an XP-loadable
-  shape;
+- the i686 import table names exactly `ADVAPI32.dll`, `KERNEL32.dll`
+  and `msvcrt.dll` — no `bcrypt.dll`, no UCRT;
 - the assertion discriminates rather than merely passing: rebuilt
   against a body calling `BCryptGenRandom`, `bcrypt.dll` appears in
   that table and the check fails;
@@ -135,12 +135,11 @@ What it did **not** establish:
   binding, the calling convention and the argument widths are
   exercised; entropy quality is taken on Microsoft's word, as it would
   be anyway.
-- **That the image runs on Windows XP.** The import table says it can
-  *load*. Nothing here has executed on XP, and wine cannot stand in
-  for that — wine implements whatever DLL it is asked for, so a body
-  importing a Vista-only DLL passes this recipe while being unloadable
-  on the target. The two checks have disjoint blind spots and neither
-  is redundant.
+- **That the image runs, or loads, on Windows XP.** Nothing here has
+  executed on XP, and wine implements whatever it is asked for. The
+  DLL names are not the whole question either: `KERNEL32.dll` is on XP
+  and carries entry points that are not, so loadability is about
+  symbols. `csrc/dns/aht_dns.c` imports five Vista+ ones.
 - **That the return width is right.** A too-wide declaration on
   `RtlGenRandom` misreads only a *failing* call, and nothing here can
   make it fail. The declaration in the body is the only defence, and

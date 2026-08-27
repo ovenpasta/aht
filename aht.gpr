@@ -58,6 +58,24 @@ library project Aht is
    --  compiler's own -dumpmachine.
    Cross_Target := external ("AHT_CROSS_TARGET", "x86_64-w64-mingw32");
 
+   --  Whether every exception occurrence carries a traceback (-Es).
+   --
+   --  Storing one makes every raise call __gnat_backtrace, which on
+   --  32-bit x86 walks the frame-pointer chain and dereferences what a
+   --  frame omitting ebp left in the slot. Measured on
+   --  i686-w64-mingw32.static: a refused connect faults inside
+   --  tracebak.c reading address 16#3030315B#, the bytes "[100" of
+   --  GNAT.Sockets' own "[10061] Connection refused". -E faults the
+   --  same way, so it is the capture, not the symbolisation. At -O2
+   --  AHT's own frames drop ebp too: 12 tests fail in debug, 24 in
+   --  release.
+   --
+   --  Left on where it works -- POSIX and x86-64 mingw both store
+   --  tracebacks and pass. tests/run_tests.sh picks "none" from the
+   --  triplet.
+   type Traceback_Kind is ("stored", "none");
+   Traceback : Traceback_Kind := external ("AHT_TRACEBACK", "stored");
+
    --  Where the system OpenSSL 3 lives. /usr is right for Linux;
    --  macOS needs the Homebrew prefix (Apple ships no OpenSSL headers):
    --  AHT_OPENSSL_DIR=$(brew --prefix openssl@3)
@@ -202,7 +220,12 @@ library project Aht is
    end Compiler;
 
    package Binder is
-      for Default_Switches ("Ada") use ("-Es");
+      case Traceback is
+         when "stored" =>
+            for Default_Switches ("Ada") use ("-Es");
+         when "none" =>
+            for Default_Switches ("Ada") use ();
+      end case;
    end Binder;
 
    package Linker is
