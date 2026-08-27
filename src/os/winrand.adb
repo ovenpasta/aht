@@ -23,10 +23,10 @@
 --  Two things this probe cannot see. Both measured, not reasoned.
 --
 --  It cannot see whether the image would load on Windows XP. It runs
---  under wine, and wine implements every DLL it is asked for -- the
---  BCryptGenRandom body this one replaced passed here for months
---  while being unloadable on XP, which is exactly how that survived.
---  The complementary check is the import-table assertion in
+--  under wine, and wine implements every DLL it is asked for, so a
+--  body importing a Vista-only DLL passes here while being unloadable
+--  on the target. The complementary check is the import-table
+--  assertion in
 --  src/os/README.md: it never executes a byte, but it does see the
 --  DLL names. Neither half is sufficient alone, and neither is
 --  redundant with the other. Do not delete one because the other is
@@ -60,11 +60,11 @@ procedure Winrand is
    --  patches of garbage -- which do differ, so it passes.
    --
    --  Measured, not feared: against a Get that writes nothing at all,
-   --  the unsentinelled version of this probe printed two plausible
-   --  hex lines, reported "OK (draws = 2, bytes = 32)" and exited 0.
-   --  The counters did not help, because the parent counts requests
-   --  rather than bytes delivered. The sentinel turns "wrote nothing"
-   --  from a coin flip on stack contents into a determinate failure.
+   --  a probe without this sentinel prints two plausible hex lines,
+   --  reports "OK (draws = 2, bytes = 32)" and exits 0. The counters
+   --  do not help, because the parent counts requests rather than
+   --  bytes delivered. The sentinel turns "wrote nothing" from a coin
+   --  flip on stack contents into a determinate failure.
    Sentinel : constant AHT.Bytes.Octet := 16#A5#;
 
    A, B : AHT.Bytes.Byte_Array (1 .. Width) := (others => Sentinel);

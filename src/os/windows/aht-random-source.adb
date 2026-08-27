@@ -12,37 +12,28 @@ with System;
 --  descriptor to leak across exec, no state to inherit across a fork,
 --  and no partial-result case to loop over.
 --
---  Not BCryptGenRandom, which this body called until the XP floor was
---  noticed. It lives in bcrypt.dll, which does not exist before Vista,
---  and the pragma below puts that DLL in the PE import table of every
---  binary whose closure reaches this unit -- so XP fails at image load,
---  before main, rather than at the draw. The closure is wider than it
---  looks: RFC 6455 client frame masking draws from AHT.Random on every
---  frame sent, so plain ws:// reaches here too, and the TLS backend
---  choice is irrelevant because this unit is selected by AHT_OS.
+--  BCryptGenRandom is unusable here. It lives in bcrypt.dll, which
+--  does not exist before Vista, and a Linker_Options pragma naming it
+--  puts that DLL in the PE import table of every binary whose closure
+--  reaches this unit -- so XP fails at image load, before main, rather
+--  than at the draw. The closure is wider than it looks: RFC 6455
+--  client frame masking draws from AHT.Random on every frame sent, so
+--  plain ws:// reaches here too, and the TLS backend choice is
+--  irrelevant because this unit is selected by AHT_OS.
 --
---  CryptGenRandom is equally XP-safe and is what mbedTLS's own
---  entropy_poll.c calls, which would be the more consistent choice on
---  its face. It needs CryptAcquireContext and CryptReleaseContext
---  bracketing every draw, which puts a handle lifetime and two further
---  failure modes into a body whose entire shape is the paragraph above.
---  The consistency argument also expires: once mbedTLS is configured
---  MBEDTLS_NO_PLATFORM_ENTROPY and fed from this unit, entropy_poll.c
---  is not compiled at all and there is nothing left to be consistent
---  with.
+--  CryptGenRandom is equally XP-safe, but needs CryptAcquireContext
+--  and CryptReleaseContext bracketing every draw, which puts a handle
+--  lifetime and two further failure modes into a body whose entire
+--  shape is the paragraph above.
 --
 --  RtlGenRandom has no import library entry under that name; advapi32
 --  exports it as SystemFunction036, which is the documented way to
 --  reach it.
 package body AHT.Random.Source is
 
-   --  Explicit rather than load-bearing, and that is a real difference
-   --  from the bcrypt pragma this replaces -- do not read the old
-   --  rationale onto it. bcrypt is not in GNAT's mingw link spec, so
-   --  "-lbcrypt" was what made that import resolve, and was therefore
-   --  also what put bcrypt.dll in the import table of every binary
-   --  reaching this unit. advapi32 *is* in the spec: verified by
-   --  deleting this line, relinking the probe, and finding
+   --  Explicit rather than load-bearing. advapi32 is already in GNAT's
+   --  mingw link spec, so the import resolves without this line:
+   --  verified by deleting it, relinking the probe, and finding
    --  SystemFunction036 still bound and ADVAPI32.dll still imported.
    --
    --  It stays because the dependency is genuine and should not rest on
@@ -58,12 +49,12 @@ package body AHT.Random.Source is
    --  On x86 stdcall a byte-wide return arrives in AL with the upper
    --  bits of EAX undefined. Declare this wider and the comparison
    --  reads those bits, which are usually non-zero whatever the callee
-   --  did. Under the predicate this body used to have -- NTSTATUS,
-   --  where non-zero meant failure -- that bug was noisy: it raised on
-   --  perfectly good draws and was found at once. Under this one, where
-   --  non-zero means success, the identical bug is silent and passes.
-   --  This is a CSPRNG; a silent pass means shipping entropy that
-   --  nothing ever validated.
+   --  did. Non-zero is success here, so that bug passes silently, and
+   --  this is a CSPRNG: a silent pass means shipping entropy nothing
+   --  ever validated. A predicate where non-zero meant failure would
+   --  make the same mistake announce itself on the first good draw.
+   --  This one gives no such warning, which is why the width is pinned
+   --  here rather than left to habit.
    --
    --  src/os/winrand.adb cannot detect it either -- see the note there
    --  -- because a width-bugged status test only misreads a *failing*
@@ -101,8 +92,7 @@ package body AHT.Random.Source is
           (RandomBuffer       => B (B'First)'Address,
            RandomBufferLength => Interfaces.C.unsigned_long (B'Length));
 
-      --  Non-zero is TRUE. Unlike the NTSTATUS this replaced there is
-      --  no code to report: the API returns the boolean and nothing
+      --  Non-zero is TRUE. The API returns the boolean and nothing
       --  else, so a failure here can say that the call was refused and
       --  cannot say why.
       if OK = 0 then

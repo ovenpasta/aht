@@ -44,12 +44,14 @@ with AHT.Bytes;
 --             subprocesses do not inherit it; see the body for the
 --             narrow window that leaves open.
 --
---    Windows  `BCryptGenRandom` with
---             `BCRYPT_USE_SYSTEM_PREFERRED_RNG`. One call fills the
---             buffer or fails, so there is no descriptor to leak
---             across `exec`, no state to inherit across a `fork`, and
---             no partial result to loop over — the whole family of
---             concerns above simply does not arise.
+--    Windows  `RtlGenRandom`, which advapi32 exports as
+--             `SystemFunction036`. One call fills the buffer or
+--             fails, so there is no descriptor to leak across `exec`,
+--             no state to inherit across a `fork`, and no partial
+--             result to loop over — the whole family of concerns
+--             above simply does not arise. bcrypt.dll is avoided on
+--             purpose: it does not exist before Vista, and importing
+--             it makes the image unloadable on the XP target.
 --
 --  Adding a platform means implementing one procedure. It does NOT
 --  mean the rest of the library builds there: this unit is portable,

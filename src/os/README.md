@@ -121,13 +121,13 @@ What this established, on 2026-08-27, with CROSS_PREFIX
   `msvcrt.dll` — no `bcrypt.dll`, no UCRT — which is an XP-loadable
   shape;
 - the assertion discriminates rather than merely passing: rebuilt
-  against the previous `BCryptGenRandom` body, `bcrypt.dll` reappears
-  in that table and the check fails;
+  against a body calling `BCryptGenRandom`, `bcrypt.dll` appears in
+  that table and the check fails;
 - the probe discriminates too: against a `Get` that writes nothing,
-  it fails on the sentinel check and exits 1. Before the sentinel was
-  added it reported `OK (draws = 2, bytes = 32)` and exited 0 against
-  that same body, because it was comparing two patches of stack
-  garbage. See the note in `winrand.adb`.
+  it fails on the sentinel check and exits 1. Without the sentinel it
+  reports `OK (draws = 2, bytes = 32)` and exits 0 against that same
+  body, because it compares two patches of stack garbage. See the note
+  in `winrand.adb`.
 
 What it did **not** establish:
 
@@ -137,10 +137,10 @@ What it did **not** establish:
   be anyway.
 - **That the image runs on Windows XP.** The import table says it can
   *load*. Nothing here has executed on XP, and wine cannot stand in
-  for that — wine implements whatever DLL it is asked for, which is
-  exactly how the `BCryptGenRandom` body passed this recipe while
-  being unloadable on XP. The two checks have disjoint blind spots and
-  neither is redundant.
+  for that — wine implements whatever DLL it is asked for, so a body
+  importing a Vista-only DLL passes this recipe while being unloadable
+  on the target. The two checks have disjoint blind spots and neither
+  is redundant.
 - **That the return width is right.** A too-wide declaration on
   `RtlGenRandom` misreads only a *failing* call, and nothing here can
   make it fail. The declaration in the body is the only defence, and

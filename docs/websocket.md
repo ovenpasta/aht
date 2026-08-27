@@ -17,7 +17,7 @@ Packages under `AHT.Websocket`:
 cryptographically secure bytes from the OS pool for masking keys and
 the handshake nonce. Its one non-portable part — the system call
 itself — is `AHT.Random.Source`, with a body per OS under `src/os`
-(`/dev/urandom`, `BCryptGenRandom`) selected by the `AHT_OS` scenario
+(`/dev/urandom`, `RtlGenRandom`) selected by the `AHT_OS` scenario
 variable. That unit builds and runs on Windows; the transports and the
 test harness are POSIX-verified only.
 
