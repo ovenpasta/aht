@@ -214,7 +214,7 @@ client socket.
 
 One backend-neutral spec, two bodies selected at build time by the
 `AHT_TLS_BACKEND` gpr external — **openssl** (default, system OpenSSL
-3) or **mbedtls** (vendored 2.28). Backend selection, the deliberate
+3) or **mbedtls** (vendored 3.6). Backend selection, the deliberate
 per-backend policy differences (trust-store default, abrupt-EOF
 handling, IP-SAN verification) and the OpenSSL memory-BIO engine are
 documented in [`tls.md`](tls.md); this section covers the shared

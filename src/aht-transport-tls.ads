@@ -9,7 +9,7 @@ private with Ada.Real_Time;
 --  bodies implement it, selected at build time by the AHT_TLS_BACKEND
 --  gpr external (see docs/tls.md):
 --    * openssl — system OpenSSL 3 (libssl/libcrypto).
---    * mbedtls — vendored mbedTLS 2.28, fetched and built on demand.
+--    * mbedtls — vendored mbedTLS 3.6, fetched and built on demand.
 package AHT.Transport.TLS is
 
    type TLS_Transport is new Transport_Type with private;

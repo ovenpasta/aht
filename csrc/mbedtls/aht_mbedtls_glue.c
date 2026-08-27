@@ -69,10 +69,38 @@ void aht_mbedtls_ctr_drbg_free(void *c)
     free(c);
 }
 
+/* AHT.Mbedtls.Entropy.Poll. Declared here rather than in a header
+ * because it is the only symbol crossing in this direction, and a
+ * header for one extern would be a file to keep in step by hand. */
+extern int aht_mbedtls_entropy_poll(void *data, unsigned char *output,
+                                    size_t len, size_t *olen);
+
+/* The library is built MBEDTLS_NO_PLATFORM_ENTROPY, so entropy_poll.c
+ * contributes nothing and mbedtls_entropy_init leaves the pool with no
+ * sources at all -- seeding would fail rather than fall back. The
+ * source registered here is AHT.Random, which is also what the rest of
+ * the library draws masks and nonces from.
+ *
+ * MBEDTLS_ENTROPY_BLOCK_SIZE is the number of bytes the pool must take
+ * from this source before it considers itself seeded; SOURCE_STRONG
+ * says the source is fit to be the only one, which here it is.
+ *
+ * A failed registration is reported as allocation failure. The
+ * alternative -- returning a context with no sources -- defers the
+ * report to mbedtls_ctr_drbg_seed, which cannot say which of several
+ * things went wrong. */
 void *aht_mbedtls_entropy_new(void)
 {
     mbedtls_entropy_context *c = malloc(sizeof *c);
-    if (c) mbedtls_entropy_init(c);
+    if (!c) return NULL;
+    mbedtls_entropy_init(c);
+    if (mbedtls_entropy_add_source(c, aht_mbedtls_entropy_poll, NULL,
+                                   MBEDTLS_ENTROPY_BLOCK_SIZE,
+                                   MBEDTLS_ENTROPY_SOURCE_STRONG) != 0) {
+        mbedtls_entropy_free(c);
+        free(c);
+        return NULL;
+    }
     return c;
 }
 

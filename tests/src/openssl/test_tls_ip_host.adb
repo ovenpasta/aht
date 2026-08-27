@@ -2,8 +2,8 @@
 --  https://127.0.0.1:8766 with the fixture CA must verify via the
 --  cert's IP:127.0.0.1 SAN (X509_VERIFY_PARAM_set1_ip_asc; no SNI is
 --  sent for IP literals). The DNS-name path stays covered by test_tls
---  ("localhost"). The mbedtls source of this test pins that backend's
---  opposite behavior (no IP-SAN matching in mbedTLS 2.28).
+--  ("localhost"). The mbedtls source of this test asserts the same
+--  property: both backends match iPAddress SANs.
 
 with Ada.Command_Line;
 with Ada.Exceptions;

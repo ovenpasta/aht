@@ -285,11 +285,11 @@ begin
          --  Reconnect runs, so only a copy taken at Connect can work.
          Anchors : constant String := Cert;
       begin
-         --  localhost, not the IP literal: mbedTLS 2.28 matches
-         --  dNSName SANs and the CN but not iPAddress SANs, so a
-         --  verifying dial to 127.0.0.1 fails there for reasons that
-         --  have nothing to do with CA_PEM. The cert carries both
-         --  SANs; this picks the one both backends honour.
+         --  localhost rather than the IP literal, so this exercises
+         --  the dNSName path. The cert carries both SANs and both
+         --  backends honour both; the iPAddress path is covered by
+         --  test_tls_ip_host, and keeping it out of here means a
+         --  failure points at CA_PEM rather than at name matching.
          AHT.Websocket.Client.Connect
            (C, "wss://localhost:8768/", Insecure => False,
             CA_PEM => Anchors);

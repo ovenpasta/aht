@@ -1,8 +1,16 @@
 --  Coordinator coverage, mbedtls backend.
 --
---  The KeyUpdate half of this main is openssl-only: mbedTLS 2.28
---  negotiates TLS 1.2 at most, which has no post-handshake KeyUpdate
---  to drive. The coordinator half applies to BOTH backends, though —
+--  The KeyUpdate half of this main is openssl-only. This backend is
+--  built with MBEDTLS_SSL_PROTO_TLS1_3 compiled out -- see
+--  scripts/fetch_mbedtls.sh for why -- so it negotiates TLS 1.2, which
+--  has no post-handshake KeyUpdate to drive.
+--
+--  The skip below is unconditional and takes that on trust rather than
+--  measuring it. Nothing here asks the session what it negotiated, so
+--  if the protocol ceiling ever moves this main will keep printing
+--  TLS 1.2 and keep skipping coverage that had become reachable.
+--
+--  The coordinator half applies to BOTH backends, though —
 --  since the mbedtls engine became a buffered, non-blocking engine it
 --  arbitrates its single socket read through the very same
 --  AHT.TLS_Sync coordinator — so the shared white-box cases run here.

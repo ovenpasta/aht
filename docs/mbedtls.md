@@ -9,32 +9,43 @@ via custom BIO callbacks; the transport-level test
 (`tests/src/test_tls.adb`) covers verify, insecure, and
 untrusted-chain rejection.
 
-This backend targets **mbedTLS v2.28.9**, the last LTS line that
-still supports older Windows versions. Note that the 2.28 series
-reached end-of-life in late 2024 and no longer receives security
-patches — which is why the default backend is the system OpenSSL 3;
-newer mbedTLS versions may follow. Changing the version requires
-rerunning the binding regeneration and curating any diffs.
+This backend targets **mbedTLS 3.6.7**, the current long-term-support
+line, which upstream supports with security fixes until at least
+March 2027. The default backend is still the system OpenSSL 3.
+
+Changing the version means rerunning the binding regeneration and
+curating any diffs, and it means updating three things that name the
+version independently: `VERSION` and the pinned SHA-256 in
+`scripts/fetch_mbedtls.sh`, `Mbedtls_Tree` in `aht.gpr`, and the
+constants in `AHT.Mbedtls.Version`. Nothing in the build reconciles
+them. What catches a disagreement is `test_tls_version`, which asks
+the linked library for its own version string and compares it against
+a hardcoded expectation — the only kind that can disagree with the
+binary. A `Mbedtls_Tree` left pointing at a tree the fetch script no
+longer builds compiles and links perfectly well, and that test is what
+reports it.
 
 ## Fetch & build
 
 `scripts/fetch_mbedtls.sh` does the following on first run:
 
-1. Download the v2.28.9 source tarball from
-   `https://github.com/Mbed-TLS/mbedtls/archive/refs/tags/v2.28.9.tar.gz`.
+1. Download the official release tarball from
+   `https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2`.
    The download is resumable (writes to `.part` then renames on
-   success).
+   success). It is the uploaded release asset and not GitHub's
+   auto-generated tag snapshot: the snapshots omit the `framework/`
+   submodule and do not build.
 2. Verify SHA-256 against the pinned constant
-   `e4dbcf86a4fb31506482888560f02b161e0ecfb82fee0643abcfc86abee5817e`
+   `a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6`
    — mismatch aborts the build loudly.
-3. Extract into `third_party/mbedtls-2.28.9/`.
-4. `make lib` with
-   `CFLAGS="-O2 -DMBEDTLS_THREADING_C -DMBEDTLS_THREADING_PTHREAD"`
-   so the library's internal mutex usage is task-safe (the WS
-   receiver task and HTTP send path both touch the same SSL
-   context).
+3. Extract into `third_party/mbedtls-3.6.7/`.
+4. Edit the tree's own `include/mbedtls/mbedtls_config.h`, then
+   `make lib` with `CFLAGS="-O2"`. The configuration lives in that
+   header rather than in `-D` flags so the archive and the C glue
+   cannot disagree about a macro that changes a struct's size; the
+   script's header explains what that would cost.
 5. Leave the static archives at
-   `third_party/mbedtls-2.28.9/library/{libmbedtls,libmbedx509,libmbedcrypto}.a`.
+   `third_party/mbedtls-3.6.7/library/{libmbedtls,libmbedx509,libmbedcrypto}.a`.
 
 The script is **idempotent**: once `libmbedtls.a` exists and is
 non-empty it exits 0 without touching the network or invoking make,
@@ -48,7 +59,7 @@ The link wiring is `pragma Linker_Options` in
 `src/aht-mbedtls.ads` rather than a project-level switch:
 
 ```ada
-pragma Linker_Options ("-Lthird_party/mbedtls-2.28.9/library");
+pragma Linker_Options ("-Lthird_party/mbedtls-3.6.7/library");
 pragma Linker_Options ("-lmbedtls");
 pragma Linker_Options ("-lmbedx509");
 pragma Linker_Options ("-lmbedcrypto");

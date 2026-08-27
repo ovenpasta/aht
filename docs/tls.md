@@ -6,7 +6,7 @@ libraries are compiled/linked:
 
 - **openssl** (default) — the system OpenSSL 3 (`libssl`/`libcrypto`),
   TLS 1.2/1.3. Bindings: `AHT.Openssl.*` under `src/tls/openssl/`.
-- **mbedtls** — vendored mbedTLS 2.28 (TLS 1.2), downloaded and
+- **mbedtls** — vendored mbedTLS 3.6 (TLS 1.2), downloaded and
   compiled on first build by `scripts/fetch_mbedtls.sh`. Bindings:
   `AHT.Mbedtls.*` under `src/tls/mbedtls/`; see
   [`mbedtls.md`](mbedtls.md).
@@ -31,7 +31,7 @@ Every build combination gets its own output tree
 dirs likewise), so switching never clobbers artifacts. `AHT_OS=windows`
 appends the cross toolchain's **target triplet** to that variant
 (`obj/debug-mbedtls-x86_64-w64-mingw32`) and gets its own mbedTLS tree
-(`third_party/mbedtls-2.28.9-x86_64-w64-mingw32`), because mbedTLS
+(`third_party/mbedtls-3.6.7-x86_64-w64-mingw32`), because mbedTLS
 builds in-tree and the targets are not configured alike. The triplet
 rather than the word "windows": an i686 and an x86-64 mingw build are
 as incompatible as a Linux one, and a shared directory would let each
@@ -69,9 +69,9 @@ deliberately differ per backend:
 | `CA_PEM` supplied | envelope validated by `AHT.PEM` first, always — including under `Insecure`, where OpenSSL then loads nothing because verification is off while mbedTLS still parses the chain. Validation is the normalised behaviour; loading is not. Mutually exclusive with `CA_Path`. | same validation; the chain is parsed even under `Insecure` |
 | `CA_Path = ""`, verifying | platform trust store (`SSL_CTX_set_default_verify_paths`; honours `SSL_CERT_FILE`/`SSL_CERT_DIR`) — public `https://` endpoints work out of the box | no default trust — the handshake rejects; pass a CA bundle or set `Insecure` |
 | CA **directory** semantics | c_rehash hashed-name lookup | loads every file in the directory |
-| IP-literal host, verifying | verified against the cert's IP SANs (`X509_VERIFY_PARAM_set1_ip_asc`), no SNI sent | rejected — mbedTLS 2.28 matches dNSName SANs/CN only |
+| IP-literal host, verifying | verified against the cert's IP SANs (`X509_VERIFY_PARAM_set1_ip_asc`), no SNI sent | verified against the cert's iPAddress SANs — the backends agree here, and `test_tls_ip_host` asserts the same property from both sources |
 | Abrupt TCP EOF (no close_notify) | **`TLS_Error`** — truncation must fail, because HTTP supports EOF-framed bodies and a silent truncation would be a data-integrity hole (`SSL_OP_IGNORE_UNEXPECTED_EOF` is never set) | clean EOF (`Last = 0`) — long-standing backend behavior, pinned by test_tls_truncation |
-| Protocol versions | TLS 1.2 minimum, TLS 1.3 active; renegotiation disabled | TLS 1.2 (mbedTLS 2.28 maximum) |
+| Protocol versions | TLS 1.2 minimum, TLS 1.3 active; renegotiation disabled | TLS 1.2 — `MBEDTLS_SSL_PROTO_TLS1_3` is compiled out, for the PSA reasons below |
 
 Both backends: DNS-name hosts get SNI + hostname verification;
 `Insecure => True` skips certificate verification entirely (SNI still
@@ -174,13 +174,13 @@ comment is exactly the arrangement that produces that bug.
 
 POSIX enables `MBEDTLS_THREADING_C` and `MBEDTLS_THREADING_PTHREAD`.
 
-**Windows is built threadless**, because mbedTLS 2.28 offers pthread
+**Windows is built threadless**, because mbedTLS offers pthread
 or a caller-supplied `THREADING_ALT` and nothing else. That is sound
 rather than convenient — but not because the mutexes are all
 unreachable. Some are; the rest guard state that only ever has one
 task in it, for reasons this client enforces itself.
 
-| Mutex in 2.28 | Why it cannot matter here |
+| Mutex | Why it cannot matter here |
 |---|---|
 | `entropy.c`, `ctr_drbg.c` | Both contexts are per transport object (`Backend_State`), never shared between sessions or tasks |
 | `rsa.c` | The context is per session and every engine call on it is serialized (see below) |
@@ -190,10 +190,18 @@ task in it, for reasons this client enforces itself.
 | `x509_crt.c` | The `readdir` mutex guards the POSIX branch of `mbedtls_x509_crt_parse_path`; the `_WIN32` branch uses `FindFirstFileW` with a per-call handle |
 | `platform_util.c` | The `gmtime` mutex guards the `PLATFORM_UTIL_USE_GMTIME` fallback; `_WIN32` uses the thread-safe `gmtime_s` |
 
-The argument holds only while `MBEDTLS_USE_PSA_CRYPTO` is off: PSA in
-2.28 keeps process-global state, and its threading arrived in 3.6. The
-fetch script checks that macro and fails the build if it is ever
-enabled, for both targets.
+The argument holds only while PSA Crypto stays unreached. PSA keeps
+process-global state, which no per-session lock covers and which the
+threadless build has nothing to guard with. Two macros reach it, and
+the fetch script's compiled probe fails the build on either, for both
+targets:
+
+- `MBEDTLS_USE_PSA_CRYPTO`, which routes X.509 and TLS through PSA.
+- `MBEDTLS_SSL_PROTO_TLS1_3`. The TLS 1.3 code always uses PSA
+  whatever the first macro says, and a 1.3-capable client reaches it
+  while assembling its ClientHello — so on every handshake, not only
+  the ones that negotiate 1.3. That is why this backend is TLS 1.2:
+  the protocol is compiled out, not merely left unnegotiated.
 
 The RSA row needs spelling out, because two plausible readings of it
 are both wrong.
@@ -291,6 +299,31 @@ than a truncation error, and there is no KeyUpdate to handle because
 TLS 1.2 has none. See [`transport.md`](transport.md) for the
 handshake walkthrough and [`mbedtls.md`](mbedtls.md) for the
 fetch/build/binding pipeline.
+
+### Where the entropy comes from
+
+Both targets are built `MBEDTLS_NO_PLATFORM_ENTROPY`, so
+`entropy_poll.c` contributes nothing and `mbedtls_entropy_init` leaves
+the pool with no sources at all. `aht_mbedtls_entropy_new` registers
+`AHT.Mbedtls.Entropy.Poll` in its place, which fills from
+`AHT.Random` — the same source the client draws frame masks and
+handshake nonces from.
+
+One source rather than two, because the platform entropy call is
+precisely where a platform-incompatible dependency hides:
+`entropy_poll.c`'s Windows branch calls `BCryptGenRandom`, which puts
+`bcrypt.dll` in the import table and leaves the image unloadable
+before Vista. Compiling it out leaves exactly one place that decision
+is made, and `src/os/README.md` describes the import-table assertion
+that guards it.
+
+There is no quiet failure mode. With no platform source and no working
+callback, `mbedtls_ctr_drbg_seed` fails and no handshake happens at
+all — so any passing TLS test has already established that the
+callback delivered. `test_tls_entropy` also asserts it directly: a
+connect must move `AHT.Random`'s counters. The openssl source of that
+test asserts the same connect leaves them untouched, and that control
+is what makes the mbedtls half mean anything.
 
 ## Bindings
 

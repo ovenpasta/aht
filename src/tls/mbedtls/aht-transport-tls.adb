@@ -6,6 +6,12 @@ with Interfaces.C;
 with System;
 
 with AHT.Mbedtls.Error;
+--  Withed so the callback aht_mbedtls_entropy_new registers is in the
+--  closure. Nothing on this side calls it -- the caller is C, through
+--  a function pointer -- so without a with the symbol is undefined at
+--  link and the entropy pool has no source.
+with AHT.Mbedtls.Entropy;
+pragma Unreferenced (AHT.Mbedtls.Entropy);
 with AHT.Mbedtls.Glue;
 --  Withed for its pragma Linker_Options and nothing else -- the unit
 --  declares no entities, so there is nothing here to reference. It has
@@ -20,7 +26,7 @@ with AHT.Transport.TCP;
 
 --  mbedTLS backend, structured as a buffered engine.
 --
---  mbedTLS 2.28 does the crypto; the bytes travel over an
+--  mbedTLS does the crypto; the bytes travel over an
 --  AHT.Transport.TCP instance held in Backend_State. The BIO callbacks
 --  do NOT touch the socket: they move bytes to and from two in-memory
 --  queues, so every mbedtls_ssl_* call returns promptly (WANT_READ
@@ -727,9 +733,9 @@ package body AHT.Transport.TLS is
          Fail (Ret, "TLS connect (ssl_setup)");
       end if;
 
-      --  7. SNI / cert-name hostname. (mbedTLS 2.28 matches dNSName
-      --     SANs and the CN — not iPAddress SANs, so verifying an
-      --     IP-literal host fails here; see docs/tls.md.)
+      --  7. SNI / cert-name hostname. mbedTLS matches dNSName SANs,
+      --     the CN, and iPAddress SANs, so an IP-literal host verifies
+      --     here as it does on the openssl backend; see docs/tls.md.
       declare
          Host_C : aliased C.char_array := C.To_C (Host);
       begin

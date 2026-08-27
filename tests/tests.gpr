@@ -76,6 +76,7 @@ project Tests is
       "test_tls_bad_handshake.adb",
       "test_tls_ca_pem.adb",
       "test_tls_ip_host.adb",
+      "test_tls_entropy.adb",
       "test_tls_stress.adb",
       "test_tls_keyupdate.adb",
       "test_http_tls.adb",

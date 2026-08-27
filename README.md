@@ -21,7 +21,7 @@ Every Ada unit lives under the `AHT.*` namespace.
   against the system trust store, a caller CA bundle (`CA_Path`) or
   anchors embedded in the binary (`CA_PEM`),
   or opt-in `Insecure` mode. Two build-time backends: system
-  OpenSSL 3 (default, TLS 1.3) or vendored mbedTLS 2.28
+  OpenSSL 3 (default, TLS 1.3) or vendored mbedTLS 3.6
   (`AHT_TLS_BACKEND=mbedtls`) — see [`docs/tls.md`](docs/tls.md).
 - **Contracts** — public APIs carry Ada 2012/2022 contracts (subtype
   predicates, `Type_Invariant`, `Pre`/`Post`).
@@ -182,7 +182,7 @@ One reference file per subsystem:
   abstraction, TCP, TLS.
 - [`docs/tls.md`](docs/tls.md) — TLS backend selection (OpenSSL /
   mbedTLS), per-backend semantics, the OpenSSL engine design.
-- [`docs/mbedtls.md`](docs/mbedtls.md) — how mbedTLS v2.28.9 is
+- [`docs/mbedtls.md`](docs/mbedtls.md) — how mbedTLS 3.6.7 is
   fetched, built, and bound (the mbedtls backend).
 - [`docs/websocket.md`](docs/websocket.md) — frame codec, concurrency
   model, client API.

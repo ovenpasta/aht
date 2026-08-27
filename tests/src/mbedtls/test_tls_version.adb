@@ -3,12 +3,20 @@
 --  AHT.Mbedtls.Version.Full_Version_String we exercise:
 --    * the Linker_Options pragmas in AHT.Mbedtls finding
 --      libmbedtls / libmbedx509 / libmbedcrypto in
---      third_party/mbedtls-2.28.9/library/;
+--      third_party/mbedtls-3.6.7/library/;
 --    * the curated Import of mbedtls_version_get_string_full;
 --    * the char_array <-> Ada String round-trip.
 --
 --  If this passes, the rest of the binding surface (ssl_*,
 --  ctr_drbg_*, entropy_*, x509_*) is wired correctly.
+--
+--  It is also the tripwire for a disagreement between aht.gpr's
+--  Mbedtls_Tree and VERSION in scripts/fetch_mbedtls.sh. Those name
+--  one tree twice and nothing reconciles them, so the script can build
+--  one version while the project compiles and links another. The
+--  literals below are the linked library's own answer, which is why
+--  they are spelled out rather than derived: a hardcoded expectation
+--  is the only kind that can disagree with the binary.
 
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
@@ -27,16 +35,16 @@ procedure Test_TLS_Version is
    Short : constant String := AHT.Mbedtls.Version.Version_String;
    Full  : constant String := AHT.Mbedtls.Version.Full_Version_String;
 begin
-   if Short /= "2.28.9" then
-      Fail ("Version_String = """ & Short & """ (expected ""2.28.9"")");
+   if Short /= "3.6.7" then
+      Fail ("Version_String = """ & Short & """ (expected ""3.6.7"")");
    end if;
-   if Full /= "Mbed TLS 2.28.9" then
+   if Full /= "Mbed TLS 3.6.7" then
       Fail ("Full_Version_String = """ & Full
-            & """ (expected ""Mbed TLS 2.28.9"")");
+            & """ (expected ""Mbed TLS 3.6.7"")");
    end if;
-   if AHT.Mbedtls.Version.Major /= 2
-     or else AHT.Mbedtls.Version.Minor /= 28
-     or else AHT.Mbedtls.Version.Patch /= 9
+   if AHT.Mbedtls.Version.Major /= 3
+     or else AHT.Mbedtls.Version.Minor /= 6
+     or else AHT.Mbedtls.Version.Patch /= 7
    then
       Fail ("compile-time constants drifted from the linked library");
    end if;

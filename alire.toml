@@ -10,7 +10,7 @@ exercised against the Autobahn|Testsuite conformance harness.
 
 TLS backends are selected at build time via the AHT_TLS_BACKEND
 environment variable: the default links against the system OpenSSL 3
-(libssl-dev / brew openssl@3); the alternative vendors mbedTLS 2.28,
+(libssl-dev / brew openssl@3); the alternative vendors mbedTLS 3.6,
 downloaded and compiled on first build (needs network, curl, tar,
 make, and a C compiler). Currently POSIX-only (Linux, macOS).
 """
