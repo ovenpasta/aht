@@ -150,7 +150,7 @@ package body AHT.Transport.TCP is
             Log.Debug
               ("connect refused " & To_String (E.Host)
                & ":" & AHT.URL.Port_Number'Image (E.Port)
-               & " — " & Ada.Exceptions.Exception_Message (Ex));
+               & " - " & Ada.Exceptions.Exception_Message (Ex));
             Close_Quietly (Sock);
       end Try;
 
@@ -173,7 +173,7 @@ package body AHT.Transport.TCP is
       then
          raise Transport_Error with
            "TCP transport is single-use; use a fresh transport to connect "
-           & "(this one has already been connected — Close it and discard)";
+           & "(this one has already been connected - Close it and discard)";
       end if;
 
       for E of Endpoints loop
@@ -186,12 +186,12 @@ package body AHT.Transport.TCP is
 
       if not Success then
          if Timed_Out then
-            Log.Warning ("connect timed out — " & To_String (Last_Error));
+            Log.Warning ("connect timed out - " & To_String (Last_Error));
             raise Timeout_Error with
               "TCP connect timed out: " & To_String (Last_Error);
          else
             Log.Warning
-              ("all candidates refused — " & To_String (Last_Error));
+              ("all candidates refused - " & To_String (Last_Error));
             raise Transport_Error with
               "TCP connect: all candidates failed: "
               & To_String (Last_Error);

@@ -55,14 +55,14 @@ package body AHT.Websocket.Frames is
       if Payload'Length = 1 then
          raise Protocol_Error
            with "Frames.Encode: Close payload of 1 byte is illegal "
-             & "(must be 0 or >= 2 per RFC 6455 §5.5.1)";
+             & "(must be 0 or >= 2 per RFC 6455 sec. 5.5.1)";
       end if;
       Code := Close_Code_At (Payload, Payload'First);
       if Code not in Valid_Close_Code then
          raise Protocol_Error
            with "Frames.Encode: outbound Close code" & Code'Image
              & " is not a Valid_Close_Code (must be in "
-             & "1000..1015 ∪ 3000..4999 and not 1005/1006/1015)";
+             & "1000..1015 or 3000..4999 and not 1005/1006/1015)";
       end if;
    end Validate_Close_Encode;
 
@@ -78,7 +78,7 @@ package body AHT.Websocket.Frames is
       if Len = 1 then
          raise Protocol_Error
            with "Frames.Decode: Close payload of 1 byte is illegal "
-             & "(must be 0 or >= 2 per RFC 6455 §5.5.1)";
+             & "(must be 0 or >= 2 per RFC 6455 sec. 5.5.1)";
       end if;
       Code :=
         Natural
@@ -89,7 +89,7 @@ package body AHT.Websocket.Frames is
       if Code not in Any_Close_Code then
          raise Protocol_Error
            with "Frames.Decode: received Close code" & Code'Image
-             & " is outside 1000..1015 ∪ 3000..4999";
+             & " is outside 1000..1015 or 3000..4999";
       end if;
    end Validate_Close_Decode;
 

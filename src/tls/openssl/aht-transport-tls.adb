@@ -224,7 +224,7 @@ package body AHT.Transport.TLS is
             St.Drain_Lock.Release;
             Latch_Engine_Dead
               (St, Where & " drain failed: "
-               & Ada.Exceptions.Exception_Name (E) & " — "
+               & Ada.Exceptions.Exception_Name (E) & " - "
                & Ada.Exceptions.Exception_Message (E));
             Drop_Connection (St);
             raise;
@@ -914,7 +914,7 @@ package body AHT.Transport.TLS is
                   --  write-timeout rule of the transport contract).
                   Latch_Engine_Dead
                     (St, "TLS write failed: "
-                     & Ada.Exceptions.Exception_Name (E) & " — "
+                     & Ada.Exceptions.Exception_Name (E) & " - "
                      & Ada.Exceptions.Exception_Message (E));
                   Drop_Connection (St);
                   raise;

@@ -1066,7 +1066,7 @@ package body AHT.Websocket.Client is
                Maybe_Send_Close_Echo (Code => 1007);
                Fire_On_Error
                  ("Receiver: invalid UTF-8 in text message "
-                  & "(RFC 6455 §8.1) — failing connection with 1007");
+                  & "(RFC 6455 sec. 8.1) - failing connection with 1007");
                S.State.Set (Closed);
                Stop_Loop := True;
                return;
@@ -1098,7 +1098,7 @@ package body AHT.Websocket.Client is
                     ("Receiver: inbox full ("
                      & Natural'Image (S.Inbox.Count) & " messages,"
                      & Natural'Image (S.Inbox.Byte_Count)
-                     & " bytes queued) — failing connection with 1008");
+                     & " bytes queued) - failing connection with 1008");
                   S.State.Set (Closed);
                   Stop_Loop := True;
                   return;
@@ -1133,7 +1133,7 @@ package body AHT.Websocket.Client is
                   Maybe_Send_Close_Echo (Code => 1002);
                   Fire_On_Error
                     ("Receiver: peer sent a reserved Close code "
-                     & "(RFC 6455 §7.4.1) — failing connection with 1002");
+                     & "(RFC 6455 sec. 7.4.1) - failing connection with 1002");
                   S.State.Set (Closed);
                   Stop_Loop := True;
                   return;
@@ -1141,7 +1141,7 @@ package body AHT.Websocket.Client is
                   Maybe_Send_Close_Echo (Code => 1007);
                   Fire_On_Error
                     ("Receiver: invalid UTF-8 in Close reason "
-                     & "(RFC 6455 §8.1) — failing connection with 1007");
+                     & "(RFC 6455 sec. 8.1) - failing connection with 1007");
                   S.State.Set (Closed);
                   Stop_Loop := True;
                   return;
@@ -1188,7 +1188,7 @@ package body AHT.Websocket.Client is
             if Hdr.Masked then
                raise AHT.Websocket.Protocol_Error
                  with "Receiver: server sent a masked frame "
-                   & "(RFC 6455 §5.1 forbids server-side masking)";
+                   & "(RFC 6455 sec. 5.1 forbids server-side masking)";
             end if;
 
             case Hdr.Op is
@@ -1523,7 +1523,7 @@ package body AHT.Websocket.Client is
               with "Websocket.Client.Connect: refused in state "
                 & Client_State'Image (Self.Ctl.State)
                 & ". Connect dials only from Idle or Disconnected; a "
-                & "live connection is never displaced silently — "
+                & "live connection is never displaced silently - "
                 & "Close it first, or use Reconnect, which drains it "
                 & "and redials";
       end case;
@@ -1818,7 +1818,7 @@ package body AHT.Websocket.Client is
       if Self.Ctl.Is_Receiver (Ada.Task_Identification.Current_Task) then
          raise AHT.Websocket.Reentrant_Error
            with "Websocket.Client." & Op & ": called from inside a "
-             & "callback, which runs on the receiver task — it would "
+             & "callback, which runs on the receiver task - it would "
              & "be waiting for itself. Send_* are safe here; anything "
              & "that waits is not";
       end if;
