@@ -8,16 +8,36 @@
 --  It exists because AHT.Random.Source's Windows body cannot be
 --  exercised by the ordinary suite from a POSIX host, and "it
 --  compiles" is not the interesting claim. What this checks is the
---  whole path: that the Stdcall import binds, that
---  pragma Linker_Options pulls in bcrypt, that BCryptGenRandom
---  actually returns STATUS_SUCCESS, that two calls differ, and that
---  the parent's shared counters saw both requests.
+--  whole path: that the Stdcall import binds, that RtlGenRandom
+--  reports success, that the buffers were written at all, that two
+--  draws differ, and that the parent's shared counters saw both
+--  requests.
 --
 --  Every check sets the exit status, so this is usable from a script
 --  and cannot pass by printing reassuring text. An earlier version
 --  could: it announced a failure and still exited 0, and it never
 --  looked at the counters at all, so deleting the parent's counting
 --  entirely would have left it green.
+--
+--  ---------------------------------------------------------------
+--  Two things this probe cannot see. Both measured, not reasoned.
+--
+--  It cannot see whether the image would load on Windows XP. It runs
+--  under wine, and wine implements every DLL it is asked for -- the
+--  BCryptGenRandom body this one replaced passed here for months
+--  while being unloadable on XP, which is exactly how that survived.
+--  The complementary check is the import-table assertion in
+--  src/os/README.md: it never executes a byte, but it does see the
+--  DLL names. Neither half is sufficient alone, and neither is
+--  redundant with the other. Do not delete one because the other is
+--  green.
+--
+--  It cannot see a too-wide return declaration on RtlGenRandom.
+--  BOOLEAN is one byte, arriving in AL with the upper EAX bits
+--  undefined; a body that declares it wider misreads only a *failing*
+--  call, and nothing here can make this API fail. The declaration in
+--  the body is the entire defence against that, and it says so.
+--  ---------------------------------------------------------------
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -34,7 +54,20 @@ procedure Winrand is
    Width  : constant := 16;
    Calls  : constant := 2;
 
-   A, B : AHT.Bytes.Byte_Array (1 .. Width);
+   --  Sentinelling the buffers before the draw is load-bearing, not
+   --  tidiness. Left uninitialised they hold stack garbage, and the
+   --  "two draws differ" check below then compares two different
+   --  patches of garbage -- which do differ, so it passes.
+   --
+   --  Measured, not feared: against a Get that writes nothing at all,
+   --  the unsentinelled version of this probe printed two plausible
+   --  hex lines, reported "OK (draws = 2, bytes = 32)" and exited 0.
+   --  The counters did not help, because the parent counts requests
+   --  rather than bytes delivered. The sentinel turns "wrote nothing"
+   --  from a coin flip on stack contents into a determinate failure.
+   Sentinel : constant AHT.Bytes.Octet := 16#A5#;
+
+   A, B : AHT.Bytes.Byte_Array (1 .. Width) := (others => Sentinel);
 
    Failures : Natural := 0;
 
@@ -43,6 +76,30 @@ procedure Winrand is
       Put_Line ("winrand: FAIL - " & Msg);
       Failures := Failures + 1;
    end Fail;
+
+   --  Per buffer rather than once over both: a body that filled the
+   --  first draw and not the second would pass the differ check, for
+   --  the wrong reason.
+   --
+   --  A working CSPRNG returning all-Sentinel for 16 bytes sits at
+   --  2**(-128), the same order as the collision this shares the file
+   --  with. That is not a statistical threshold in the sense the
+   --  testing standard warns about; it is an impossibility with a
+   --  number attached.
+   procedure Check_Written (X : AHT.Bytes.Byte_Array; Which : String) is
+      Untouched : Boolean := True;
+   begin
+      for I in X'Range loop
+         if X (I) /= Sentinel then
+            Untouched := False;
+         end if;
+      end loop;
+
+      if Untouched then
+         Fail (Which & " is still entirely the sentinel byte - the"
+               & " source wrote nothing and reported no error");
+      end if;
+   end Check_Written;
 
    function Hex (X : AHT.Bytes.Byte_Array) return String is
       Digits_Lower : constant String := "0123456789abcdef";
@@ -67,11 +124,10 @@ begin
       when E : others =>
          --  Reported in full, because the distinctions matter here and
          --  a generic message erases them: Entropy_Error means
-         --  BCryptGenRandom returned a failure status, while
-         --  Program_Error or Storage_Error from the same call means
-         --  the binding itself is wrong -- a bad convention, a bad
-         --  parameter width -- which is a different bug with a
-         --  different fix.
+         --  RtlGenRandom returned FALSE, while Program_Error or
+         --  Storage_Error from the same call means the binding itself
+         --  is wrong -- a bad convention, a bad parameter width --
+         --  which is a different bug with a different fix.
          Fail ("Fill raised: "
                & Ada.Exceptions.Exception_Information (E));
          Put_Line ("winrand:" & Failures'Image & " failure(s)");
@@ -81,6 +137,9 @@ begin
 
    Put_Line ("draw1 = " & Hex (A));
    Put_Line ("draw2 = " & Hex (B));
+
+   Check_Written (A, "draw1");
+   Check_Written (B, "draw2");
 
    for I in A'Range loop
       if A (I) /= B (I) then

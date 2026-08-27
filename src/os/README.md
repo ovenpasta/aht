@@ -8,7 +8,7 @@ shape as the `src/tls/{openssl,mbedtls}` split.
 ```
 src/aht-random-source.ads     shared spec
 src/os/posix/…-source.adb     /dev/urandom
-src/os/windows/…-source.adb   BCryptGenRandom
+src/os/windows/…-source.adb   RtlGenRandom
 ```
 
 Today that is one unit, `AHT.Random.Source`. The counting, the
@@ -34,7 +34,19 @@ the recipe is actually reproducible. It is not in any `Source_Dirs`
 — `src/os` itself is not a source directory, only its per-OS
 children — so it never joins the library.
 
-From the repository root:
+**Two recipes answering two different questions.** Run both, and do
+not read either one's answer as the other's:
+
+- **x86-64, system cross-GNAT** — does the binding behave? Its import
+  table is *not* evidence about Windows XP. This toolchain links the
+  UCRT, so the image carries thirteen `api-ms-win-crt-*.dll` imports
+  that XP never had and cannot be given. It is the fast loop, not the
+  shipping shape.
+- **i686 via CROSS_PREFIX** — the toolchain that actually ships, and the target
+  where `Stdcall` diverges from C. This one carries the XP
+  import-table assertion.
+
+### x86-64, system cross-GNAT — behaviour only
 
 ```sh
 set -e
@@ -42,20 +54,41 @@ rm -rf /tmp/winobj64 && mkdir -p /tmp/winobj64
 x86_64-w64-mingw32-gnatmake -gnat2022 -D /tmp/winobj64 \
   -I"$PWD/src" -I"$PWD/src/os/windows" \
   "$PWD/src/os/winrand.adb" -o /tmp/winobj64/winrand.exe
-x86_64-w64-mingw32-objdump -p /tmp/winobj64/winrand.exe | grep -i bcrypt
 WINEDEBUG=-all wine /tmp/winobj64/winrand.exe
 ```
 
-And for 32-bit — the target where the `Stdcall` convention actually
-differs from C, so the one that would catch a wrong convention:
+### i686 via CROSS_PREFIX — shipping toolchain, and the XP assertion
 
 ```sh
 set -e
+CROSS_PREFIX=${CROSS_PREFIX:-$HOME/cross-i686}
+export PATH="$CROSS_PREFIX/usr/bin:$PATH"
+
 rm -rf /tmp/winobj32 && mkdir -p /tmp/winobj32
-i686-w64-mingw32-gnatmake -gnat2022 -D /tmp/winobj32 \
+i686-w64-mingw32.static-gnatmake -gnat2022 -D /tmp/winobj32 \
   -I"$PWD/src" -I"$PWD/src/os/windows" \
   "$PWD/src/os/winrand.adb" -o /tmp/winobj32/winrand.exe
-i686-w64-mingw32-objdump -p /tmp/winobj32/winrand.exe | grep -i bcrypt
+
+imports=$(i686-w64-mingw32.static-objdump -p /tmp/winobj32/winrand.exe \
+          | grep -i "DLL Name")
+echo "$imports"
+
+# Positive control, and it goes first: if objdump produced nothing at
+# all, every absence assertion after it would pass on the empty set.
+if ! echo "$imports" | grep -qi "KERNEL32.dll"; then
+    echo "winrand: FATAL — no import table read; objdump failed" >&2
+    exit 1
+fi
+
+# The assertion. Written as an `if`, deliberately, and not as
+# `! echo "$imports" | grep -qi bcrypt`: under `set -e` a command
+# preceded by `!` is exempt from errexit, so the negated form would
+# find bcrypt.dll, print nothing, and let the recipe continue green.
+if echo "$imports" | grep -qi "bcrypt.dll"; then
+    echo "winrand: FATAL — bcrypt.dll imported; not loadable on XP" >&2
+    exit 1
+fi
+
 WINEDEBUG=-all wine /tmp/winobj32/winrand.exe
 ```
 
@@ -74,28 +107,49 @@ That echo was there to *show* the status and destroyed it: it
 succeeds, so it becomes the script's last command and a failing probe
 still exits 0 — the recipe reported the very property it was breaking.
 The probe must be the final command, or its status must be propagated
-explicitly.
+explicitly. The `!`-exemption note above is that same trap in
+different clothes, which is why the assertions are spelled out long.
 
-What that established, on 2026-08-07 with GNAT 15.2.0 for
-`x86_64-w64-mingw32`:
+What this established, on 2026-08-27, with CROSS_PREFIX
+`i686-w64-mingw32.static` and the system `x86_64-w64-mingw32` GNAT:
 
-- the body compiles clean for the Windows target;
-- it links, so `pragma Linker_Options ("-lbcrypt")` resolves and the
-  `Stdcall` import binds;
-- `bcrypt.dll` / `BCryptGenRandom` appear in the PE import table, so
-  the call is really going to the OS;
-- under wine it returns distinct 16-byte draws and the shared counters
-  read `draws = 2, bytes = 32`.
+- the body compiles clean and links for both Windows targets;
+- `SystemFunction036` binds under `Stdcall` and returns distinct
+  16-byte draws under wine on both, with the shared counters reading
+  `draws = 2, bytes = 32` and exit 0;
+- the i686 import table is exactly `ADVAPI32.dll`, `KERNEL32.dll` and
+  `msvcrt.dll` — no `bcrypt.dll`, no UCRT — which is an XP-loadable
+  shape;
+- the assertion discriminates rather than merely passing: rebuilt
+  against the previous `BCryptGenRandom` body, `bcrypt.dll` reappears
+  in that table and the check fails;
+- the probe discriminates too: against a `Get` that writes nothing,
+  it fails on the sentinel check and exits 1. Before the sentinel was
+  added it reported `OK (draws = 2, bytes = 32)` and exited 0 against
+  that same body, because it was comparing two patches of stack
+  garbage. See the note in `winrand.adb`.
 
-What it did **not** establish: this was wine's `bcrypt`, not
-Microsoft's. The binding, the calling convention, the flag and the
-`NTSTATUS` check are all exercised; the actual entropy quality of a
-real Windows CSPRNG is taken on Microsoft's word, as it would be
-anyway.
+What it did **not** establish:
+
+- **That this is Microsoft's CSPRNG.** It was wine's `advapi32`. The
+  binding, the calling convention and the argument widths are
+  exercised; entropy quality is taken on Microsoft's word, as it would
+  be anyway.
+- **That the image runs on Windows XP.** The import table says it can
+  *load*. Nothing here has executed on XP, and wine cannot stand in
+  for that — wine implements whatever DLL it is asked for, which is
+  exactly how the `BCryptGenRandom` body passed this recipe while
+  being unloadable on XP. The two checks have disjoint blind spots and
+  neither is redundant.
+- **That the return width is right.** A too-wide declaration on
+  `RtlGenRandom` misreads only a *failing* call, and nothing here can
+  make it fail. The declaration in the body is the only defence, and
+  it carries the argument.
 
 `Stdcall` is deliberate rather than incidental. It coincides with the
 C convention on x86-64, so a `Convention => C` import would pass the
-64-bit test above and corrupt the stack on 32-bit Windows — which is
-why the 32-bit cross-link is worth running when this body changes.
-That has been done: the body compiles and links for `i686-w64-mingw32`
-and the PE imports `bcrypt.dll!BCryptGenRandom` there too.
+64-bit recipe and corrupt the stack on 32-bit Windows — which is why
+the i686 cross-link is the one that must be run when this body
+changes. advapi32 exports the entry point as `_SystemFunction036@8`:
+two 4-byte arguments, the decoration `Stdcall` produces and a C import
+would not.
