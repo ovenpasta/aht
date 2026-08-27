@@ -111,7 +111,7 @@ URL=https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${VERSION}/mbe
 # stamp carries it, so every existing tree is rebuilt rather than
 # accepted on the strength of checks that were weaker when it was
 # made.
-SCHEMA=5
+SCHEMA=6
 
 # Target OS family. Keep the default in lockstep with AHT_OS in
 # aht.gpr: this script picks the tree that project then points at, and
@@ -518,9 +518,18 @@ case "$TARGET" in
         enable_macro MBEDTLS_THREADING_C
         enable_macro MBEDTLS_THREADING_PTHREAD
         THREADING="pthread"
+        EXTRA_CFLAGS=""
         ;;
     windows)
         THREADING="none"
+        # x509_crt.c calls the platform inet_pton at 0x0600 and above,
+        # and its own software one below. ws2_32 exports inet_pton
+        # only from Vista, and the loader resolves imports eagerly, so
+        # the higher value leaves any image that verifies an IP SAN
+        # unloadable on XP. Keep in lockstep with Win32_Winnt in
+        # aht.gpr: the glue and the archive are separate compilations
+        # and only agree because both are told the same thing.
+        EXTRA_CFLAGS=" -D_WIN32_WINNT=${AHT_WIN32_WINNT:-0x0501}"
         ;;
 esac
 
@@ -530,7 +539,7 @@ check_config
 # above, which the glue reads too. CFLAGS is set rather than appended
 # because the Makefile's own default is a bare -O2.
 echo "==> fetch_mbedtls: building (threading: $THREADING)"
-make -C "$DEST" CC="$CC" AR="$AR" CFLAGS="-O2" lib >/dev/null
+make -C "$DEST" CC="$CC" AR="$AR" CFLAGS="-O2$EXTRA_CFLAGS" lib >/dev/null
 
 for lib in "$LIB_TLS" "$LIB_X509" "$LIB_CRYPTO"; do
     if [ ! -s "$lib" ]; then

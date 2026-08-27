@@ -76,6 +76,36 @@ library project Aht is
    type Traceback_Kind is ("stored", "none");
    Traceback : Traceback_Kind := external ("AHT_TRACEBACK", "stored");
 
+   --  The oldest Windows the C sources may be compiled against.
+   --
+   --  mingw gates its declarations on _WIN32_WINNT, so this decides
+   --  which entry points the C half is even able to name. XP is the
+   --  target, and a version above it turns an unloadable image into a
+   --  compile error instead: reaching for a condition variable or
+   --  InitOnceExecuteOnce stops compiling rather than linking to a
+   --  symbol XP does not export.
+   --
+   --  It reaches beyond this project's own sources. mbedTLS 3.6's
+   --  x509_crt.c takes the platform inet_pton when this is 0x0600 or
+   --  higher and its own software one below, so the same value decides
+   --  whether an image that verifies an IP SAN can load on XP;
+   --  scripts/fetch_mbedtls.sh passes it for that reason.
+   --
+   --  Applied to both Windows triplets, not only i686. The x86-64
+   --  build is the fast loop for the port, and it is only a fast loop
+   --  while a difference between the two is attributable to the
+   --  target rather than to the macros they were built with.
+   Win32_Winnt := external ("AHT_WIN32_WINNT", "0x0501");
+
+   Win32_Defines := ();
+
+   case OS is
+      when "posix" =>
+         null;
+      when "windows" =>
+         Win32_Defines := ("-D_WIN32_WINNT=" & Win32_Winnt);
+   end case;
+
    --  Where the system OpenSSL 3 lives. /usr is right for Linux;
    --  macOS needs the Homebrew prefix (Apple ships no OpenSSL headers):
    --  AHT_OPENSSL_DIR=$(brew --prefix openssl@3)
@@ -204,18 +234,18 @@ library project Aht is
             --  mbedtls_*_init then writes past the block (heap
             --  corruption).
             --
-            --  Which is why there are no -D flags here. The macros
-            --  live in the tree's own include/mbedtls/config.h, edited
-            --  by scripts/fetch_mbedtls.sh before it builds; this -I
-            --  points at that same header, so the glue and the archive
-            --  read identical bytes and cannot drift. Restating the
-            --  macros here would reintroduce exactly the two-places
-            --  problem the header edit removes.
+            --  Which is why there are no mbedTLS -D flags here. Those
+            --  macros live in the tree's own include/mbedtls/config.h,
+            --  edited by scripts/fetch_mbedtls.sh before it builds;
+            --  this -I points at that same header, so the glue and the
+            --  archive read identical bytes and cannot drift.
+            --  Restating them here would reintroduce exactly the
+            --  two-places problem the header edit removes.
             for Default_Switches ("C") use
-              ("-O2", "-I" & Mbedtls_Inc_Dir);
+              ("-O2", "-I" & Mbedtls_Inc_Dir) & Win32_Defines;
          when "openssl" =>
             for Default_Switches ("C") use
-              ("-O2", "-I" & Openssl_Dir & "/include");
+              ("-O2", "-I" & Openssl_Dir & "/include") & Win32_Defines;
       end case;
    end Compiler;
 

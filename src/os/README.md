@@ -135,11 +135,16 @@ What it did **not** establish:
   binding, the calling convention and the argument widths are
   exercised; entropy quality is taken on Microsoft's word, as it would
   be anyway.
-- **That the image runs, or loads, on Windows XP.** Nothing here has
-  executed on XP, and wine implements whatever it is asked for. The
-  DLL names are not the whole question either: `KERNEL32.dll` is on XP
-  and carries entry points that are not, so loadability is about
-  symbols. `csrc/dns/aht_dns.c` imports five Vista+ ones.
+- **That the image runs on Windows XP.** Nothing here has executed on
+  XP, and wine implements whatever it is asked for.
+- **That the image loads on XP**, beyond the one DLL this recipe names.
+  The version boundary runs through `KERNEL32` and `WS2_32` rather
+  than between them, so loadability is a question about symbols. Two
+  things answer it, neither of them this recipe:
+  `_WIN32_WINNT=0x0501` (`Win32_Winnt` in `aht.gpr`), which stops the
+  compiler declaring anything newer, and
+  `scripts/check_xp_imports.sh`, which reads the built image and is
+  run for 32-bit targets by `tests/run_tests.sh`.
 - **That the return width is right.** A too-wide declaration on
   `RtlGenRandom` misreads only a *failing* call, and nothing here can
   make it fail. The declaration in the body is the only defence, and

@@ -3,8 +3,8 @@
  * getaddrinfo takes no deadline and cannot be cancelled, on either
  * platform, so the only way to put a bound on it is to run it
  * somewhere the caller can stop waiting for. This resolves on a
- * detached worker and has the caller wait on a condition variable
- * until either the worker finishes or the deadline passes.
+ * detached worker and has the caller wait until either the worker
+ * finishes or the deadline passes.
  *
  * Nothing here can make a stuck getaddrinfo stop. The worker that
  * outlives its caller keeps running until the platform resolver gives
@@ -38,6 +38,7 @@
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
 #  include <windows.h>
+#  include <process.h>
 #else
 #  include <netdb.h>
 #  include <sys/socket.h>
@@ -56,17 +57,20 @@
 #define AHT_DNS_INTERNAL 3
 
 /* ---- the two thread APIs, behind one set of names ---------------- */
+/*
+ * The Windows half is written to the XP API. That rules out the
+ * condition variable (Vista+) and GetTickCount64 (Vista+), and it is
+ * a constraint on which entry points may be named, not on which DLLs:
+ * the loader resolves imports eagerly, so one Vista-only symbol from
+ * KERNEL32 fails the whole image on XP.
+ */
 
 #ifdef _WIN32
 typedef CRITICAL_SECTION    aht_mutex;
-typedef CONDITION_VARIABLE  aht_cond;
 #  define AHT_MUTEX_INIT(m)    InitializeCriticalSection(m)
 #  define AHT_MUTEX_FINI(m)    DeleteCriticalSection(m)
 #  define AHT_LOCK(m)          EnterCriticalSection(m)
 #  define AHT_UNLOCK(m)        LeaveCriticalSection(m)
-#  define AHT_COND_INIT(c)     InitializeConditionVariable(c)
-#  define AHT_COND_FINI(c)     ((void) 0)
-#  define AHT_COND_SIGNAL(c)   WakeConditionVariable(c)
 #else
 typedef pthread_mutex_t     aht_mutex;
 typedef pthread_cond_t      aht_cond;
@@ -78,20 +82,129 @@ typedef pthread_cond_t      aht_cond;
 #  define AHT_COND_SIGNAL(c)   pthread_cond_signal(c)
 #endif
 
-/* Milliseconds on a monotonic clock. A wall clock would let a step
- * (NTP, a manual change) shorten or extend a deadline that was
- * supposed to measure elapsed time. */
-static unsigned long long
-aht_now_ms(void)
-{
+/* A tick from an unspecified epoch, and the elapsed milliseconds
+ * since one. Monotonic on both: a wall clock would let a step (NTP, a
+ * manual change) shorten or extend a deadline that is supposed to
+ * measure elapsed time.
+ *
+ * Elapsed since a start rather than a comparison against an absolute
+ * deadline, because GetTickCount is 32 bits and wraps every 49.7
+ * days. The subtraction is done in the counter's own width, which
+ * stays correct across a wrap for any interval shorter than the
+ * period; an absolute deadline would not. */
 #ifdef _WIN32
-    return (unsigned long long) GetTickCount64();
+typedef DWORD aht_tick;
+
+static aht_tick
+aht_tick_now(void)
+{
+    return GetTickCount();
+}
+
+static unsigned long
+aht_elapsed_ms(aht_tick start)
+{
+    return (unsigned long) (DWORD) (GetTickCount() - start);
+}
 #else
+typedef struct timespec aht_tick;
+
+static aht_tick
+aht_tick_now(void)
+{
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (unsigned long long) ts.tv_sec * 1000ULL
-         + (unsigned long long) (ts.tv_nsec / 1000000L);
+    return ts;
+}
+
+static unsigned long
+aht_elapsed_ms(aht_tick start)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (unsigned long)
+           ((now.tv_sec - start.tv_sec) * 1000L
+            + (now.tv_nsec - start.tv_nsec) / 1000000L);
+}
 #endif
+
+/* ---- presentation form ------------------------------------------- */
+/*
+ * Hand-rolled rather than inet_ntop, which ws2_32 exports only from
+ * Vista on. Shared with the POSIX build rather than kept behind the
+ * #ifdef for two reasons: both targets then emit the same literal for
+ * the same address, and the posix suite exercises it on every run,
+ * which the Windows-only alternative would not be.
+ */
+
+static void
+aht_fmt_ipv4(const unsigned char *b, char *out, size_t cap)
+{
+    snprintf(out, cap, "%u.%u.%u.%u",
+             (unsigned) b[0], (unsigned) b[1],
+             (unsigned) b[2], (unsigned) b[3]);
+}
+
+static void
+aht_fmt_ipv6(const unsigned char *b, char *out, size_t cap)
+{
+    unsigned group[8];
+    int i;
+    int run_start = -1, run_len = 0;
+    int best_start = -1, best_len = 0;
+    size_t n = 0;
+
+    for (i = 0; i < 8; i++)
+        group[i] = ((unsigned) b[2 * i] << 8) | (unsigned) b[2 * i + 1];
+
+    /* Longest run of zero groups, leftmost winning a tie, and only if
+     * it covers two or more: RFC 5952 4.2. A single zero group is
+     * written as "0", because "::" for one group is shorter to write
+     * and ambiguous to read back. */
+    for (i = 0; i < 8; i++) {
+        if (group[i] == 0) {
+            if (run_start < 0) {
+                run_start = i;
+                run_len = 0;
+            }
+            run_len++;
+            if (run_len > best_len) {
+                best_len = run_len;
+                best_start = run_start;
+            }
+        } else {
+            run_start = -1;
+            run_len = 0;
+        }
+    }
+    if (best_len < 2) {
+        best_start = -1;
+        best_len = 0;
+    }
+
+    /* ::ffff:a.b.c.d for a v4-mapped address. The hex form is a
+     * correct reading of the same 16 bytes, but a caller comparing
+     * against a v4 literal would not recognise it. */
+    if (best_start == 0 && best_len == 5 && group[5] == 0xffffu) {
+        char v4[16];
+        aht_fmt_ipv4(b + 12, v4, sizeof v4);
+        snprintf(out, cap, "::ffff:%s", v4);
+        return;
+    }
+
+    out[0] = '\0';
+    for (i = 0; i < 8; i++) {
+        if (i == best_start) {
+            n += (size_t) snprintf(out + n, cap - n, "::");
+            i += best_len - 1;      /* the loop's own i++ takes the rest */
+            continue;
+        }
+        /* One separator between groups, and never a third colon
+         * against the run's own pair. */
+        if (i > 0 && out[n - 1] != ':')
+            n += (size_t) snprintf(out + n, cap - n, ":");
+        n += (size_t) snprintf(out + n, cap - n, "%x", group[i]);
+    }
 }
 
 /* ---- the job ----------------------------------------------------- */
@@ -107,7 +220,16 @@ typedef struct {
     int   refs;
 
     aht_mutex m;
+#ifdef _WIN32
+    /* A manual-reset event, set once when done latches. One waiter,
+     * one signaller and a predicate that never goes back is the whole
+     * of what a condition variable would be used for here, and an
+     * event is the part of that XP has. Manual-reset so a wait that
+     * starts after the worker finished returns at once. */
+    HANDLE    done_ev;
+#else
     aht_cond  cv;
+#endif
 
     char  host[256];
     char  svc[32];
@@ -141,17 +263,21 @@ aht_dns_real(aht_dns_job *job)
     job->count = 0;
     for (p = res; p != NULL && job->count < AHT_DNS_MAX_ADDRS;
          p = p->ai_next) {
-        void *sin;
+        char *slot = job->addrs[job->count];
+        /* The address bytes are in network order in the sockaddr,
+         * which is the order both formatters read them in. */
         if (p->ai_family == AF_INET)
-            sin = &((struct sockaddr_in *) p->ai_addr)->sin_addr;
+            aht_fmt_ipv4((const unsigned char *)
+                         &((struct sockaddr_in *) p->ai_addr)->sin_addr,
+                         slot, AHT_DNS_ADDRSTRLEN);
         else if (p->ai_family == AF_INET6)
-            sin = &((struct sockaddr_in6 *) p->ai_addr)->sin6_addr;
+            aht_fmt_ipv6((const unsigned char *)
+                         &((struct sockaddr_in6 *) p->ai_addr)->sin6_addr,
+                         slot, AHT_DNS_ADDRSTRLEN);
         else
             continue;
 
-        if (inet_ntop(p->ai_family, sin, job->addrs[job->count],
-                      AHT_DNS_ADDRSTRLEN) != NULL)
-            job->count++;
+        job->count++;
     }
 
     freeaddrinfo(res);
@@ -171,15 +297,20 @@ aht_job_release(aht_dns_job *job)
     AHT_UNLOCK(&job->m);
 
     if (remaining == 0) {
+#ifdef _WIN32
+        if (job->done_ev != NULL)
+            CloseHandle(job->done_ev);
+#else
         AHT_COND_FINI(&job->cv);
+#endif
         AHT_MUTEX_FINI(&job->m);
         free(job);
     }
 }
 
 #ifdef _WIN32
-static DWORD WINAPI
-aht_dns_worker(LPVOID arg)
+static unsigned __stdcall
+aht_dns_worker(void *arg)
 #else
 static void *
 aht_dns_worker(void *arg)
@@ -191,8 +322,19 @@ aht_dns_worker(void *arg)
     AHT_LOCK(&job->m);
     job->status = status;
     job->done   = 1;
+#ifndef _WIN32
     AHT_COND_SIGNAL(&job->cv);
+#endif
     AHT_UNLOCK(&job->m);
+
+#ifdef _WIN32
+    /* Signalled after the lock is dropped: the event carries no state
+     * of its own, so the waiter has to re-read done under the lock
+     * anyway, and setting it here keeps the critical section to the
+     * publish. The job is still alive because this thread holds a
+     * reference until the release below. */
+    SetEvent(job->done_ev);
+#endif
 
     aht_job_release(job);
 #ifdef _WIN32
@@ -202,19 +344,85 @@ aht_dns_worker(void *arg)
 #endif
 }
 
+/* Wait for the worker to publish done, or for the budget to run out.
+ * Returns with the lock held in neither case; the caller takes it to
+ * read the result, and a worker that finishes in that gap is read as
+ * the success it is. */
+static void
+aht_wait_for_done(aht_dns_job *job, long timeout_ms, aht_tick start)
+{
+#ifdef _WIN32
+    DWORD ms;
+
+    if (timeout_ms < 0) {
+        ms = INFINITE;
+    } else {
+        unsigned long elapsed = aht_elapsed_ms(start);
+        ms = (elapsed >= (unsigned long) timeout_ms)
+             ? 0
+             : (DWORD) ((unsigned long) timeout_ms - elapsed);
+    }
+
+    /* No predicate loop: a Win32 wait does not wake spuriously, and
+     * the event is manual-reset and set exactly once, so this returns
+     * either because done was published or because the budget ran
+     * out. */
+    WaitForSingleObject(job->done_ev, ms);
+#else
+    AHT_LOCK(&job->m);
+    while (!job->done) {
+        if (timeout_ms < 0) {
+            pthread_cond_wait(&job->cv, &job->m);
+        } else {
+            unsigned long elapsed = aht_elapsed_ms(start);
+            unsigned long remaining;
+            struct timespec ts;
+
+            if (elapsed >= (unsigned long) timeout_ms)
+                break;
+            remaining = (unsigned long) timeout_ms - elapsed;
+
+            /* Absolute, on the same clock the condvar was given in
+             * aht_dns_resolve, and recomputed each pass so a wakeup
+             * that is neither done nor the deadline cannot extend the
+             * budget. */
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            ts.tv_sec  += (time_t) (remaining / 1000UL);
+            ts.tv_nsec += (long) ((remaining % 1000UL) * 1000000UL);
+            if (ts.tv_nsec >= 1000000000L) {
+                ts.tv_sec  += 1;
+                ts.tv_nsec -= 1000000000L;
+            }
+            pthread_cond_timedwait(&job->cv, &job->m, &ts);
+        }
+    }
+    AHT_UNLOCK(&job->m);
+#endif
+}
+
 #ifdef _WIN32
 /* getaddrinfo needs Winsock started. GNAT.Sockets does this too, but
  * a resolve can be the first thing a program does, and WSAStartup is
- * reference-counted so calling it again is harmless. */
-static INIT_ONCE aht_wsa_once = INIT_ONCE_STATIC_INIT;
+ * reference-counted so calling it again is harmless.
+ *
+ * Done by hand because InitOnceExecuteOnce is Vista+. 0 -> 1 is won
+ * by exactly one caller, which starts Winsock and publishes 2;
+ * whoever finds 1 waits for that publish rather than racing ahead to
+ * a getaddrinfo that would fail. The spin is bounded by one
+ * WSAStartup and is only ever reached by concurrent first calls. */
+static volatile LONG aht_wsa_once = 0;
 
-static BOOL CALLBACK
-aht_wsa_start(PINIT_ONCE o, PVOID p, PVOID *c)
+static void
+aht_wsa_ensure(void)
 {
-    WSADATA d;
-    (void) o; (void) p; (void) c;
-    WSAStartup(MAKEWORD(2, 2), &d);
-    return TRUE;
+    if (InterlockedCompareExchange(&aht_wsa_once, 1, 0) == 0) {
+        WSADATA d;
+        WSAStartup(MAKEWORD(2, 2), &d);
+        InterlockedExchange(&aht_wsa_once, 2);
+    } else {
+        while (InterlockedCompareExchange(&aht_wsa_once, 2, 2) != 2)
+            Sleep(0);
+    }
 }
 #endif
 
@@ -228,7 +436,7 @@ aht_dns_resolve(const char *host, const char *svc, long timeout_ms,
 {
     aht_dns_job *job;
     int status, n, i;
-    unsigned long long deadline;
+    aht_tick start;
 
     if (host == NULL || out == NULL || count == NULL || max_addrs <= 0)
         return AHT_DNS_INTERNAL;
@@ -236,7 +444,7 @@ aht_dns_resolve(const char *host, const char *svc, long timeout_ms,
     *count = 0;
 
 #ifdef _WIN32
-    InitOnceExecuteOnce(&aht_wsa_once, aht_wsa_start, NULL, NULL);
+    aht_wsa_ensure();
 #endif
 
     job = (aht_dns_job *) calloc(1, sizeof *job);
@@ -249,11 +457,16 @@ aht_dns_resolve(const char *host, const char *svc, long timeout_ms,
 
     AHT_MUTEX_INIT(&job->m);
 #ifdef _WIN32
-    AHT_COND_INIT(&job->cv);
+    job->done_ev = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (job->done_ev == NULL) {
+        AHT_MUTEX_FINI(&job->m);
+        free(job);
+        return AHT_DNS_INTERNAL;
+    }
 #else
     {
-        /* Monotonic, to match aht_now_ms and pthread_cond_timedwait's
-         * absolute deadline below. */
+        /* Monotonic, to match aht_elapsed_ms and the absolute deadline
+         * pthread_cond_timedwait is given. */
         pthread_condattr_t a;
         pthread_condattr_init(&a);
         pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
@@ -266,15 +479,21 @@ aht_dns_resolve(const char *host, const char *svc, long timeout_ms,
      * never observe a count that has not yet counted it. */
     job->refs = 2;
 
+    start = aht_tick_now();
+
 #ifdef _WIN32
     {
-        HANDLE t = CreateThread(NULL, 0, aht_dns_worker, job, 0, NULL);
-        if (t == NULL) {
+        /* _beginthreadex and not CreateThread: the worker reaches the
+         * C runtime (strncpy, snprintf, and whatever getaddrinfo does
+         * underneath), and msvcrt sets up its per-thread state only
+         * for threads it started itself. */
+        uintptr_t t = _beginthreadex(NULL, 0, aht_dns_worker, job, 0, NULL);
+        if (t == 0) {
             job->refs = 1;             /* no worker to give one back */
             aht_job_release(job);
             return AHT_DNS_INTERNAL;
         }
-        CloseHandle(t);                /* detached */
+        CloseHandle((HANDLE) t);       /* detached */
     }
 #else
     {
@@ -293,35 +512,9 @@ aht_dns_resolve(const char *host, const char *svc, long timeout_ms,
     }
 #endif
 
-    deadline = aht_now_ms()
-             + (timeout_ms < 0 ? 0 : (unsigned long long) timeout_ms);
+    aht_wait_for_done(job, timeout_ms, start);
 
     AHT_LOCK(&job->m);
-    while (!job->done) {
-        if (timeout_ms < 0) {
-#ifdef _WIN32
-            SleepConditionVariableCS(&job->cv, &job->m, INFINITE);
-#else
-            pthread_cond_wait(&job->cv, &job->m);
-#endif
-        } else {
-            unsigned long long now = aht_now_ms();
-            if (now >= deadline)
-                break;
-#ifdef _WIN32
-            SleepConditionVariableCS(&job->cv, &job->m,
-                                     (DWORD) (deadline - now));
-#else
-            {
-                struct timespec ts;
-                ts.tv_sec  = (time_t) (deadline / 1000ULL);
-                ts.tv_nsec = (long) ((deadline % 1000ULL) * 1000000ULL);
-                pthread_cond_timedwait(&job->cv, &job->m, &ts);
-            }
-#endif
-        }
-    }
-
     if (job->done) {
         status = job->status;
         n = job->count > max_addrs ? max_addrs : job->count;
@@ -419,4 +612,27 @@ aht_dns_fake_completions_for_test(void)
     n = aht_fake_completions;
     AHT_UNLOCK(&aht_fake_m);
     return n;
+}
+
+/* Format addr (4 or 16 bytes in network order, per family 4 or 6)
+ * into out. Returns 1 on success, 0 on a bad argument.
+ *
+ * Reached directly because the interesting inputs are the ones a
+ * resolver will not hand back on demand: the longest-zero-run rule,
+ * its leftmost tie-break, a run at either end, and the v4-mapped
+ * shape. Driving this only through a lookup would settle whichever
+ * one localhost happens to be. */
+int
+aht_dns_format_for_test(int family, const unsigned char *addr,
+                        char *out, int cap)
+{
+    if (addr == NULL || out == NULL || cap < AHT_DNS_ADDRSTRLEN)
+        return 0;
+    if (family == 4)
+        aht_fmt_ipv4(addr, out, (size_t) cap);
+    else if (family == 6)
+        aht_fmt_ipv6(addr, out, (size_t) cap);
+    else
+        return 0;
+    return 1;
 }

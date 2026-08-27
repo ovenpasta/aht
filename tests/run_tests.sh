@@ -184,6 +184,18 @@ else
     gprbuild --target="$AHT_CROSS_TARGET" -P aht.gpr
     echo "==> building tests"
     gprbuild --target="$AHT_CROSS_TARGET" -P tests/tests.gpr
+
+    # 32-bit x86 is the shipping shape, and the one target where XP
+    # loadability is a live question. Checked against the built images
+    # rather than the sources: what matters is which entry points the
+    # linker ended up naming.
+    case "$AHT_CROSS_TARGET" in
+        i?86-*)
+            echo "==> checking XP-loadable imports"
+            sh scripts/check_xp_imports.sh \
+               "$AHT_CROSS_TARGET-objdump" "tests/bin/$VARIANT"/*.exe
+            ;;
+    esac
 fi
 
 echo "==> preparing venv (tests/.venv)"

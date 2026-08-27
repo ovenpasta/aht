@@ -9,8 +9,8 @@
 --  completions.
 --
 --  Everything below runs against a fake resolver installed through a
---  C seam, except case 1. The seam replaces the LOOKUP only: the
---  worker thread, the condition-variable wait, the deadline and the
+--  C seam, except cases 1 and 6. The seam replaces the LOOKUP only:
+--  the worker thread, the wait, the deadline and the
 --  reference-counted handoff are the production ones in every case.
 --  A seam any higher — swapping AHT.DNS.Resolve itself — would test
 --  none of those, which is to say it would test nothing that can go
@@ -35,7 +35,9 @@ with Ada.Command_Line;
 with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Text_IO; use Ada.Text_IO;
+with Interfaces;
 with Interfaces.C;
+with System;
 
 with AHT.DNS;
 
@@ -43,6 +45,7 @@ procedure Test_DNS is
 
    use type AHT.DNS.Resolve_Status;
    use type Interfaces.C.int;
+   use type Interfaces.C.char;
 
    Failures : Natural := 0;
 
@@ -67,6 +70,54 @@ procedure Test_DNS is
    function Fake_Completions return Interfaces.C.int
      with Import, Convention => C,
           External_Name => "aht_dns_fake_completions_for_test";
+
+   --  Family is 4 or 6 rather than AF_INET/AF_INET6, so this side
+   --  needs no platform constant to reach it.
+   function Format_Addr
+     (Family : Interfaces.C.int;
+      Addr   : System.Address;
+      Out_Buf : System.Address;
+      Cap    : Interfaces.C.int) return Interfaces.C.int
+     with Import, Convention => C,
+          External_Name => "aht_dns_format_for_test";
+
+   Addr_Len : constant := 46;   --  AHT_DNS_ADDRSTRLEN
+
+   type Octets is array (Natural range <>) of Interfaces.Unsigned_8;
+
+   --  Presentation form of Bytes, or "" if the shim refused.
+   function Formatted (Family : Interfaces.C.int; Bytes : Octets)
+     return String
+   is
+      Buf : Interfaces.C.char_array (1 .. Addr_Len) :=
+        [others => Interfaces.C.nul];
+      B   : Octets := Bytes;
+      RC  : Interfaces.C.int;
+      Last : Natural := 0;
+   begin
+      RC := Format_Addr (Family, B'Address, Buf'Address, Addr_Len);
+      if RC = 0 then
+         return "";
+      end if;
+      for I in Buf'Range loop
+         exit when Buf (I) = Interfaces.C.nul;
+         Last := Natural (I);
+      end loop;
+      return Interfaces.C.To_Ada
+        (Buf (1 .. Interfaces.C.size_t (Last)), Trim_Nul => False);
+   end Formatted;
+
+   procedure Check_Format
+     (Label : String; Family : Interfaces.C.int;
+      Bytes : Octets; Expect : String)
+   is
+      Got : constant String := Formatted (Family, Bytes);
+   begin
+      if Got /= Expect then
+         Fail ("format " & Label & ": got """ & Got
+               & """, expected """ & Expect & """");
+      end if;
+   end Check_Format;
 
    Result : AHT.DNS.Address_Array;
    Count  : AHT.DNS.Address_Count;
@@ -248,6 +299,71 @@ begin
    --  Leave the resolver as it was found, so a later test in the same
    --  binary could not silently inherit the fake.
    Restore_Real;
+
+   --  Case 6: presentation form, driven directly.
+   --
+   --  These are the inputs a resolver will not produce on request. The
+   --  zero-run rule is where this kind of formatter goes wrong: it
+   --  must take the LONGEST run, the leftmost of equal runs, and must
+   --  leave a single zero group alone rather than compress it.
+   declare
+      V4  : constant Octets := [127, 0, 0, 1];
+      Lo6 : constant Octets := [0, 0, 0, 0, 0, 0, 0, 0,
+                                0, 0, 0, 0, 0, 0, 0, 1];
+   begin
+      Check_Format ("v4", 4, V4, "127.0.0.1");
+
+      --  The literal test_dns already accepts from a live lookup, so
+      --  a regression here would also break case 1 on any host whose
+      --  localhost answers ::1 first.
+      Check_Format ("v6 loopback", 6, Lo6, "::1");
+
+      Check_Format ("v6 unspecified", 6,
+                    [0, 0, 0, 0, 0, 0, 0, 0,
+                     0, 0, 0, 0, 0, 0, 0, 0], "::");
+
+      Check_Format ("v6 no zeros", 6,
+                    [16#20#, 1, 16#0d#, 16#b8#, 0, 1, 0, 2,
+                     0, 3, 0, 4, 0, 5, 0, 6],
+                    "2001:db8:1:2:3:4:5:6");
+
+      --  Longest run wins: one zero group, then a run of three.
+      Check_Format ("v6 longest run", 6,
+                    [16#20#, 1, 0, 0, 0, 1, 0, 0,
+                     0, 0, 0, 0, 0, 0, 0, 1],
+                    "2001:0:1::1");
+
+      --  Equal runs of two: the leftmost is the one compressed.
+      Check_Format ("v6 leftmost tie", 6,
+                    [16#20#, 1, 0, 0, 0, 0, 0, 1,
+                     0, 0, 0, 0, 0, 2, 0, 3],
+                    "2001::1:0:0:2:3");
+
+      --  A single zero group stays "0"; "::" for one group is no
+      --  shorter and reads as an unknown number of groups.
+      Check_Format ("v6 single zero", 6,
+                    [16#20#, 1, 0, 0, 0, 1, 0, 2,
+                     0, 3, 0, 4, 0, 5, 0, 6],
+                    "2001:0:1:2:3:4:5:6");
+
+      --  Run at the tail.
+      Check_Format ("v6 trailing run", 6,
+                    [16#20#, 1, 0, 1, 0, 0, 0, 0,
+                     0, 0, 0, 0, 0, 0, 0, 0],
+                    "2001:1::");
+
+      --  v4-mapped: the hex reading of these bytes is correct but
+      --  unrecognisable next to a v4 literal.
+      Check_Format ("v6 v4-mapped", 6,
+                    [0, 0, 0, 0, 0, 0, 0, 0,
+                     0, 0, 16#ff#, 16#ff#, 192, 168, 1, 10],
+                    "::ffff:192.168.1.10");
+
+      --  A family the shim does not format is refused, not guessed.
+      if Formatted (5, V4) /= "" then
+         Fail ("format: family 5 was formatted rather than refused");
+      end if;
+   end;
 
    if Failures = 0 then
       Put_Line ("test_dns: OK");

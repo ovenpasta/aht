@@ -44,6 +44,16 @@ reports it.
    header rather than in `-D` flags so the archive and the C glue
    cannot disagree about a macro that changes a struct's size; the
    script's header explains what that would cost.
+
+   The Windows targets add one flag, `-D_WIN32_WINNT=0x0501`, which is
+   not an mbedTLS macro and changes no struct: `x509_crt.c` calls the
+   platform `inet_pton` at `0x0600` and above and its own software one
+   below, and `ws2_32` exports `inet_pton` only from Vista. Since the
+   loader resolves imports eagerly, the higher value leaves any image
+   that can verify an IP SAN unloadable on XP. It is stated a second
+   time as `Win32_Winnt` in `aht.gpr`, which is what the glue is
+   compiled with — `scripts/check_xp_imports.sh` is what catches the
+   two disagreeing.
 5. Leave the static archives at
    `third_party/mbedtls-3.6.7/library/{libmbedtls,libmbedx509,libmbedcrypto}.a`.
 
