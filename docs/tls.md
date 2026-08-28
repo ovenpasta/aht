@@ -78,6 +78,64 @@ Both backends: DNS-name hosts get SNI + hostname verification;
 sent for DNS names); a failed `Connect` leaves the object retryable
 while a successful session makes it single-use.
 
+## Allocation and abort
+
+Each backend's `Connect` has two allocation sites: `Self.State := new
+Backend_State` and, a little further in, `Self.State.TCP := new
+AHT.Transport.TCP.TCP_Transport`. Both go through `AHT.Guarded_New`
+(`src/aht-guarded_new.ads`), a generic that wraps one `new` in a
+protected procedure taking its destination as an `access` parameter.
+The reason is the same one behind
+`AHT.Websocket.Client.Lifecycle_Controller.Create_Session` — see
+*Abort safety is structural* in `docs/websocket.md` for the full
+argument — restated here only to the depth this layer needs: GNAT
+attaches a heap object to its access type's collection, under the
+runtime's global task lock, before the object is initialized, and
+releasing that lock is an abort completion point
+(`Allocate_Any_Controlled`, `s-stposu.adb`). An abort inside a bare
+`new` can therefore leave the object attached, uninitialized, and
+unreachable — the allocating statement never completed, so nothing
+holds a pointer to it — and library finalization runs on it anyway. A
+protected action is abort-deferred for its whole duration, so
+performing the `new` inside one closes the window, and the destination
+is passed by `access` rather than `out` because an `out` parameter's
+copy-back happens after the action ends, exactly where the abort
+lands.
+
+`AHT.Guarded_New` is a **private** child of `AHT`, not of `AHT.TLS_Sync`
+— it guards a general property of `new`, unrelated to TLS
+synchronisation, and it is not part of the published API; a private
+child is visible only to bodies of `AHT`'s own descendants (RM
+10.1.2(8)), which is exactly what both backend bodies are. It is
+generic because the two sites do not share a type: `Backend_State` is
+completed differently by each backend body (it is the Taft-amended
+type behind `Backend_State_Access` in `aht-transport-tls.ads`), so the
+allocator for it has to live in that body regardless.
+`AHT.Transport.TCP.TCP_Transport` is the same type in both backends,
+but each body pairs it with its own `TCP_Access`, so each instantiates
+the generic separately for it too. Every instantiation is a
+library-level declaration in the backend body, so its `Gate` is
+elaborated once for the life of the program rather than once per
+`Connect`.
+
+The two sites strand differently. `Backend_State` carries two
+`Lock_Type` and a `Coordinator_Type` (`AHT.TLS_Sync`) — protected types
+with entries — and a zero-filled one is not inert: finalizing it enters
+a zero-filled `CRITICAL_SECTION`, whose `LockCount` of 0 reads as
+contended where an initialized, unheld one is -1, and finalization
+hangs. That mechanism is measured, on the i686 Windows build, by the
+`Create_Session` fix this one mirrors and by a standalone zero-fill
+probe — not, separately, by tearing an abort inside this specific
+`new`. `TCP_Transport` strands more cheaply: it holds no
+`CRITICAL_SECTION`, and `Transport_Type.Finalize`
+(`src/aht-transport.adb`) dispatches on the object's tag before doing
+anything else, so on zero-filled memory — a null tag — the dispatch
+faults and Finalize's own blanket `when others => null` swallows it. A
+stranded `TCP_Transport` is a leak and a swallowed fault, not a hang —
+reasoned from that code, not measured — and it is guarded by the same
+construct because doing so costs nothing, not because it was observed
+to hang anything.
+
 ## The openssl engine (memory BIOs)
 
 OpenSSL 3 does not permit two tasks inside `SSL_read`/`SSL_write` on

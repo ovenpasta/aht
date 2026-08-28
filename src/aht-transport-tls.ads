@@ -201,7 +201,10 @@ private
    type Backend_State_Access is access Backend_State;
 
    type TLS_Transport is new Transport_Type with record
-      State              : Backend_State_Access := null;
+      State              : aliased Backend_State_Access := null;
+      --  aliased so AHT.Guarded_New can be handed State'Access --
+      --  see the allocation sites in each backend body for why the
+      --  allocation goes through it.
       Used               : Boolean := False;
       --  Latched by a SUCCESSFUL handshake only, so a failed Connect
       --  leaves the object retryable while a completed session makes

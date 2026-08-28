@@ -755,6 +755,11 @@ out an approach that looks correct:
   abort-deferred, and the same action hands the pointer to the
   attempt owner.
 
+  This is a property of `new`, not of sessions: the TLS transport's
+  own two allocation sites are stranded by the identical window and
+  are closed the identical way, generically, in
+  `AHT.Guarded_New` — see docs/tls.md.
+
 That third rule shapes two places. `Send_Guard.Acquire` takes the
 owner's identity *in* and records it inside the same action that takes
 the latch, so a cancelled acquisition records nothing and its release

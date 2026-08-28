@@ -21,6 +21,7 @@ with AHT.Mbedtls.Link;
 with AHT.Mbedtls.SSL;
 with AHT.Mbedtls.X509;
 with AHT.TLS_Sync;
+with AHT.Guarded_New;
 with AHT.PEM;
 with AHT.Transport.TCP;
 
@@ -104,7 +105,9 @@ package body AHT.Transport.TLS is
    --  since seeding is the expensive part of connecting — would
    --  invalidate that argument silently. See docs/tls.md.
    type Backend_State is record
-      TCP      : TCP_Access;
+      TCP      : aliased TCP_Access;
+      --  aliased so AHT.Guarded_New can be handed
+      --  State.TCP'Access at the allocation site below.
       IO       : aliased Engine_IO;
       SSL      : System.Address := System.Null_Address;  --  ssl_context*
       Conf     : System.Address := System.Null_Address;  --  ssl_config*
@@ -129,6 +132,14 @@ package body AHT.Transport.TLS is
      (AHT.Transport.TCP.TCP_Transport, TCP_Access);
    procedure Free_State is new Ada.Unchecked_Deallocation
      (Backend_State, Backend_State_Access);
+
+   --  See AHT.Guarded_New: each instantiation's Gate is
+   --  elaborated once, at library level, and closes the
+   --  Allocate_Any_Controlled abort window around its one `new`.
+   package New_State is new AHT.Guarded_New
+     (Backend_State, Backend_State_Access);
+   package New_TCP is new AHT.Guarded_New
+     (AHT.Transport.TCP.TCP_Transport, TCP_Access);
 
    ---------------------------------------------------------------
    --  BIO callbacks — memory only, never the socket
@@ -578,7 +589,20 @@ package body AHT.Transport.TLS is
          raise TLS_Error with "TLS transport already connected";
       end if;
 
-      Self.State := new Backend_State;
+      --  Backend_State carries two Lock_Type and a Coordinator_Type,
+      --  both protected types with entries (AHT.TLS_Sync), so a
+      --  stranded, zero-filled one is not inert: a zeroed
+      --  CRITICAL_SECTION reads as contended -- LockCount 0, where an
+      --  initialized and unheld one is -1 -- and finalizing it hangs.
+      --  Measured for this shape of object, on this target, by the
+      --  Session_Type case New_State's construct mirrors (see
+      --  AHT.Websocket.Client.Lifecycle_Controller.Create_Session)
+      --  and by a standalone zero-fill probe; whether an abort
+      --  actually lands inside this particular `new` in a live run
+      --  has not been separately observed. See AHT.Guarded_New for
+      --  why the bracket is a protected action taking Into by access
+      --  rather than a plain `new` or an `out` parameter.
+      New_State.Gate.Allocate (Self.State'Access);
 
       --  Everything from here on runs inside a cleanup block: ANY
       --  exception — the expected Fail paths, but equally an
@@ -630,7 +654,18 @@ package body AHT.Transport.TLS is
       --     leaves this object retryable): DNS multi-candidate
       --     fallback, the selectors, deadlines and Abort_Pending all
       --     come from AHT.Transport.TCP unchanged.
-      Self.State.TCP := new AHT.Transport.TCP.TCP_Transport;
+      --
+      --  AHT.Transport.TCP.TCP_Transport is limited-controlled too,
+      --  so it is stranded by the same window, but the consequence
+      --  differs: it holds no CRITICAL_SECTION, and
+      --  Transport_Type.Finalize (src/aht-transport.adb) dispatches
+      --  on the object's tag before touching anything else -- on
+      --  zero-filled memory that tag is null, so the dispatch faults
+      --  and Finalize's own blanket handler swallows it. A stranded
+      --  one is a leak and a swallowed fault, not a hang -- reasoned
+      --  from that code, not measured -- and closing the same window
+      --  here costs nothing.
+      New_TCP.Gate.Allocate (Self.State.TCP'Access);
       AHT.Transport.TCP.Connect
         (Self.State.TCP.all, Host, Port,
          Connect_Timeout => Connect_Timeout,
