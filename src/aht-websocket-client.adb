@@ -380,6 +380,24 @@ package body AHT.Websocket.Client is
          Result       := Admitted;
       end Begin_Connect;
 
+      procedure Create_Session
+        (Into              : access Session_Access;
+         Kind              : Transport_Kind;
+         Inbox_Capacity    : Ada.Containers.Count_Type;
+         Max_Message_Bytes : Natural;
+         Max_Inbox_Bytes   : Natural;
+         Delivery          : Delivery_Mode;
+         Generation        : Positive) is
+      begin
+         Into.all := new Session_Type
+           (Kind              => Kind,
+            Inbox_Capacity    => Inbox_Capacity,
+            Max_Message_Bytes => Max_Message_Bytes,
+            Max_Inbox_Bytes   => Max_Inbox_Bytes,
+            Delivery          => Delivery);
+         Into.all.Generation := Generation;
+      end Create_Session;
+
       procedure Saved_Params (P : out Connect_Params; OK : out Boolean) is
       begin
          P  := Saved_Conn;
@@ -686,8 +704,8 @@ package body AHT.Websocket.Client is
    type Attempt_Owner
      (Ctl : access Lifecycle_Controller) is
      new Ada.Finalization.Limited_Controlled with record
-        Sess : Session_Access  := null;
-        Gen  : aliased Natural := 0;
+        Sess : aliased Session_Access := null;
+        Gen  : aliased Natural        := 0;
      end record;
 
    overriding procedure Finalize (A : in out Attempt_Owner);
@@ -1588,26 +1606,22 @@ package body AHT.Websocket.Client is
                Cap : constant Ada.Containers.Count_Type :=
                  (if Lim.Delivery = Callback_Only
                   then 0 else Lim.Max_Inbox_Messages);
+               Kind : constant Transport_Kind :=
+                 (case Parsed.Scheme is
+                     when AHT.URL.WSS => Secure_Transport,
+                     when others      => Plain_Transport);
             begin
-               case Parsed.Scheme is
-                  when AHT.URL.WSS =>
-                     Attempt.Sess := new Session_Type
-                       (Kind              => Secure_Transport,
-                        Inbox_Capacity    => Cap,
-                        Max_Message_Bytes => Lim.Max_Message_Bytes,
-                        Max_Inbox_Bytes   => Lim.Max_Inbox_Bytes,
-                        Delivery          => Lim.Delivery);
-                  when others =>
-                     --  WS (HTTP/HTTPS already rejected above).
-                     Attempt.Sess := new Session_Type
-                       (Kind              => Plain_Transport,
-                        Inbox_Capacity    => Cap,
-                        Max_Message_Bytes => Lim.Max_Message_Bytes,
-                        Max_Inbox_Bytes   => Lim.Max_Inbox_Bytes,
-                        Delivery          => Lim.Delivery);
-               end case;
+               --  Allocated inside a protected action, and handed to
+               --  the owner from inside it: see Create_Session.
+               Self.Ctl.Create_Session
+                 (Into              => Attempt.Sess'Unchecked_Access,
+                  Kind              => Kind,
+                  Inbox_Capacity    => Cap,
+                  Max_Message_Bytes => Lim.Max_Message_Bytes,
+                  Max_Inbox_Bytes   => Lim.Max_Inbox_Bytes,
+                  Delivery          => Lim.Delivery,
+                  Generation        => Positive (Gen));
             end;
-            Attempt.Sess.Generation := Positive (Gen);
 
             case Attempt.Sess.Kind is
                when Secure_Transport =>

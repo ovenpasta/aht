@@ -551,6 +551,38 @@ private
          Gen       : out Natural;
          L         : out Limits;
          Result    : out Admission_Result);
+      --  Builds the attempt's session and hands it to the owner. Here,
+      --  and through a pointer, for the same reason Begin_Connect
+      --  records the generation here.
+      --
+      --  GNAT attaches a heap object to its access type's collection
+      --  BEFORE the object is initialized, from inside the runtime's
+      --  global task lock — and releasing that lock is an abort
+      --  completion point. An abort landing anywhere in the allocation
+      --  is therefore delivered with the object attached, entirely
+      --  uninitialized, and unreachable: `new` never returned, so no
+      --  pointer to it exists and no Free can be aimed at it. It
+      --  survives to library finalization, which finalizes it as
+      --  though it were a session. What that costs depends on the
+      --  target: a zeroed pthread mutex is a valid unlocked one, so
+      --  Linux never notices, while a zeroed CRITICAL_SECTION reads as
+      --  contended — LockCount 0, where an initialized and unheld one
+      --  is -1 — so the Send_Guard's finalization parks in the
+      --  section's own wait, for an owner the section names as thread
+      --  0000.
+      --
+      --  Abort is deferred for the whole of a protected action, so
+      --  there is no window here: either nothing was allocated, or
+      --  Into holds a complete session and the attempt owner is
+      --  already the thing that frees it.
+      procedure Create_Session
+        (Into              : access Session_Access;
+         Kind              : Transport_Kind;
+         Inbox_Capacity    : Ada.Containers.Count_Type;
+         Max_Message_Bytes : Natural;
+         Max_Inbox_Bytes   : Natural;
+         Delivery          : Delivery_Mode;
+         Generation        : Positive);
       --  The parameters of the last connect that actually succeeded.
       --  OK is False before there has been one.
       procedure Saved_Params (P : out Connect_Params; OK : out Boolean);

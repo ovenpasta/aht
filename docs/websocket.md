@@ -726,7 +726,7 @@ completes.
 
 ### Abort safety is structural, not defensive
 
-Three GNAT behaviours were measured, not assumed, and each one rules
+Four GNAT behaviours were measured, not assumed, and each one rules
 out an approach that looks correct:
 
 - **An `in out` entry parameter's copy-back is not delivered when the
@@ -743,8 +743,19 @@ out an approach that looks correct:
   before whatever statement follows it. So a guard cannot record "I
   hold this" in its own state after the acquiring call returns — the
   acquiring protected action has to record the owner itself.
+- **A heap object is attached to its access type's collection before
+  it is initialized**, from inside the runtime's global task lock,
+  and releasing that lock is an abort completion point
+  (`Allocate_Any_Controlled`, steps 2 to 4 of `s-stposu.adb`). An
+  abort landing anywhere inside a `new` is delivered with the object
+  attached, wholly uninitialized, and unreachable — `new` never
+  returned, so no pointer to it exists and no `Free` can be aimed at
+  it. Library finalization then finalizes it as though it were real.
+  So a session is allocated *inside* a protected action, which is
+  abort-deferred, and the same action hands the pointer to the
+  attempt owner.
 
-That last rule shapes two places. `Send_Guard.Acquire` takes the
+That third rule shapes two places. `Send_Guard.Acquire` takes the
 owner's identity *in* and records it inside the same action that takes
 the latch, so a cancelled acquisition records nothing and its release
 is a no-op. And admission works the same way: the `Attempt_Owner`
@@ -778,6 +789,39 @@ case 5 notices a client left admitted-but-unowned, because every later
 being moved out of the protected action. So the design rests on the
 structural argument — there is no interval — and the suite guards what
 would follow if there were.
+
+**Building a session is one protected action.**
+`Lifecycle_Controller.Create_Session` allocates the session and stores
+the pointer into the attempt owner inside a single action, so the
+fourth rule has no window to open: either nothing was allocated, or
+the owner holds a complete session and is already the thing that frees
+it. The destination goes in as an `access Session_Access` for the same
+reason `Begin_Connect` takes `Owner_Gen` that way — an `out`
+parameter's copy-back happens after the action has ended, which is
+exactly where the abort lands.
+
+What a bare `new` costs there depends on the target, and only one of
+the two notices. A zeroed `pthread_mutex_t` is a valid unlocked mutex,
+so Linux finalizes the uninitialized session and carries on; a zeroed
+`CRITICAL_SECTION` is not, because an initialized and unheld one has
+`LockCount` -1 and 0 reads as contended. On the i686 Windows build
+`test_ws_abort` therefore printed its `OK` and then stopped: the
+environment task sat in `Finalize_Global_Tasks`, finalizing a session
+it reached from the collection, blocked in the `Send_Guard`'s
+`Protection_Entries.Finalize` on a section whose owning thread wine
+reported as `0000` over memory that was entirely zero. It does come
+back, eventually and with a failure status — two direct runs took 63s
+and 212s — but four of five runs were still sitting there at 30s, and
+under the suite's per-test cap that is a `TIMEOUT`. Case 5's admission
+sweep is what puts it there: its asynchronous select fires inside the
+first three milliseconds of `Connect`, which is where the allocation
+is.
+
+Both directions were checked on that build, with the allocation code
+byte-for-byte the same and only its enclosing construct changed: 6/6
+runs hang from a plain procedure, 6/6 exit cleanly in about 1.4s from
+a protected action. Nothing on Linux tells the two apart, so this is a
+regression only the Windows cross build can catch.
 
 **The guarantee is narrower on Windows.** Everything above holds
 wherever an abort can reach the aborted task at all, and that is a

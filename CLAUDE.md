@@ -56,11 +56,15 @@ checks it against the compiler's own `-dumpmachine`.
 **Windows is not a supported configuration** (`windows = false` in
 `alire.toml`), and this is not a substitute for running on Windows —
 wine implements the API AHT calls, not the one Windows has. It is the
-fast loop, and it has already earned its keep: it found a `Poison`
-that could not wake a reader, because Winsock does not signal a parked
-`select` on a locally initiated shutdown.
+fast loop, and it has already earned its keep twice: it found a
+`Poison` that could not wake a reader, because Winsock does not signal
+a parked `select` on a locally initiated shutdown; and it found a
+session left attached to its collection uninitialized by an abort
+inside `new`, which hung library finalization on a zero-filled
+`CRITICAL_SECTION`. Both are invisible on Linux, the second of them
+because a zeroed `pthread_mutex_t` is a valid unlocked one.
 
-All 55 pass, with two named skips in `test_ws_abort`. GNAT on Linux
+All 58 pass, with two named skips in `test_ws_abort`. GNAT on Linux
 interrupts a blocking syscall with a signal, so aborting a task parked
 in `Check_Selector` unwinds it; Windows has no such mechanism, so the
 abort is deferred until the call returns on its own — never, for a
