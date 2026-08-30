@@ -11,6 +11,20 @@ package body AHT.HTTP.Client is
 
    use type AHT.Transport.Transport_Access;
 
+   function Seconds (S : Duration) return Phase_Bound is
+     ((Inherited => False, Limit => S));
+
+   --  Collapse one phase's field to the Duration the transport
+   --  layer wants: the field's own limit, or Timeout_Seconds when
+   --  the field was left at Inherit. Duration'Last is "no bound"
+   --  either way, which is what both Connect and the deadline
+   --  setters already take it to mean.
+   function Resolve_Bound
+     (Self : Client_Type; B : Phase_Bound) return Duration is
+     (if not B.Inherited then B.Limit
+      elsif Self.Timeout_Seconds > 0 then Duration (Self.Timeout_Seconds)
+      else Duration'Last);
+
    --  "host" or "host:port" — only emits the port when it differs
    --  from the URL scheme's default, matching how browsers and curl
    --  format the Host header.
@@ -103,9 +117,14 @@ package body AHT.HTTP.Client is
          --  caller's responsibility (see the spec). Buffered Write needs
          --  no write deadline -- its body is already in RAM and drains in
          --  one shot -- so this leaves the buffered Send path unchanged.
-         if Self.Timeout_Seconds > 0 then
-            T.Set_Write_Deadline (Duration (Self.Timeout_Seconds));
-         end if;
+         declare
+            Bound : constant Duration :=
+              Resolve_Bound (Self, Self.Write_Deadline);
+         begin
+            if Bound /= Duration'Last then
+               T.Set_Write_Deadline (Bound);
+            end if;
+         end;
          AHT.HTTP.Request.Write_Streaming
            (Working, T, Source.all, Aborted'Access);
       else
@@ -117,9 +136,14 @@ package body AHT.HTTP.Client is
       --  it is armed, so arming it up front would let a slow/large upload
       --  burn the response-read budget and surface a spurious
       --  Timeout_Error the instant the upload completes.
-      if Self.Timeout_Seconds > 0 then
-         T.Set_Read_Deadline (Duration (Self.Timeout_Seconds));
-      end if;
+      declare
+         Bound : constant Duration :=
+           Resolve_Bound (Self, Self.Read_Deadline);
+      begin
+         if Bound /= Duration'Last then
+            T.Set_Read_Deadline (Bound);
+         end if;
+      end;
 
       loop
          AHT.HTTP.Response.Read_Streaming
@@ -155,16 +179,18 @@ package body AHT.HTTP.Client is
    is
       Working : AHT.HTTP.Request.Request_Type := Req;
 
-      --  Timeout_Seconds bounds each phase independently rather than as
-      --  one end-to-end deadline: it is the TCP-connect budget, the
-      --  TLS-handshake deadline, the response-read deadline
-      --  (Set_Read_Deadline in Wire_Round_Trip), and -- on the
-      --  streaming-upload path only -- the request-write deadline
-      --  (Set_Write_Deadline). 0 means no limit.
-      Budget : constant Duration :=
-        (if Self.Timeout_Seconds > 0
-         then Duration (Self.Timeout_Seconds)
-         else Duration'Last);
+      --  One resolved bound per dial phase. Each is the matching
+      --  Client_Type field, or Timeout_Seconds where that field was
+      --  left at Inherit -- so these are independent budgets, not
+      --  slices of a shared one, and a request's wall clock can run
+      --  to their sum. The write and read deadlines resolve the same
+      --  way inside Wire_Round_Trip, where they are armed.
+      Resolve_B   : constant Duration :=
+        Resolve_Bound (Self, Self.Resolve_Timeout);
+      Connect_B   : constant Duration :=
+        Resolve_Bound (Self, Self.Connect_Timeout);
+      Handshake_B : constant Duration :=
+        Resolve_Bound (Self, Self.Handshake_Deadline);
    begin
       Merge_Headers (Self, Req, Working);
 
@@ -183,8 +209,8 @@ package body AHT.HTTP.Client is
                  (T,
                   Host            => To_String (Req.Target.Host),
                   Port            => Req.Target.Port,
-                  Connect_Timeout => Budget,
-                  Resolve_Timeout => Budget);
+                  Connect_Timeout => Connect_B,
+                  Resolve_Timeout => Resolve_B);
 
                --  Race window: Cancel could fire between Connect
                 --  returning and Bind running. Bind itself
@@ -225,9 +251,9 @@ package body AHT.HTTP.Client is
                   Port               => Req.Target.Port,
                   Insecure           => Self.Insecure,
                   CA_Path            => To_String (Self.CA_Path),
-                  Connect_Timeout    => Budget,
-                  Handshake_Deadline => Budget,
-                  Resolve_Timeout    => Budget,
+                  Connect_Timeout    => Connect_B,
+                  Handshake_Deadline => Handshake_B,
+                  Resolve_Timeout    => Resolve_B,
                   CA_PEM             => To_String (Self.CA_PEM));
 
                --  Same Cancel bind/unbind discipline as the HTTP

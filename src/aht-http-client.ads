@@ -10,6 +10,38 @@ with AHT.Transport;
 
 package AHT.HTTP.Client is
 
+   --  One phase's bound, for the per-phase fields on Client_Type.
+   --
+   --  A request walks five phases -- DNS, TCP connect, TLS handshake,
+   --  request write, response read -- and Timeout_Seconds is one
+   --  number spent on each of them separately. That couples bounds
+   --  that have nothing to do with each other: a caller who must
+   --  allow a long download can only do it by widening the one knob,
+   --  which widens the dial along with it, and a peer that stalls
+   --  mid-handshake then gets the download's patience. These fields
+   --  split the knob apart.
+   type Phase_Bound is private;
+
+   function Seconds (S : Duration) return Phase_Bound
+     with Pre => S >= 0.0;
+   --  Bound this phase at S seconds.
+   --
+   --  Seconds (0.0) is a *zero* budget -- the phase expires at once
+   --  -- and is deliberately not a synonym for "no bound", which
+   --  Timeout_Seconds => 0 does mean. The two knobs disagree because
+   --  the failure modes are not symmetric: a caller who writes
+   --  Seconds (0.0) expecting no bound gets an immediate
+   --  Timeout_Error, while the reverse reading would hang. Spell no
+   --  bound as Unbounded.
+
+   Inherit : constant Phase_Bound;
+   --  Take this phase's bound from Timeout_Seconds. The default for
+   --  every field below, so a client that sets none of them behaves
+   --  exactly as it did before they existed.
+
+   Unbounded : constant Phase_Bound;
+   --  No bound on this phase, whatever Timeout_Seconds says.
+
    type Client_Type is tagged record
       User_Agent      : Ada.Strings.Unbounded.Unbounded_String :=
         Ada.Strings.Unbounded.To_Unbounded_String ("AHT/0.1");
@@ -23,7 +55,52 @@ package AHT.HTTP.Client is
       --  even under Insecure.
       CA_PEM          : Ada.Strings.Unbounded.Unbounded_String;
       Insecure        : Boolean := False;
+
+      --  The coarse bound, applied to every phase left at Inherit.
+      --  0 means no bound. It is not an end-to-end deadline: each
+      --  phase gets the full value as its own budget, so the wall
+      --  clock a request may occupy is a multiple of it.
       Timeout_Seconds : Natural := 30;
+
+      --  Per-phase overrides of Timeout_Seconds. Each covers exactly
+      --  one wait, and they are separate knobs for the same reason
+      --  AHT.Websocket.Client.Connect's four are: a caller willing to
+      --  wait out a slow body may still refuse to wait on a peer that
+      --  never finishes the handshake.
+      --
+      --    Resolve_Timeout     the DNS lookup, which runs before any
+      --                        of the others and so cannot be bounded
+      --                        by them. Nothing to bound when the URL
+      --                        carries an IP literal.
+      --
+      --    Connect_Timeout     the TCP connect, as ONE total budget
+      --                        across every address DNS resolved to,
+      --                        not a per-candidate one.
+      --
+      --    Handshake_Deadline  the TLS handshake alone, and so only
+      --                        on https://; an http:// request runs
+      --                        none and ignores it.
+      --
+      --    Write_Deadline      the request write, and only on the
+      --                        streaming-upload path
+      --                        (Send_Streaming_Body). A buffered body
+      --                        is already in RAM and drains in one
+      --                        shot, so the other overloads arm no
+      --                        write deadline and ignore this.
+      --
+      --    Read_Deadline       the response read, armed once the
+      --                        request is fully on the wire, as one
+      --                        compound budget over status line,
+      --                        headers and body together.
+      --
+      --  Exhaustion of any of them raises Timeout_Error, exactly as
+      --  Timeout_Seconds does; these change which wait is bounded and
+      --  by how much, never what a breach looks like.
+      Resolve_Timeout    : Phase_Bound := Inherit;
+      Connect_Timeout    : Phase_Bound := Inherit;
+      Handshake_Deadline : Phase_Bound := Inherit;
+      Write_Deadline     : Phase_Bound := Inherit;
+      Read_Deadline      : Phase_Bound := Inherit;
    end record;
 
    --  Cross-task cancel for an in-flight Send. Owned by the caller,
@@ -42,10 +119,15 @@ package AHT.HTTP.Client is
    --    * Cancel takes effect during the response Read; it does not
    --      interrupt the connect dial (`Abort_Pending` is a Read-side
    --      hook). For `https://` that uninterruptible phase covers the
-   --      TLS handshake too — only `Self.Timeout_Seconds` can bound
-   --      connect/handshake, not `Cancel`. A pre-cancelled handle
-   --      short-circuits before connect; a Cancel arriving during
-   --      connect/handshake takes effect on the first response Read.
+   --      TLS handshake too — only a deadline can bound
+   --      connect/handshake, never `Cancel`: `Connect_Timeout` and
+   --      `Handshake_Deadline`, or `Timeout_Seconds` where those are
+   --      left at `Inherit`. A caller who has set `Timeout_Seconds`
+   --      to 0 to allow an unbounded body still wants those two set,
+   --      or the dial has nothing bounding it at all. A pre-cancelled
+   --      handle short-circuits before connect; a Cancel arriving
+   --      during connect/handshake takes effect on the first response
+   --      Read.
    --    * Single-use: once `Cancel` has been called, every subsequent
    --      Send with this handle aborts immediately. Declare a fresh
    --      handle per cancellable operation.
@@ -100,8 +182,9 @@ package AHT.HTTP.Client is
    --  untrusted/invalid certificate chain. The transport is closed
    --  in every exit path.
    --
-   --  Retry-safety: once `Self.Timeout_Seconds > 0` arms a write
-   --  deadline (or a `Cancel` fires), a `Timeout_Error` / `Aborted_Error`
+   --  Retry-safety: once a write deadline is armed (from
+   --  `Self.Write_Deadline`, or `Self.Timeout_Seconds` where that is
+   --  `Inherit`), or a `Cancel` fires, a `Timeout_Error` / `Aborted_Error`
    --  can be raised *while the request is mid-flight on the wire* — some
    --  request bytes may already have reached the peer (see the partial-send
    --  note on `AHT.Transport.Write`). Such a failure is therefore
@@ -224,7 +307,8 @@ package AHT.HTTP.Client is
    --  `Send`. The call is synchronous: it runs the whole upload and
    --  reads the response before returning, so `Source` need only
    --  outlive the call. `Source.Read_Chunk` runs on the caller's task
-   --  and **must not block indefinitely**: `Self.Timeout_Seconds` arms
+   --  and **must not block indefinitely**: `Self.Write_Deadline` (or
+   --  `Self.Timeout_Seconds`, where it is left at `Inherit`) arms
    --  a write deadline that bounds a stalled *transmit* (a peer that
    --  stops reading), but it only bites once control is inside the
    --  transport write -- it does *not* interrupt a `Read_Chunk` that is
@@ -327,6 +411,21 @@ package AHT.HTTP.Client is
    function Is_Cancelled  (Self : Async_Handle) return Boolean;
 
 private
+
+   --  Inherited is the state a bare Duration cannot carry. "No
+   --  bound" is Duration'Last and "n seconds" is n, but "whatever
+   --  Timeout_Seconds says" is neither -- and it has to be the
+   --  default, or adding these fields would silently change what
+   --  every existing client does.
+   type Phase_Bound is record
+      Inherited : Boolean  := True;
+      Limit     : Duration := 0.0;
+   end record;
+
+   Inherit   : constant Phase_Bound :=
+     (Inherited => True, Limit => 0.0);
+   Unbounded : constant Phase_Bound :=
+     (Inherited => False, Limit => Duration'Last);
 
    --  Holds the transport currently bound to a Send and the sticky
    --  Cancelled flag. All access is serialized by the protected

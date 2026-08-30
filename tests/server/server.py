@@ -6,6 +6,7 @@ integration tests in tests/src/test_http_*.adb hit. Routes mirror the
 plan in docs/plan.md:
 
     GET  /hello      → 200 text/plain "hello, world\\n"
+    GET  /slow       → 200 text/plain, but only after SLOW_DELAY seconds
     GET  /chunked    → 200 with Transfer-Encoding: chunked, three frames
     GET  /json       → 200 application/json
     GET  /redirect   → 302 Location: /hello
@@ -25,9 +26,17 @@ from __future__ import annotations
 
 import http.server
 import sys
+import time
 
 HOST = "127.0.0.1"
 HTTP_PORT = 8764
+
+#  How long /slow withholds its response. Sized for the per-phase
+#  bound test in test_http_phase_bounds.adb, which brackets it: a
+#  1 s read deadline must trip on this route and a 6 s one must not,
+#  so the delay has to sit clear of both ends. The handler is served
+#  on its own thread (ThreadingHTTPServer), so this blocks nothing else.
+SLOW_DELAY = 3.0
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -55,6 +64,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
         if self.path == "/hello":
             self._send_fixed(200, b"hello, world\n", "text/plain")
+
+        elif self.path == "/slow":
+            #  Withhold the whole response, status line included, so
+            #  the client's read deadline is what decides the outcome
+            #  rather than a partially-delivered body.
+            time.sleep(SLOW_DELAY)
+            self._send_fixed(200, b"slow, world\n", "text/plain")
 
         elif self.path == "/chunked":
             # Three deliberately uneven chunks so the Ada decoder has

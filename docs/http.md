@@ -294,7 +294,18 @@ type Client_Type is tagged record
    CA_PEM          : Unbounded_String;
    Insecure        : Boolean := False;
    Timeout_Seconds : Natural := 30;
+
+   Resolve_Timeout    : Phase_Bound := Inherit;
+   Connect_Timeout    : Phase_Bound := Inherit;
+   Handshake_Deadline : Phase_Bound := Inherit;
+   Write_Deadline     : Phase_Bound := Inherit;
+   Read_Deadline      : Phase_Bound := Inherit;
 end record;
+
+type Phase_Bound is private;
+Inherit   : constant Phase_Bound;   --  use Timeout_Seconds
+Unbounded : constant Phase_Bound;   --  no bound at all
+function Seconds (S : Duration) return Phase_Bound;
 
 procedure Send (Self, Req, Resp);
 function  Get  (Self, URL) return Response_Type;
@@ -326,11 +337,12 @@ exactly as it already ignores `CA_Path`.
     `AHT.Websocket.Client`.
 
 - **`Timeout_Seconds` is a per-phase budget, not one end-to-end
-  deadline.** A request walks four phases, and `Timeout_Seconds` (when
-  non-zero) bounds each of the last three independently — each phase
-  gets the full value as its own budget. `Timeout_Seconds = 0` disables
-  all of them. The phases are the same for `http://` and `https://`
-  (the TLS handshake phase is simply absent for plain HTTP):
+  deadline.** A request walks five phases, and `Timeout_Seconds` (when
+  non-zero) bounds each independently — each phase gets the full value
+  as its own budget, so the wall clock a request may occupy is a
+  multiple of it, not equal to it. `Timeout_Seconds = 0` disables all
+  of them. The phases are the same for `http://` and `https://` (the
+  TLS handshake phase is simply absent for plain HTTP):
   1. *DNS resolution* — **bounded** via `Connect`'s `Resolve_Timeout`,
      which resolves through `AHT.DNS` rather than a blocking
      `getaddrinfo` the caller cannot leave. The bound is on the
@@ -349,13 +361,48 @@ exactly as it already ignores `CA_Path`.
      `Handshake_Deadline`, so a peer that completes the TCP connect but
      stalls mid-handshake raises `Timeout_Error` instead of hanging. The
      deadline is cleared once the handshake completes.
-  4. *response read* — **bounded** by `Set_Read_Deadline`, armed fresh
+  4. *request write* (`Send_Streaming_Body` only) — **bounded** by
+     `Set_Write_Deadline`, which bounds a peer that stops reading
+     mid-upload. The buffered overloads arm none: their body is
+     already in RAM and drains in one shot.
+  5. *response read* — **bounded** by `Set_Read_Deadline`, armed fresh
      in `Wire_Round_Trip` as a compound deadline over the whole
      response.
 
   `Cancel_Handle` binds after `Connect` returns, so cancel takes effect
   during the response read — not during DNS, connect, or handshake
   (same for both schemes).
+
+- **Each phase can be bounded on its own.** One number spent five
+  times couples bounds that have nothing to do with each other: the
+  only way to allow a long download is to raise `Timeout_Seconds`, and
+  that hands the same patience to a peer stalling mid-handshake. The
+  five `Phase_Bound` fields split the knob, one per phase, each
+  defaulting to `Inherit` — so a client that sets none of them behaves
+  exactly as it did before the fields existed.
+
+  ```ada
+  C.Timeout_Seconds    := 0;                --  no bound on the body
+  C.Connect_Timeout    := Client.Seconds (5.0);
+  C.Handshake_Deadline := Client.Seconds (5.0);
+  ```
+
+  A field is one of three things: `Inherit` (take `Timeout_Seconds`),
+  `Unbounded` (no bound, whatever `Timeout_Seconds` says), or
+  `Seconds (S)`. The third state is why `Phase_Bound` is not just a
+  `Duration` — `Inherit` has to be the default, or adding the fields
+  would silently change what every existing client does.
+
+  `Seconds (0.0)` is a **zero** budget, expiring at once; it is *not*
+  a synonym for no bound, which is what `Timeout_Seconds => 0` means.
+  The two knobs disagree deliberately, because the failure modes are
+  not symmetric: reading `Seconds (0.0)` as "no bound" would hang,
+  while reading it as zero gives an immediate `Timeout_Error`. Spell
+  no bound as `Unbounded`.
+
+  Exhaustion of any of them raises `Timeout_Error`, exactly as
+  `Timeout_Seconds` does. The fields change which wait is bounded and
+  by how much, never what a breach looks like.
 
 - **Header merging.** `Send` builds a working copy of `Req` and fills
   in three classes of headers, *only where not already present*, so
@@ -379,9 +426,9 @@ exactly as it already ignores `CA_Path`.
   Content-Length (which it commonly does, advertising the
   GET-equivalent size).
 
-- **Deadline.** When `Timeout_Seconds > 0`, `Send` arms
-  `Set_Read_Deadline` on the transport *after* the request body is on
-  the wire — so a slow or large upload can't burn the response budget —
+- **Deadline.** When the resolved read bound is not `Duration'Last`,
+  `Send` arms `Set_Read_Deadline` on the transport *after* the request
+  body is on the wire — so a slow or large upload can't burn the response budget —
   as one wall-clock budget for the whole response (status line +
   headers + body), not per-`Read`. (The streaming-upload path
   additionally arms a write deadline; see
@@ -518,7 +565,8 @@ The call is **synchronous** — it runs the whole upload and reads
 the response before returning — so `Source` need only outlive the
 call (there is no cross-task lifetime question). `Source.Read_Chunk`
 runs on the caller's task and **must not block indefinitely**: on the
-streaming-upload path `Timeout_Seconds` arms a write deadline (in
+streaming-upload path `Write_Deadline` — or `Timeout_Seconds`, where
+it is left at `Inherit` — arms a write deadline (in
 addition to the usual read deadline), but it only bounds a stalled
 *transmit* — a peer that stops reading — because it bites only once
 control is inside the transport write. It does **not** interrupt a
@@ -596,10 +644,13 @@ Caveats:
   handle per cancellable operation.
 - **No connect cancellation.** `Abort_Pending` is a Read-
   side hook; `Cancel` can't interrupt a `Connect` in flight. A
-  hung connect is bounded by `Timeout_Seconds` (the TCP-connect
-  and TLS-handshake budgets, see the per-phase breakdown above),
-  not by `Cancel` — so it ends in `Timeout_Error` rather than on
-  the `Cancel`. A pending `Cancel` then takes effect on the first
+  hung connect is bounded only by a deadline — `Connect_Timeout`
+  and `Handshake_Deadline`, or `Timeout_Seconds` where those are
+  left at `Inherit` (see the per-phase breakdown above) — never by
+  `Cancel`, so it ends in `Timeout_Error` rather than on the
+  `Cancel`. A caller who sets `Timeout_Seconds` to 0 to allow an
+  unbounded body should set those two explicitly, or nothing
+  bounds the dial at all. A pending `Cancel` then takes effect on the first
   Read once `Connect` returns.
 - **Don't share a handle across concurrent `Send`s.** The
   protected `Bound` slot is overwritten by whichever Send binds

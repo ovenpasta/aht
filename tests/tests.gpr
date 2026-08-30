@@ -45,6 +45,7 @@ project Tests is
       "test_http_post.adb",
       "test_http_auth.adb",
       "test_http_cancel.adb",
+      "test_http_phase_bounds.adb",
       "test_http_upload.adb",
       "test_http_streaming.adb",
       "test_http_async.adb",
