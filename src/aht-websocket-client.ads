@@ -555,26 +555,23 @@ private
       --  and through a pointer, for the same reason Begin_Connect
       --  records the generation here.
       --
-      --  GNAT attaches a heap object to its access type's collection
-      --  BEFORE the object is initialized, from inside the runtime's
-      --  global task lock — and releasing that lock is an abort
-      --  completion point. An abort landing anywhere in the allocation
-      --  is therefore delivered with the object attached, entirely
-      --  uninitialized, and unreachable: `new` never returned, so no
-      --  pointer to it exists and no Free can be aimed at it. It
-      --  survives to library finalization, which finalizes it as
-      --  though it were a session. What that costs depends on the
-      --  target: a zeroed pthread mutex is a valid unlocked one, so
-      --  Linux never notices, while a zeroed CRITICAL_SECTION reads as
-      --  contended — LockCount 0, where an initialized and unheld one
-      --  is -1 — so the Send_Guard's finalization parks in the
-      --  section's own wait, for an owner the section names as thread
-      --  0000.
+      --  It builds it inside a protected action because a bare `new`
+      --  is not abort-safe. AHT.Guarded_New carries that mechanism and
+      --  the general form of this guard; what it costs *here* is a
+      --  hang. The uninitialized wreckage reaches library finalization
+      --  still carrying the Send_Guard, and a zero-filled
+      --  CRITICAL_SECTION reads as contended — LockCount 0, where an
+      --  initialized and unheld one is -1 — so the guard's
+      --  finalization parks in the section's own wait, for an owner
+      --  the section names as thread 0000. A zeroed pthread mutex is a
+      --  valid unlocked one, so no Linux run shows any of it.
       --
-      --  Abort is deferred for the whole of a protected action, so
-      --  there is no window here: either nothing was allocated, or
-      --  Into holds a complete session and the attempt owner is
-      --  already the thing that frees it.
+      --  A Guarded_New gate would not serve: that gate is one bare
+      --  `new`, while this allocation is discriminated and sets the
+      --  generation. Abort is deferred for a whole protected action
+      --  either way, so there is no window here — either nothing was
+      --  allocated, or Into holds a complete session and the attempt
+      --  owner is already the thing that frees it.
       procedure Create_Session
         (Into              : access Session_Access;
          Kind              : Transport_Kind;

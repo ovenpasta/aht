@@ -10,9 +10,7 @@
 --  uninitialized, and unreachable: the allocator never returned, so
 --  no pointer to the object exists and no `Free` can be aimed at it.
 --  It survives to library finalization, which finalizes it as though
---  it were real. See the note at
---  `AHT.Websocket.Client.Lifecycle_Controller.Create_Session`, which
---  closes the identical window for a session by the same construct.
+--  it were real.
 --
 --  A protected action is abort-deferred for its whole duration, so
 --  performing the allocation inside one closes the window: either
@@ -29,6 +27,12 @@
 --  Taft-amended and completed differently by each). A private child
 --  of AHT because nothing about this utility is meant for consumers
 --  of the library.
+--
+--  `AHT.Websocket.Client.Lifecycle_Controller.Create_Session` closes
+--  this same window for a session without instantiating this. Its
+--  allocation is discriminated and sets a field, neither of which the
+--  one bare `new` below can express, and the controller it sits on is
+--  already a protected object.
 private generic
    type Object is limited private;
    type Object_Access is access Object;
