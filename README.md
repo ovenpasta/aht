@@ -90,7 +90,7 @@ alr with aht --use=https://github.com/USER/aht.git
 - Only for the optional mbedTLS backend (`AHT_TLS_BACKEND=mbedtls`):
   network access plus `curl`, `tar`, `make`, and a C compiler on the
   first build — `scripts/fetch_mbedtls.sh` downloads and compiles
-  mbedTLS v2.28.9 (checksum-verified) into `third_party/`.
+  mbedTLS 3.6.7 (checksum-verified) into `third_party/`.
 - Integration tests and examples additionally need `python3` (the
   fixture server; its venv installs `websockets`) and `openssl` (test
   certificates).
