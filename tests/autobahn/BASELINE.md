@@ -20,7 +20,7 @@ over both.
 | Image digest | `sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074` |
 | Testee | `tests/autobahn/bin/debug-openssl/aht_autobahn` |
 | Backend / profile | `AHT_TLS_BACKEND=openssl`, `BUILD_MODE=debug` |
-| Commit | `4db0780`, with five paired runs at its parent `aa33466` |
+| Commit | `a17eba9`, with five paired runs at its parent `66308d5` |
 
 The digest is recorded because `run.sh` defaults to the mutable
 `:latest` tag. Two runs months apart are not necessarily against the
@@ -29,7 +29,7 @@ apart from a changed test. Here it is unchanged from the 2026-08-25
 block, so the two runs are against the same suite and their splits are
 comparable.
 
-`4db0780` and the commits between it and `66e6698` do not touch the
+`a17eba9` and the commits between it and `66e6698` do not touch the
 WebSocket path at all — neither `AHT.Websocket.Client` nor the testee
 references `AHT.HTTP.Client`. The run is recorded because this file is
 the durable record of what was observed, not because the change could
@@ -78,13 +78,13 @@ cases flap" from "this change moved them":
   c          NON-STRICT = 4.2.4, 6.4.1-4
   d          NON-STRICT = 4.2.3, 4.2.4, 6.4.1-4
   e          NON-STRICT = 4.1.3, 4.1.4, 5.15, 6.4.1-4
-2026-08-31 @ aa33466, the parent (no per-phase bounds)
+2026-08-31 @ 66308d5, the parent (no per-phase bounds)
   a          NON-STRICT = 5.15, 6.4.1-4                          (5)
   b          NON-STRICT = 3.2, 3.3, 6.4.1-4                      (6)
   c          NON-STRICT = 4.2.3, 4.2.4, 6.4.1-4                  (6)
   d          NON-STRICT = 4.1.4, 6.4.1-4                         (5)
   e          NON-STRICT = 3.2, 3.3, 4.2.4, 5.15, 6.4.1-4         (8)
-2026-08-31 @ 4db0780, the per-phase bounds
+2026-08-31 @ a17eba9, the per-phase bounds
   a          NON-STRICT = 3.2, 3.3, 3.4, 4.1.3, 4.1.4, 4.2.3,
                           5.15, 6.4.1-4                         (11)
   b          NON-STRICT = 6.4.1-4                                (4)
