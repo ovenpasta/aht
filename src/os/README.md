@@ -42,7 +42,7 @@ not read either one's answer as the other's:
   UCRT, so the image carries thirteen `api-ms-win-crt-*.dll` imports
   that XP never had and cannot be given. It is the fast loop, not the
   shipping shape.
-- **i686 via CROSS_PREFIX** — the toolchain that actually ships, and the target
+- **i686 cross toolchain** — the one that actually ships, and the target
   where `Stdcall` diverges from C. This one carries the import-table
   assertion, which settles which DLLs are named: a necessary part of
   XP loadability and not the whole of it.
@@ -58,11 +58,11 @@ x86_64-w64-mingw32-gnatmake -gnat2022 -D /tmp/winobj64 \
 WINEDEBUG=-all wine /tmp/winobj64/winrand.exe
 ```
 
-### i686 via CROSS_PREFIX — shipping toolchain, and the import-table assertion
+### i686 cross toolchain — shipping shape, and the import-table assertion
 
 ```sh
 set -e
-CROSS_PREFIX=${CROSS_PREFIX:-$HOME/cross-i686}
+CROSS_PREFIX=${CROSS_PREFIX:?set to the i686 cross toolchain prefix}
 export PATH="$CROSS_PREFIX/usr/bin:$PATH"
 
 rm -rf /tmp/winobj32 && mkdir -p /tmp/winobj32
@@ -111,7 +111,7 @@ The probe must be the final command, or its status must be propagated
 explicitly. The `!`-exemption note above is that same trap in
 different clothes, which is why the assertions are spelled out long.
 
-What this established, on 2026-08-27, with CROSS_PREFIX
+What this established, on 2026-08-27, with
 `i686-w64-mingw32.static` and the system `x86_64-w64-mingw32` GNAT:
 
 - the body compiles clean and links for both Windows targets;
