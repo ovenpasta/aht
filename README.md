@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: 2026 Aldo Nicolas Bruno
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# AHT — Ada HTTP/WebSocket Client
+# AHT, an Ada HTTP and WebSocket client
 
 An Ada 2022 library providing a synchronous HTTP/1.1 client and a
 concurrent WebSocket (RFC 6455) client on top of a shared transport
@@ -13,22 +13,22 @@ Every Ada unit lives under the `AHT.*` namespace.
 
 ## Features
 
-- **HTTP/1.1 client** — `GET`/`POST`/`PUT`/`DELETE`/`HEAD`/`PATCH`/
+- **HTTP/1.1 client**: `GET`/`POST`/`PUT`/`DELETE`/`HEAD`/`PATCH`/
   `OPTIONS`, chunked transfer decoding, streaming downloads (push
   callback or straight to an `Ada.Streams` stream), streaming uploads
   (fixed-length or chunked, O(1) memory), async requests with
   cross-task cancellation.
-- **WebSocket client** — `ws://` and `wss://`, text + binary,
+- **WebSocket client**: `ws://` and `wss://`, text + binary,
   fragmentation reassembly, auto ping/pong, clean close handshake,
   blocking `Receive` or push callbacks; exercised against the
   Autobahn|Testsuite conformance harness.
-- **TLS** — `https://` and `wss://`, with certificate verification
+- **TLS**: `https://` and `wss://`, with certificate verification
   against the system trust store, a caller CA bundle (`CA_Path`) or
   anchors embedded in the binary (`CA_PEM`),
   or opt-in `Insecure` mode. Two build-time backends: system
   OpenSSL 3 (default, TLS 1.3) or vendored mbedTLS 3.6
-  (`AHT_TLS_BACKEND=mbedtls`) — see [`docs/tls.md`](docs/tls.md).
-- **Contracts** — public APIs carry Ada 2012/2022 contracts (subtype
+  (`AHT_TLS_BACKEND=mbedtls`), see [`docs/tls.md`](docs/tls.md).
+- **Contracts**: public APIs carry Ada 2012/2022 contracts (subtype
   predicates, `Type_Invariant`, `Pre`/`Post`).
 
 Not (yet) offered: HTTP/2, connection keep-alive (each request runs
@@ -80,7 +80,7 @@ the community index, pin it by path or git URL from your own crate:
 
 ```sh
 alr with aht --use=/path/to/aht        # local checkout
-alr with aht --use=https://github.com/USER/aht.git
+alr with aht --use=https://github.com/ovenpasta/aht.git
 ```
 
 ## Requirements
@@ -90,11 +90,11 @@ alr with aht --use=https://github.com/USER/aht.git
 - POSIX platform (Linux, macOS). Native Windows is not supported yet.
 - System OpenSSL 3 development files (`libssl-dev` on Debian/Ubuntu;
   `brew install openssl@3` on macOS with
-  `AHT_OPENSSL_DIR=$(brew --prefix openssl@3)`) — the default TLS
+  `AHT_OPENSSL_DIR=$(brew --prefix openssl@3)`), the default TLS
   backend links against them.
 - Only for the optional mbedTLS backend (`AHT_TLS_BACKEND=mbedtls`):
   network access plus `curl`, `tar`, `make`, and a C compiler on the
-  first build — `scripts/fetch_mbedtls.sh` downloads and compiles
+  first build, `scripts/fetch_mbedtls.sh` downloads and compiles
   mbedTLS 3.6.7 (checksum-verified) into `third_party/`.
 - Integration tests and examples additionally need `python3` (the
   fixture server; its venv installs `websockets`) and `openssl` (test
@@ -107,49 +107,55 @@ alr build
 ```
 
 The produced library is `lib/<mode>-<backend>/libaht.a` (default
-`debug-openssl`; set `BUILD_MODE=release` for the optimized build —
-the TLS backend dimension is described in `docs/tls.md`).
+`debug-openssl`; set `BUILD_MODE=release` for the optimized build.
+The TLS backend dimension is described in `docs/tls.md`).
 
 ## Run the unit tests
 
-The URL, encoding, and headers tests are pure — no server needed:
+Six tests are pure and need no server:
 
 ```sh
 alr exec -- gprbuild -P tests/tests.gpr
-./tests/bin/debug-openssl/test_url
-./tests/bin/debug-openssl/test_url_encoding
-./tests/bin/debug-openssl/test_headers
+for t in test_url test_url_encoding test_headers test_bytes_buffer test_log test_ws_frames; do
+  ./tests/bin/debug-openssl/$t
+done
 ```
 
-Integration tests (HTTP and WebSocket, plain and TLS) require the
-Python test server; the script builds everything, boots the fixtures,
-and runs the whole suite:
+The rest (HTTP and WebSocket, plain and TLS) run against Python
+fixtures. The runner builds everything, creates a venv under
+`tests/.venv`, boots the fixtures on fixed ports between 8759 and
+8799, and runs the whole suite; set `AHT_TLS_BACKEND=mbedtls` to run
+it against the other backend:
 
 ```sh
 bash tests/run_tests.sh
+AHT_TLS_BACKEND=mbedtls bash tests/run_tests.sh
 ```
+
+CI runs both backends on Linux and macOS. `CONTRIBUTING.md` describes
+the testing standard and the Windows cross build under wine.
 
 ## Examples
 
 A ladder of nine self-contained programs under `examples/src/`, ordered
 easy → hard, each demonstrating one capability of the client:
 
-1. `ex_01_get` — one-line `Client.Get`; print status + body text.
-2. `ex_02_request` — build a `Request_Type`: a POST and a HEAD.
-3. `ex_03_streaming` — stream a download two ways: a push `Sink`
+1. `ex_01_get`: one-line `Client.Get`; print status + body text.
+2. `ex_02_request`: build a `Request_Type`: a POST and a HEAD.
+3. `ex_03_streaming`: stream a download two ways: a push `Sink`
    callback, then straight to an `Ada.Streams` stream (a temp file).
-4. `ex_04_async_cancel` — `Send_Async` / `Await`, plus cancelling a
-   second request against the stall fixture — a test-server route that
+4. `ex_04_async_cancel`: `Send_Async` / `Await`, plus cancelling a
+   second request against the stall fixture, a test-server route that
    accepts the request and then never responds (`Aborted_Error`).
-5. `ex_05_upload` — stream a file body from disk with
+5. `ex_05_upload`: stream a file body from disk with
    `Sources.Stream_Source` (no hand-rolled `Read_Chunk`).
-6. `ex_06_ws_echo` — minimal WebSocket lifecycle: `Connect`, `Send_Text`,
+6. `ex_06_ws_echo`: minimal WebSocket lifecycle: `Connect`, `Send_Text`,
    `Receive`, `Close`.
-7. `ex_07_ws_callbacks` — the push API (`Set_On_Message` / `Set_On_Close`
+7. `ex_07_ws_callbacks`: the push API (`Set_On_Message` / `Set_On_Close`
    / `Set_On_Error`), funnelling receiver-task callbacks through a
    protected object.
-8. `ex_08_wss_subprotocol` — `wss://` with subprotocol negotiation.
-9. `ex_09_https` — the same one-line GET over `https://`, configuring
+8. `ex_08_wss_subprotocol`: `wss://` with subprotocol negotiation.
+9. `ex_09_https`: the same one-line GET over `https://`, configuring
    the client's `Insecure` / `CA_Path` / `CA_PEM` trust fields.
 
 Each takes an optional URL/host argument and otherwise defaults to the
@@ -176,20 +182,20 @@ bash examples/run_examples.sh
 
 One reference file per subsystem:
 
-- [`docs/url.md`](docs/url.md) — URL parsing + percent/form encoding.
-- [`docs/bytes_buffer.md`](docs/bytes_buffer.md) — `AHT.Bytes.Buffer`,
+- [`docs/url.md`](docs/url.md): URL parsing + percent/form encoding.
+- [`docs/bytes_buffer.md`](docs/bytes_buffer.md): `AHT.Bytes.Buffer`,
   the array-backed byte buffer used for bodies and payloads.
-- [`docs/log.md`](docs/log.md) — cross-cutting log facade
+- [`docs/log.md`](docs/log.md): cross-cutting log facade
   (level × subsystem filter, user-installed sink).
-- [`docs/http.md`](docs/http.md) — HTTP methods, status, headers, IO
+- [`docs/http.md`](docs/http.md): HTTP methods, status, headers, IO
   helpers, client.
-- [`docs/transport.md`](docs/transport.md) — `Transport_Type`
+- [`docs/transport.md`](docs/transport.md): `Transport_Type`
   abstraction, TCP, TLS.
-- [`docs/tls.md`](docs/tls.md) — TLS backend selection (OpenSSL /
+- [`docs/tls.md`](docs/tls.md): TLS backend selection (OpenSSL /
   mbedTLS), per-backend semantics, the OpenSSL engine design.
-- [`docs/mbedtls.md`](docs/mbedtls.md) — how mbedTLS 3.6.7 is
+- [`docs/mbedtls.md`](docs/mbedtls.md): how mbedTLS 3.6.7 is
   fetched, built, and bound (the mbedtls backend).
-- [`docs/websocket.md`](docs/websocket.md) — frame codec, concurrency
+- [`docs/websocket.md`](docs/websocket.md): frame codec, concurrency
   model, client API.
 
 ## Conventions
@@ -200,8 +206,15 @@ One reference file per subsystem:
   constrain state. Prefer contracts over explanatory comments.
 - **C bindings** (OpenSSL, mbedTLS) are **generated** via
   `gcc -fdump-ada-spec` in a scratch directory and curated into
-  `src/` — never hand-written.
+  `src/`, never hand-written.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0, see [LICENSE](LICENSE). The repository is
+[REUSE](https://reuse.software) compliant; every file carries its
+SPDX header, and the binding specs derived from the OpenSSL and
+mbedTLS headers are annotated in `REUSE.toml`.

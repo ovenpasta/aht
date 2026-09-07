@@ -16,6 +16,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         tls: [openssl, mbedtls]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     env:
       AHT_TLS_BACKEND: ${{ matrix.tls }}
     steps:
@@ -59,3 +60,12 @@ jobs:
 
       - name: Run integration suite
         run: bash tests/run_tests.sh
+
+      - name: Run examples
+        run: bash examples/run_examples.sh
+
+  reuse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fsfe/reuse-action@v5
