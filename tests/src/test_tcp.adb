@@ -26,6 +26,25 @@ procedure Test_TCP is
       Failures := Failures + 1;
    end Fail;
 
+   procedure Close_Peer_Quietly (S : in out Socket_Type) is
+   begin
+      if S = No_Socket then
+         return;
+      end if;
+      begin
+         Shutdown_Socket (S, Shut_Read_Write);
+      exception
+         --  Darwin reports ENOTCONN when the peer has already closed.
+         when Socket_Error => null;
+      end;
+      begin
+         Close_Socket (S);
+      exception
+         when Socket_Error => null;
+      end;
+      S := No_Socket;
+   end Close_Peer_Quietly;
+
    task type Echo_Server is
       entry Get_Port
         (P   : out AHT.URL.Port_Number;
@@ -102,8 +121,7 @@ procedure Test_TCP is
                           (Client, Buf (Buf'First .. Last), Sent);
                      end if;
                   end;
-                  Shutdown_Socket (Client, Shut_Read_Write);
-                  Close_Socket (Client);
+                  Close_Peer_Quietly (Client);
                exception
                   when E : others =>
                      Runtime_Error := To_Unbounded_String
@@ -211,8 +229,7 @@ procedure Test_TCP is
                   begin
                      Receive_Socket (Client, Buf, Last);
                   end;
-                  Shutdown_Socket (Client, Shut_Read_Write);
-                  Close_Socket (Client);
+                  Close_Peer_Quietly (Client);
                exception
                   when E : others =>
                      Runtime_Error := To_Unbounded_String
@@ -340,12 +357,7 @@ procedure Test_TCP is
       accept Release;
 
       if Accepted then
-         begin
-            Shutdown_Socket (Client, Shut_Read_Write);
-            Close_Socket (Client);
-         exception
-            when others => null;
-         end;
+         Close_Peer_Quietly (Client);
       end if;
       if Server /= No_Socket then
          begin Close_Socket (Server); exception when others => null; end;
@@ -454,12 +466,7 @@ procedure Test_TCP is
       accept Close_Now;
 
       if Accepted then
-         begin
-            Shutdown_Socket (Client, Shut_Read_Write);
-            Close_Socket (Client);
-         exception
-            when others => null;
-         end;
+         Close_Peer_Quietly (Client);
       end if;
       if Server /= No_Socket then
          begin Close_Socket (Server); exception when others => null; end;
@@ -684,10 +691,11 @@ procedure Test_TCP is
    is
       Addr : Sock_Addr_Type;
    begin
-      --  Bind-without-listen: the port is reserved to Holder for its
-      --  lifetime, and TCP connects to it are refused by the kernel
-      --  (no LISTEN queue). Gives a deterministic "bad" address.
-      Create_Socket (Holder, Family_Inet, Socket_Stream);
+      --  Hold the number in the UDP namespace while leaving its TCP
+      --  namespace closed.  A bound-but-not-listening TCP socket is not a
+      --  portable refusal fixture: Darwin lets connect stall until its
+      --  kernel timeout instead of rejecting it immediately.
+      Create_Socket (Holder, Family_Inet, Socket_Datagram);
       Addr.Addr := Inet_Addr ("127.0.0.1");
       Addr.Port := 0;
       Bind_Socket (Holder, Addr);
@@ -731,8 +739,8 @@ begin
    end;
 
    --  Case 3: deterministic multi-address fallback. The first
-   --  candidate is a bound-but-not-listening port (refused by the
-   --  kernel), the second is the echo server. Exercises iteration +
+   --  candidate is a closed TCP port (held only in the UDP namespace),
+   --  the second is the echo server. Exercises iteration +
    --  per-attempt socket cleanup.
    declare
       Srv         : Echo_Server;
@@ -795,9 +803,10 @@ begin
       end if;
    end;
 
-   --  Case 4: all-candidates-fail. Two bound-but-not-listening ports
-   --  so every attempt is refused. Verifies Connect_Candidates raises
-   --  Transport_Error with the LAST address's error in the message:
+   --  Case 4: all-candidates-fail. Two closed TCP ports are held in the
+   --  UDP namespace so every attempt is refused. Verifies
+   --  Connect_Candidates raises Transport_Error with the LAST address's
+   --  error in the message:
    --  the "last error wins" contract.
    declare
       Refuser_A, Refuser_B : Socket_Type := No_Socket;

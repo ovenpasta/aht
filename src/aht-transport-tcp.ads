@@ -76,7 +76,8 @@ package AHT.Transport.TCP is
    --  Bound one operation by an absolute instant; the compound
    --  Set_*_Deadline state is ignored for that call. Otherwise
    --  identical, including Abort_Pending and the write-poison rules.
-   --  Used by the TLS backends.
+   --  Time_Last means unbounded, as it does for the TLS handshake
+   --  deadline that uses these overloads. Used by the TLS backends.
 
    overriding procedure Close (Self : in out TCP_Transport);
    --  Closes the socket and both selectors and clears the deadlines.

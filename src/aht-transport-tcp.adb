@@ -518,7 +518,10 @@ package body AHT.Transport.TCP is
       Data     : AHT.Bytes.Byte_Array;
       Deadline : Ada.Real_Time.Time) is
    begin
-      Write_Bounded (Self, Data, True, Deadline);
+      --  TLS represents its documented unbounded handshake deadline as
+      --  Time_Last.  Do not turn that sentinel into a gigantic finite
+      --  timeval: Darwin rejects it with EINVAL instead of waiting.
+      Write_Bounded (Self, Data, Deadline /= Time_Last, Deadline);
    end Write;
 
    --  Common Read implementation, deadline-parameterized like
@@ -661,7 +664,8 @@ package body AHT.Transport.TCP is
       Last     : out Natural;
       Deadline : Ada.Real_Time.Time) is
    begin
-      Read_Bounded (Self, Data, Last, True, Deadline);
+      Read_Bounded
+        (Self, Data, Last, Deadline /= Time_Last, Deadline);
    end Read;
 
    overriding procedure Close (Self : in out TCP_Transport) is
