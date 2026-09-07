@@ -22,26 +22,20 @@ with AHT.Transport.TCP;
 with AHT.Guarded_New;
 
 --  OpenSSL backend: a memory-BIO engine. The SSL object owns two
---  BIO_s_mem BIOs (RBIO for inbound ciphertext, WBIO for outbound);
---  OpenSSL never touches the socket. Plain Ada code moves bytes
---  between the BIOs and the inner TCP transport, so network
---  exceptions (Timeout/Aborted/Transport) propagate natively and no
---  Ada exception ever crosses a C frame.
+--  BIO_s_mem BIOs (RBIO inbound ciphertext, WBIO outbound); OpenSSL
+--  never touches the socket. Ada moves bytes between the BIOs and
+--  the inner TCP transport, so network exceptions propagate natively
+--  and no Ada exception crosses a C frame.
 --
---  Concurrency (see docs/tls.md for the full design): OpenSSL 3 does
---  NOT permit two tasks inside SSL_read/SSL_write on one SSL* (TLS 1.3
---  KeyUpdate/tickets mutate shared state), so every SSL_* call runs
---  under SSL_Lock and is non-blocking (memory BIOs); all waiting
---  happens outside the lock. Wire output is serialized by Drain_Lock
---  (strict order: Drain_Lock outer, SSL_Lock inner). The Coordinator
---  arbitrates which task performs the single TCP.Read (feeder claim)
---  and parks the other on a single-waiter latch — sound because the
---  transport contract allows at most one reader + one writer task.
---
---  Every blocking step (lock seize, latch wait, TCP read/write) is
---  bounded by the deadline of the OPERATION performing it (the
---  absolute mirrors in the outer record) and re-checks the abort
---  epoch afterwards.
+--  Concurrency (docs/tls.md): OpenSSL 3 forbids two tasks inside
+--  SSL_read/SSL_write on one SSL*, so every SSL_* call runs under
+--  SSL_Lock and is non-blocking; all waiting happens outside the
+--  lock. Wire output is serialized by Drain_Lock (Drain_Lock outer,
+--  SSL_Lock inner). The Coordinator grants one task the single
+--  TCP.Read (the feeder claim) and parks the other on a single-waiter
+--  latch; the transport contract allows one reader and one writer.
+--  Every blocking step is bounded by the deadline of the operation
+--  performing it and re-checks the abort epoch afterwards.
 package body AHT.Transport.TLS is
 
    use type System.Address;
@@ -59,7 +53,7 @@ package body AHT.Transport.TLS is
 
    type TCP_Access is access AHT.Transport.TCP.TCP_Transport;
 
-   --  Locks, coordinator and abort epoch live in AHT.Openssl.Sync so
+   --  Locks, coordinator and abort epoch live in AHT.TLS_Sync so
    --  their claim/arm/wake semantics are unit-testable on their own.
    subtype Epoch_Type is AHT.TLS_Sync.Epoch_Type;
    subtype Lock_Type is AHT.TLS_Sync.Lock_Type;
@@ -87,14 +81,10 @@ package body AHT.Transport.TLS is
 
       Engine_Dead : Boolean := False;
       Death_Reason : AHT.Bytes.Buffer;
-      --  Guarded by SSL_Lock. Set (before the lock is released) when
-      --  SSL_get_error reports SSL_ERROR_SSL/SSL_ERROR_SYSCALL or a
-      --  drain fails — OpenSSL forbids further I/O on the SSL after a
-      --  fatal result, so every engine call checks this first. The
-      --  reason is kept so the operations rejected AFTERWARDS can
-      --  report what actually killed the session rather than a bare
-      --  "engine is dead" (the task that hit the original failure is
-      --  often not the one the caller sees fail).
+      --  Guarded by SSL_Lock. Set, before the lock is released, on
+      --  SSL_ERROR_SSL/SSL_ERROR_SYSCALL or a failed drain; OpenSSL
+      --  forbids further I/O after a fatal result, so every engine
+      --  call checks it first. The reason names the original failure.
    end record;
 
    procedure Free_TCP is new Ada.Unchecked_Deallocation
@@ -102,9 +92,7 @@ package body AHT.Transport.TLS is
    procedure Free_State is new Ada.Unchecked_Deallocation
      (Backend_State, Backend_State_Access);
 
-   --  See AHT.Guarded_New: each instantiation's Gate is
-   --  elaborated once, at library level, and closes the
-   --  Allocate_Any_Controlled abort window around its one `new`.
+   --  Library-level gates; see AHT.Guarded_New for the abort window.
    package New_State is new AHT.Guarded_New
      (Backend_State, Backend_State_Access);
    package New_TCP is new AHT.Guarded_New
@@ -160,8 +148,7 @@ package body AHT.Transport.TLS is
 
    --  Poison the session after a fatal error: latch Fatal (waking a
    --  parked waiter), poison the inner TCP (waking selector waiters
-   --  with EOF/EPIPE) — the openssl analogue of the mbedtls backend's
-   --  Drop_Connection. Engine_Dead is latched separately, under
+   --  with EOF/EPIPE). Engine_Dead is latched separately, under
    --  SSL_Lock, by the code that discovered the fatality.
    procedure Drop_Connection (St : Backend_State_Access) is
    begin
@@ -193,7 +180,7 @@ package body AHT.Transport.TLS is
       and then not Self.State.Coord.Fatal);
 
    ---------------------------------------------------------------
-   --  Phase B — drain WBIO ciphertext to the wire
+   --  Phase B: drain WBIO ciphertext to the wire
    ---------------------------------------------------------------
 
    --  Drain everything pending in WBIO to the TCP transport, in wire
@@ -247,15 +234,15 @@ package body AHT.Transport.TLS is
    end Drain_Output;
 
    ---------------------------------------------------------------
-   --  Feed — get more inbound ciphertext into RBIO (or wait for it)
+   --  Feed: get more inbound ciphertext into RBIO (or wait for it)
    ---------------------------------------------------------------
 
    --  Called when an engine call returned WANT_READ. Claims the feeder
-   --  role and performs the single TCP.Read itself, or — when the
-   --  other direction's task owns the claim — parks on the latch until
+   --  role and performs the single TCP.Read itself, or, when the other
+   --  direction's task owns the claim, parks on the latch until
    --  something changes. Either way the caller re-checks abort/EOF/
    --  Fatal and retries its engine call. The feeder claim is released
-   --  on EVERY exit path.
+   --  on every exit path.
    procedure Feed
      (St     : Backend_State_Access;
       DL     : Ada.Real_Time.Time;
@@ -267,7 +254,7 @@ package body AHT.Transport.TLS is
       St.Coord.Try_Claim_Or_Arm (Granted);
 
       if not Granted then
-         --  The other task is feeding (or EOF/Fatal already latched —
+         --  The other task is feeding (or EOF/Fatal already latched;
          --  Try_Claim_Or_Arm pre-fires the latch then). Park bounded.
          select
             St.Coord.Await_Wakeup;
@@ -325,18 +312,17 @@ package body AHT.Transport.TLS is
    end Feed;
 
    ---------------------------------------------------------------
-   --  Phase A — one engine call under SSL_Lock
+   --  Phase A: one engine call under SSL_Lock
    ---------------------------------------------------------------
 
    type Engine_Op is (Op_Read, Op_Write);
 
-   --  Runs exactly one SSL_read/SSL_write under SSL_Lock with the
-   --  documented discipline: Engine_Dead check, ERR_clear_error, the
-   --  call, SSL_get_error immediately, error-queue capture on a fatal
-   --  result (latching Engine_Dead before the lock is released), and
-   --  a WBIO-pending sample. On a fatal result the session is poisoned
-   --  and TLS_Error raised; otherwise Err_Class tells the caller what
-   --  to do next.
+   --  One SSL_read/SSL_write under SSL_Lock: Engine_Dead check,
+   --  ERR_clear_error, the call, SSL_get_error at once, error-queue
+   --  capture on a fatal result (Engine_Dead latched before the lock
+   --  is released), and a WBIO-pending sample. A fatal result poisons
+   --  the session and raises TLS_Error; otherwise Err_Class tells the
+   --  caller what to do next.
    procedure Engine_Call
      (St        : Backend_State_Access;
       Op        : Engine_Op;
@@ -489,50 +475,32 @@ package body AHT.Transport.TLS is
    begin
       if Self.Used or else Self.Connected then
          --  Single-use after success (see the spec): a completed
-         --  session — live or poisoned — is never reconnected in
-         --  place; a WSS receiver may still be unwinding through Read.
+         --  session, live or poisoned, is never reconnected in place;
+         --  a WSS receiver may still be unwinding through Read.
          raise TLS_Error with "TLS transport already connected";
       end if;
 
-      --  Consumer-facing LibreSSL/1.1 guard (the 3.0-only version
-      --  symbols also make the LINK fail, but a runtime check reports
-      --  it as a proper TLS_Error instead of a linker mystery).
+      --  The 3.0-only version symbols already fail the link; this
+      --  reports it as a TLS_Error.
       if AHT.Openssl.Version.Major < 3 then
          raise TLS_Error
            with "TLS connect: linked library is not OpenSSL 3 ("
              & AHT.Openssl.Version.Version_String & ")";
       end if;
 
-      --  Backend_State carries two Lock_Type and a Coordinator_Type,
-      --  both protected types with entries (AHT.TLS_Sync), so a
-      --  stranded, zero-filled one is not inert: a zeroed
-      --  CRITICAL_SECTION reads as contended -- LockCount 0, where an
-      --  initialized and unheld one is -1 -- and finalizing it hangs.
-      --  Measured for this shape of object, on this target, by the
-      --  Session_Type case New_State's construct mirrors (see
-      --  AHT.Websocket.Client.Lifecycle_Controller.Create_Session)
-      --  and by a standalone zero-fill probe; whether an abort
-      --  actually lands inside this particular `new` in a live run
-      --  has not been separately observed. See AHT.Guarded_New for
-      --  why the bracket is a protected action taking Into by access
-      --  rather than a plain `new` or an `out` parameter.
+      --  Through AHT.Guarded_New, which states the abort window this
+      --  closes. Backend_State holds protected objects with entries,
+      --  and a stranded zero-filled one hangs finalization on Windows
+      --  (a zeroed CRITICAL_SECTION reads as contended).
       New_State.Gate.Allocate (Self.State'Access);
 
-      --  Everything from here on runs inside a cleanup block: ANY
-      --  exception — the expected Fail/TLS paths, but equally an
-      --  allocation failure, a filesystem error from the CA-kind
-      --  classification, or Storage_Error — must release the state so
-      --  the object stays retryable. Release_State is idempotent
-      --  (it nulls Self.State), so the inner Fail paths that already
-      --  released are unaffected.
+      --  Cleanup block: any exception from here on (Fail, allocation
+      --  failure, a filesystem error classifying CA_Path,
+      --  Storage_Error) releases the state so the object stays
+      --  retryable. Release_State is idempotent.
       begin
 
-      --  Refused before anything is dialled, and refused even under
-      --  Insecure. A caller who supplied two sets of trust anchors
-      --  holds a mistaken belief about which one is in force;
-      --  honouring one silently leaves that belief intact. Under
-      --  Insecure neither is used, which makes accepting the
-      --  contradiction more misleading rather than less.
+      --  Raises before dialling, even under Insecure; no precedence.
       if CA_Path /= "" and then CA_PEM /= "" then
          raise TLS_Error
            with "TLS connect: CA_Path and CA_PEM are mutually "
@@ -541,17 +509,9 @@ package body AHT.Transport.TLS is
       end if;
 
       --  Validated here, before anything is dialled and regardless of
-      --  Insecure.
-      --
-      --  Regardless of Insecure, because the two backends disagreed
-      --  otherwise: OpenSSL skips CA loading entirely when
-      --  verification is off, mbedTLS parsed it anyway, so the same
-      --  malformed bundle was accepted by one and rejected by the
-      --  other. Checking the shape unconditionally makes supplying
-      --  broken trust material an error the caller hears about even
-      --  when this particular dial would not have used it -- which is
-      --  the fail-closed reading, and the one that does not depend on
-      --  which backend is linked.
+      --  Insecure, so a malformed bundle is an error under both
+      --  backends: OpenSSL skips CA loading when verification is off,
+      --  mbedTLS parses it anyway.
       if CA_PEM /= "" then
          declare
             Problem : constant String := AHT.PEM.Bundle_Problem (CA_PEM);
@@ -565,19 +525,9 @@ package body AHT.Transport.TLS is
          end;
       end if;
 
-      --  1. Plain TCP first (fresh per attempt — failed Connect frees
-      --     it and the object stays retryable).
-      --
-      --  AHT.Transport.TCP.TCP_Transport is limited-controlled too,
-      --  so it is stranded by the same window, but the consequence
-      --  differs: it holds no CRITICAL_SECTION, and
-      --  Transport_Type.Finalize (src/aht-transport.adb) dispatches
-      --  on the object's tag before touching anything else -- on
-      --  zero-filled memory that tag is null, so the dispatch faults
-      --  and Finalize's own blanket handler swallows it. A stranded
-      --  one is a leak and a swallowed fault, not a hang -- reasoned
-      --  from that code, not measured -- and closing the same window
-      --  here costs nothing.
+      --  1. Plain TCP first (fresh per attempt; a failed Connect frees
+      --     it and the object stays retryable). Through AHT.Guarded_New
+      --     for the same abort window as State above.
       New_TCP.Gate.Allocate (Self.State.TCP'Access);
       AHT.Transport.TCP.Connect
         (Self.State.TCP.all, Host, Port,
@@ -611,8 +561,8 @@ package body AHT.Transport.TLS is
          OSSL.CTX_Set_Verify
            (Self.State.Ctx, OSSL.VERIFY_PEER, System.Null_Address);
          if CA_Path = "" and then CA_PEM = "" then
-            --  Platform trust store (deliberate difference from the
-            --  mbedtls backend, which configures no default trust).
+            --  Platform trust store (the mbedtls backend configures
+            --  no default trust).
             if OSSL.CTX_Set_Default_Verify_Paths (Self.State.Ctx) /= 1
             then
                Fail ("TLS connect (set_default_verify_paths)");
@@ -725,7 +675,7 @@ package body AHT.Transport.TLS is
 
       --  5. Handshake pump. Single-task, so no locks: run the engine,
       --     drain WBIO to the wire, feed RBIO from the wire on
-      --     WANT_READ — every network step bounded by HS_Bound.
+      --     WANT_READ, every network step bounded by HS_Bound.
       Handshake :
       loop
          AHT.Openssl.Err.Clear_Error;
@@ -859,7 +809,7 @@ package body AHT.Transport.TLS is
                Last := Data'First + Natural (Ret) - 1;
                return;
             elsif Class = OSSL.ERROR_ZERO_RETURN then
-               --  Proper close_notify — clean EOF, mirroring the TCP
+               --  Proper close_notify: clean EOF, mirroring the TCP
                --  "Last = 0" contract. (An abrupt TCP EOF surfaces as
                --  SSL_ERROR_SSL/unexpected-EOF inside Engine_Call and
                --  raises TLS_Error: truncation is never a clean EOF
@@ -869,10 +819,9 @@ package body AHT.Transport.TLS is
             elsif Class = OSSL.ERROR_WANT_READ then
                Feed (St, DL, Epoch0, "TLS read");
             else
-               --  Defensive: Engine_Call already poisons the fatal
-               --  classes, so nothing should reach here — but an
-               --  unclassifiable state means the stream's integrity is
-               --  unknown, so fail closed rather than stay usable.
+               --  Engine_Call poisons the fatal classes, so nothing
+               --  should reach here; an unclassifiable state means the
+               --  stream's integrity is unknown, so fail closed.
                Latch_Engine_Dead
                  (St, "TLS read: unexpected engine state (class"
                   & C.int'Image (Class) & ")");
@@ -928,8 +877,8 @@ package body AHT.Transport.TLS is
                   Cursor := Cursor + Natural (Ret);
                elsif Class = OSSL.ERROR_WANT_READ then
                   --  Mid-write post-handshake message: get input, by
-                  --  self-feeding or waiting on the reader — bounded
-                  --  by OUR (write) deadline either way.
+                  --  self-feeding or waiting on the reader, bounded
+                  --  by this operation's (write) deadline either way.
                   Feed (St, DL, Epoch0, "TLS write");
                   if St.Coord.EOF then
                      raise TLS_Error
@@ -975,11 +924,10 @@ package body AHT.Transport.TLS is
       end if;
       Self.State := null;
 
-      --  Block 1 (best-effort): SSL_shutdown + final drain — skipped
-      --  entirely for a session that died fatally (OpenSSL forbids
-      --  shutdown after SSL_ERROR_SSL/SYSCALL, and another record on
-      --  a desynchronised stream helps nobody). Close is documented
-      --  single-threaded, so plain reads of Engine_Dead are fine.
+      --  Block 1 (best-effort): SSL_shutdown + final drain, skipped for
+      --  a session that died fatally (OpenSSL forbids shutdown after
+      --  SSL_ERROR_SSL/SYSCALL). Close is single-threaded, so plain
+      --  reads of Engine_Dead are fine.
       begin
          if Self.Connected
            and then not St.Coord.Fatal
@@ -1025,7 +973,7 @@ package body AHT.Transport.TLS is
       end;
 
       --  Block 3 (unconditional): every free runs even if the blocks
-      --  above failed — Finalize only swallows exceptions after Close
+      --  above failed; Finalize only swallows exceptions after Close
       --  has unwound, so Close itself must never skip cleanup.
       if St.SSL /= System.Null_Address then
          OSSL.Free (St.SSL);          --  frees both transferred BIOs
@@ -1049,7 +997,7 @@ package body AHT.Transport.TLS is
       use Ada.Real_Time;
    begin
       --  Mirror only: the engine bounds every read-side wait by this
-      --  absolute (computed once here — the budget is measured from
+      --  absolute (computed once here; the budget is measured from
       --  this call). The TCP compound deadlines are never consulted:
       --  all engine TCP calls pass their bound explicitly.
       if Deadline = Duration'Last then

@@ -36,17 +36,11 @@ package body AHT.Websocket.Frames is
      (Natural (Shift_Left (Unsigned_16 (B (First)), 8)
                  or Unsigned_16 (B (First + 1))));
 
-   --  RFC 6455 §5.5.1: a Close frame's payload is either empty or
-   --  carries a 2-byte status code (optionally followed by a
-   --  UTF-8 reason). A 1-byte payload is malformed; a present
-   --  code must be in range.
-   --
-   --  Inbound (Decode) accepts any code in `Any_Close_Code`
-   --  (1000..1015 ∪ 3000..4999, including the synthetic 1005 /
-   --  1006 / 1015 that a misbehaving peer might wrongly send and
-   --  we want to flag explicitly rather than silently coerce).
-   --  Outbound (Encode) requires `Valid_Close_Code` — the
-   --  synthetic codes must never leave us.
+   --  RFC 6455 sec. 5.5.1: a Close payload is empty or a 2-byte code
+   --  optionally followed by a UTF-8 reason. Decode accepts any
+   --  Any_Close_Code, including the synthetic 1005 / 1006 / 1015, so
+   --  a peer sending one is flagged by the Client; Encode requires
+   --  Valid_Close_Code, so they never leave this endpoint.
    procedure Validate_Close_Encode
      (Payload : AHT.Bytes.Byte_Array)
    is
@@ -119,8 +113,8 @@ package body AHT.Websocket.Frames is
       end if;
 
       --  Bytes after the 2-byte code are the reason text, which MUST
-      --  be valid UTF-8 (RFC 6455 §8.1). One block-copy slice of the
-      --  reason, validated through the Byte_Array scanner.
+      --  be valid UTF-8 (RFC 6455 sec. 8.1). One block-copy slice of
+      --  the reason, validated through the Byte_Array scanner.
       if Len > 2 then
          if not AHT.Websocket.UTF8.Is_Valid
                   (Payload.To_Array (Payload.First_Index + 2,
@@ -154,9 +148,9 @@ package body AHT.Websocket.Frames is
 
       B0, B1 : Unsigned_8 := 0;
    begin
-      --  Control frames per RFC 6455 §5.5: must not fragment
-      --  (FIN=1) and payload <= 125 bytes. Outbound side reject
-      --  so we never hand the wire a malformed frame.
+      --  Control frames per RFC 6455 sec. 5.5: FIN = 1 and payload
+      --  <= 125 bytes. Rejected here so a malformed frame never
+      --  reaches the wire.
       if Is_Control (Hdr.Op) then
          if not Hdr.FIN then
             raise Protocol_Error
@@ -175,8 +169,9 @@ package body AHT.Websocket.Frames is
       --  Extended return so GNAT builds the frame directly in the
       --  caller's (heap-backed secondary-stack) return object. A named
       --  local Result : Byte_Array (1 .. Total) would instead be a
-      --  dynamically-sized *primary*-stack object, overflowing the
-      --  fixed thread stack on multi-MB frames (RFC 6455 §9 8M/16M).
+      --  dynamically sized primary-stack object, which overflows the
+      --  fixed thread stack on multi-MB frames (RFC 6455 sec. 9,
+      --  8M/16M).
       return Result : AHT.Bytes.Byte_Array (1 .. Total) do
          --  Byte 0: FIN | RSV1 | RSV2 | RSV3 | Opcode(4)
          if Hdr.FIN  then B0 := B0 or 16#80#; end if;
@@ -218,8 +213,8 @@ package body AHT.Websocket.Frames is
             Idx := Idx + 8;
          end if;
 
-         --  Mask key (4 bytes) + payload (XOR-masked per RFC §5.3 if
-         --  Hdr.Masked, raw otherwise).
+         --  Mask key (4 bytes) + payload (XOR-masked per RFC 6455
+         --  sec. 5.3 if Hdr.Masked, raw otherwise).
          if Hdr.Masked then
             for I in 0 .. 3 loop
                Result (Idx + I) := Hdr.Mask_Key (Hdr.Mask_Key'First + I);
@@ -274,9 +269,9 @@ package body AHT.Websocket.Frames is
       Hdr.RSV2 := (B0 and 16#20#) /= 0;
       Hdr.RSV3 := (B0 and 16#10#) /= 0;
 
-      --  RFC 6455 §5.2: RSV bits MUST be 0 unless an extension
-      --  negotiated their use. v1 doesn't negotiate extensions, so
-      --  any RSV bit set is a protocol error.
+      --  RFC 6455 sec. 5.2: RSV bits MUST be 0 unless an extension
+      --  negotiated their use. No extension is negotiated, so any RSV
+      --  bit set is a protocol error.
       if Hdr.RSV1 or else Hdr.RSV2 or else Hdr.RSV3 then
          raise Protocol_Error
            with "Frames.Decode: RSV bit set without negotiated extension";
@@ -284,9 +279,9 @@ package body AHT.Websocket.Frames is
 
       Hdr.Op := Op_From_Wire (B0 and 16#0F#);
 
-      --  Opcode sequencing (RFC 6455 §5.4), checked here -- before the
-      --  length is even parsed -- so that it takes precedence over the
-      --  size policy further down. A data frame arriving where a
+      --  Opcode sequencing (RFC 6455 sec. 5.4), checked before the
+      --  length is parsed so that it takes precedence over the size
+      --  policy further down. A data frame arriving where a
       --  Continuation was required is a protocol violation; reporting
       --  it as "too big" because the remaining allowance happened to
       --  be smaller would report the wrong close code and hide the
@@ -361,14 +356,12 @@ package body AHT.Websocket.Frames is
             if V > Unsigned_64 (Natural'Last) then
                --  Unrepresentable either way. With a finite ceiling in
                --  force this is a size-policy failure (1009); with none
-               --  it stays what it has always been (1002).
+               --  it is a protocol error (1002).
                --
-               --  The representability test has to come first. Checking
-               --  the allowance before it -- the obvious ordering --
-               --  would report Message_Too_Big even at the default
-               --  allowance, since a length above Natural'Last is
-               --  greater than Natural'Last too, quietly changing the
-               --  default behaviour.
+               --  The representability test comes first: a length
+               --  above Natural'Last is also above the default
+               --  allowance, so checking the allowance first would
+               --  report Message_Too_Big with no ceiling configured.
                if not Is_Control (Hdr.Op)
                  and then Allowance < Natural'Last
                then
@@ -387,9 +380,9 @@ package body AHT.Websocket.Frames is
          Idx := Idx + 8;
       end if;
 
-      --  Control-frame structural checks (RFC §5.5): FIN must be
-      --  set and length <= 125. We check after computing Len so
-      --  the error message can reference the actual length.
+      --  Control-frame structural checks (RFC 6455 sec. 5.5): FIN
+      --  must be set and length <= 125. Checked after computing Len
+      --  so the error message can name the actual length.
       if Is_Control (Hdr.Op) then
          if not Hdr.FIN then
             raise Protocol_Error
@@ -428,10 +421,10 @@ package body AHT.Websocket.Frames is
          Idx := Idx + 4;
       end if;
 
-      --  Payload bytes. If the caller's buffer doesn't have the
-      --  full payload yet, signal incomplete (Last=0) without
-      --  consuming the partial header — re-decode on the next
-      --  call with the extended buffer.
+      --  Payload bytes. If the caller's buffer does not have the
+      --  full payload yet, signal incomplete (Last = 0) without
+      --  consuming the partial header; the next call re-decodes
+      --  from the extended buffer.
       Available := Input'Last - Idx + 1;
       if Available < Len then
          Last := 0; Payload.Clear; return;
@@ -439,8 +432,9 @@ package body AHT.Websocket.Frames is
 
       Hdr.Payload_Length := Len;
       if Hdr.Masked then
-         --  Masking is a per-byte XOR (RFC §5.3), so there is no block
-         --  move to be had here; reserve once, then unmask into place.
+         --  Masking is a per-byte XOR (RFC 6455 sec. 5.3), so there
+         --  is no block move to be had; reserve once, then unmask
+         --  into place.
          --  Inbound server frames are never masked, so this path is
          --  only the round-trip/test direction.
          Payload.Reserve (Len);

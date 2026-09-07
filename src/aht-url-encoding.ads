@@ -5,24 +5,19 @@ package AHT.URL.Encoding is
 
    pragma Preelaborate;
 
-   --  All functions in this package operate on bytes. The input `String`
-   --  is treated as an opaque sequence of octets (Character'Pos gives the
-   --  byte value). For URLs carrying non-ASCII text, the caller is
-   --  expected to pre-encode the text as UTF-8 before passing it in.
-   --
-   --  The "unreserved" set used below is exactly RFC 3986 §2.3
-   --  ("ALPHA / DIGIT / '-' / '.' / '_' / '~'"), where ALPHA and DIGIT
-   --  mean strictly ASCII letters and digits. Every other byte is
-   --  percent-encoded as "%HH" (uppercase hex). This is deliberately
-   --  stricter than Ada.Characters.Handling.Is_Alphanumeric, which would
-   --  classify accented Latin-1 letters as unreserved and emit
-   --  non-portable URLs.
+   --  Every function here operates on bytes: the input String is an
+   --  opaque octet sequence (Character'Pos is the byte value). Text
+   --  carrying non-ASCII must be UTF-8 encoded by the caller.
+   --  The unreserved set is exactly RFC 3986 2.3 (ASCII ALPHA / DIGIT
+   --  / '-' / '.' / '_' / '~'); every other byte becomes "%HH" in
+   --  uppercase hex. Ada.Characters.Handling.Is_Alphanumeric would
+   --  admit Latin-1 letters and emit non-portable URLs.
 
    function Percent_Encode (S : String) return String;
    function Percent_Decode (S : String) return String;
 
-   --  "application/x-www-form-urlencoded" variant: space → '+', and
-   --  on decode '+' → space. Everything else follows percent encoding.
+   --  "application/x-www-form-urlencoded" variant: space => '+', and
+   --  on decode '+' => space. Everything else follows percent encoding.
    function Form_Encode (S : String) return String;
    function Form_Decode (S : String) return String;
 

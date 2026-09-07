@@ -4,34 +4,15 @@
 
 /* Bounded hostname resolution.
  *
- * getaddrinfo takes no deadline and cannot be cancelled, on either
- * platform, so the only way to put a bound on it is to run it
- * somewhere the caller can stop waiting for. This resolves on a
- * detached worker and has the caller wait until either the worker
- * finishes or the deadline passes.
- *
- * Nothing here can make a stuck getaddrinfo stop. The worker that
- * outlives its caller keeps running until the platform resolver gives
- * up on its own -- bounded in practice (glibc: RES_TIMEOUT x attempts
- * x nameservers; Windows: the DNS client's own cap), which is why an
- * abandoned worker is a bounded-lifetime thread rather than a leak.
- * What this buys is that the CALLER is bounded, which is the part an
- * application can otherwise do nothing about.
- *
- * That split ownership is the whole of the difficulty. Caller and
- * worker each hold a reference to the job; the one that puts the last
- * reference down frees it. The results are written into the job and
- * copied out by the caller while it still holds the lock, so a worker
- * finishing late writes only into storage it still owns and never into
- * the caller's buffer, which by then may be gone.
- *
- * A test seam sits at the bottom of the file. It is deliberately not
- * bound by AHT.DNS: reaching it means importing a symbol with
- * _for_test in its name on purpose. It is compiled unconditionally
- * because the alternative -- a -D that only the test build sets --
- * would have to join Aht.Variant to keep object directories from
- * being shared between builds that disagree about it, and that is a
- * build dimension for a hook.
+ * getaddrinfo takes no deadline and cannot be cancelled on either
+ * platform, so the lookup runs on a detached worker and the caller
+ * waits for the worker or the deadline. An abandoned worker runs
+ * until the platform resolver gives up (glibc: RES_TIMEOUT x
+ * attempts x nameservers; Windows: the DNS client's cap). Caller and
+ * worker each hold a reference to the job; the last release frees
+ * it, and results are copied out under the job's lock, so a late
+ * worker never writes into the caller's buffer.
+ * The _for_test seam at the bottom is compiled unconditionally.
  */
 
 #include <stdlib.h>
@@ -62,11 +43,10 @@
 
 /* ---- the two thread APIs, behind one set of names ---------------- */
 /*
- * The Windows half is written to the XP API. That rules out the
- * condition variable (Vista+) and GetTickCount64 (Vista+), and it is
- * a constraint on which entry points may be named, not on which DLLs:
- * the loader resolves imports eagerly, so one Vista-only symbol from
- * KERNEL32 fails the whole image on XP.
+ * The Windows half is written to the XP API: no condition variable,
+ * no GetTickCount64 (both Vista+). The loader resolves imports
+ * eagerly, so one Vista-only symbol from KERNEL32 fails the whole
+ * image on XP.
  */
 
 #ifdef _WIN32
@@ -86,16 +66,11 @@ typedef pthread_cond_t      aht_cond;
 #  define AHT_COND_SIGNAL(c)   pthread_cond_signal(c)
 #endif
 
-/* A tick from an unspecified epoch, and the elapsed milliseconds
- * since one. Monotonic on both: a wall clock would let a step (NTP, a
- * manual change) shorten or extend a deadline that is supposed to
- * measure elapsed time.
- *
- * Elapsed since a start rather than a comparison against an absolute
- * deadline, because GetTickCount is 32 bits and wraps every 49.7
- * days. The subtraction is done in the counter's own width, which
- * stays correct across a wrap for any interval shorter than the
- * period; an absolute deadline would not. */
+/* A monotonic tick and the elapsed milliseconds since one; a wall
+ * clock would let an NTP step move the deadline. Elapsed since a
+ * start, not an absolute deadline: GetTickCount is 32 bits and wraps
+ * every 49.7 days, and subtraction in the counter's width stays
+ * correct across a wrap for any interval shorter than the period. */
 #ifdef _WIN32
 typedef DWORD aht_tick;
 
@@ -134,11 +109,9 @@ aht_elapsed_ms(aht_tick start)
 
 /* ---- presentation form ------------------------------------------- */
 /*
- * Hand-rolled rather than inet_ntop, which ws2_32 exports only from
- * Vista on. Shared with the POSIX build rather than kept behind the
- * #ifdef for two reasons: both targets then emit the same literal for
- * the same address, and the posix suite exercises it on every run,
- * which the Windows-only alternative would not be.
+ * Hand-rolled: ws2_32 exports inet_ntop only from Vista on. Shared
+ * with the POSIX build so both targets emit the same literal and the
+ * posix suite exercises it on every run.
  */
 
 static void
@@ -241,9 +214,8 @@ typedef struct {
 
 /* The seam. Fills job->addrs / count and returns AHT_DNS_OK or
  * AHT_DNS_FAILED. Everything above this line is the production path
- * whichever function is installed, which is the point: a test that
- * replaced more than the lookup itself would not be testing the
- * waiting, the deadline or the handoff. */
+ * whichever function is installed, so a test that replaces only the
+ * lookup still exercises the waiting, the deadline and the handoff. */
 typedef int (*aht_dns_fn)(aht_dns_job *job);
 
 static int aht_dns_real(aht_dns_job *job);
@@ -405,15 +377,11 @@ aht_wait_for_done(aht_dns_job *job, long timeout_ms, aht_tick start)
 }
 
 #ifdef _WIN32
-/* getaddrinfo needs Winsock started. GNAT.Sockets does this too, but
- * a resolve can be the first thing a program does, and WSAStartup is
- * reference-counted so calling it again is harmless.
- *
- * Done by hand because InitOnceExecuteOnce is Vista+. 0 -> 1 is won
- * by exactly one caller, which starts Winsock and publishes 2;
- * whoever finds 1 waits for that publish rather than racing ahead to
- * a getaddrinfo that would fail. The spin is bounded by one
- * WSAStartup and is only ever reached by concurrent first calls. */
+/* getaddrinfo needs Winsock started, and a resolve can be the first
+ * thing a program does; WSAStartup is reference-counted. By hand
+ * because InitOnceExecuteOnce is Vista+: 0 -> 1 is won by one
+ * caller, which starts Winsock and publishes 2; whoever finds 1
+ * waits for that publish. The spin is bounded by one WSAStartup. */
 static volatile LONG aht_wsa_once = 0;
 
 static void
@@ -537,18 +505,11 @@ aht_dns_resolve(const char *host, const char *svc, long timeout_ms,
 
 /* ---- test seam --------------------------------------------------- *
  *
- * Not bound by AHT.DNS. See the note at the top of the file.
- *
- * The fake sleeps and then answers with canned literals. Sleeping is
- * what makes the timeout path deterministic: no nameserver, no
- * resolv.conf, no network, and identical behaviour under wine.
- *
- * aht_dns_fake_completions_for_test is the part that matters most. A
- * caller returning at its deadline is equally consistent with "the
- * worker was abandoned correctly" and "no worker ever ran", so the
- * fake counts its own completions AFTER waking, letting a test wait
- * for the abandoned worker and observe that it finished late rather
- * than assume it. */
+ * Not bound by AHT.DNS. The fake sleeps, then answers with canned
+ * literals, so the timeout path is deterministic without a network.
+ * aht_dns_fake_completions_for_test counts completions after the
+ * wake, so a test can observe that an abandoned worker finished late
+ * rather than assume it. */
 
 static int aht_fake_sleep_ms = 0;
 static int aht_fake_addrs    = 1;
@@ -576,7 +537,7 @@ aht_dns_fake(aht_dns_job *job)
     job->count = aht_fake_addrs > AHT_DNS_MAX_ADDRS
                ? AHT_DNS_MAX_ADDRS : aht_fake_addrs;
     for (i = 0; i < job->count; i++) {
-        /* 127.0.0.1, 127.0.0.2, ... — distinct so a test can tell
+        /* 127.0.0.1, 127.0.0.2, ...: distinct so a test can tell
          * ordering and count apart from a single canned answer. */
         snprintf(job->addrs[i], AHT_DNS_ADDRSTRLEN, "127.0.0.%d", i + 1);
     }
@@ -619,13 +580,10 @@ aht_dns_fake_completions_for_test(void)
 }
 
 /* Format addr (4 or 16 bytes in network order, per family 4 or 6)
- * into out. Returns 1 on success, 0 on a bad argument.
- *
- * Reached directly because the interesting inputs are the ones a
- * resolver will not hand back on demand: the longest-zero-run rule,
- * its leftmost tie-break, a run at either end, and the v4-mapped
- * shape. Driving this only through a lookup would settle whichever
- * one localhost happens to be. */
+ * into out. Returns 1 on success, 0 on a bad argument. Reachable
+ * directly so the tests cover the longest-zero-run rule, its leftmost
+ * tie-break, a run at either end and the v4-mapped shape, which a
+ * lookup of localhost would not. */
 int
 aht_dns_format_for_test(int family, const unsigned char *addr,
                         char *out, int cap)

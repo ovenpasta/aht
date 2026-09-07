@@ -64,14 +64,11 @@ package body AHT.Log is
 
    end Config;
 
-   --  Synchronized_Sink machinery --------------------------------------
-   --
-   --  A single module-level Inner pointer (managed by Sync_Holder) plus
-   --  a binary-mutex protected object (Sync_Mutex) used as a serializer.
-   --  The trampoline reads Inner without holding the mutex, then takes
-   --  the mutex only while calling Inner.all — Inner may block on I/O,
-   --  and a blocking call inside a protected action would be a bounded
-   --  error.
+   --  Synchronized_Sink machinery: a module-level Inner pointer
+   --  (Sync_Holder) plus a binary mutex (Sync_Mutex). The trampoline
+   --  reads Inner without the mutex and takes it only around the call
+   --  to Inner.all; Inner may block on I/O, and a blocking call inside
+   --  a protected action would be a bounded error.
 
    protected Sync_Holder is
       procedure Install
@@ -80,10 +77,10 @@ package body AHT.Log is
       --  Single-step check-and-set so two tasks racing in
       --  Synchronized_Sink cannot both pass the "nothing wrapped yet"
       --  gate and then both install different inners.
-      --  * Cb = null       → clear Inner,        Rejected := False.
-      --  * Inner = null    → Inner := Cb,        Rejected := False.
-      --  * Inner = Cb      → no-op,              Rejected := False.
-      --  * otherwise       → Inner unchanged,    Rejected := True.
+      --  * Cb = null       => clear Inner,        Rejected := False.
+      --  * Inner = null    => Inner := Cb,        Rejected := False.
+      --  * Inner = Cb      => no-op,              Rejected := False.
+      --  * otherwise       => Inner unchanged,    Rejected := True.
       function  Get return Sink_Callback;
    private
       Inner : Sink_Callback := null;

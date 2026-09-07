@@ -122,7 +122,7 @@ package body AHT.Bytes is
 
    --  Byte_Array and String share an 8-bit representation, so a String
    --  result is filled by a single block move through a Byte_Array view
-   --  overlaid on its storage — no per-character loop.
+   --  overlaid on its storage, no per-character loop.
    function To_String (Self : Buffer) return String is
    begin
       return Result : String (1 .. Self.Len) do
@@ -259,7 +259,7 @@ package body AHT.Bytes is
 
    --  In-place String fill: reuse/grow Self's own array and block-move
    --  the String straight in through a Byte_Array overlay. No temporary
-   --  Buffer, no Adjust — one allocation/copy, not the two that
+   --  Buffer, no Adjust, one allocation/copy, not the two that
    --  `Self := To_Buffer (S)` would incur.
    procedure Set (Self : in out Buffer; S : String) is
    begin
@@ -294,7 +294,7 @@ package body AHT.Bytes is
    --  Extended returns so a large result is built in the caller's
    --  heap-backed secondary-stack return slot, not as a dynamically-sized
    --  primary-stack local that overflows the thread stack on multi-MB
-   --  payloads (RFC 6455 §9).
+   --  payloads (RFC 6455 section 9).
    function From_String (S : String) return Byte_Array is
    begin
       return Result : Byte_Array (1 .. S'Length) do

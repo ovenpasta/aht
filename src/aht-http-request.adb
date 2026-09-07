@@ -48,7 +48,7 @@ package body AHT.HTTP.Request is
       return Result;
    end Parse_Byte_Count;
 
-   --  Lowercase hex, no "16#...#", no leading zeros — RFC 7230 §4.1
+   --  Lowercase hex, no "16#...#", no leading zeros, RFC 7230 sec. 4.1
    --  chunk-size form.
    function To_Hex (N : Natural) return String is
       Hex : constant String := "0123456789abcdef";
@@ -70,7 +70,7 @@ package body AHT.HTTP.Request is
    --  Head section shared by Write and Write_Streaming: request line +
    --  caller headers (stored lowercase, insertion order) + an optional
    --  synthesised framing header + the blank-line terminator. Universal
-   --  anti-smuggling validation (RFC 7230 §3.3.3): caller Transfer-
+   --  anti-smuggling validation (RFC 7230 sec. 3.3.3): caller Transfer-
    --  Encoding is rejected (the chunked encoder owns it) and a duplicate
    --  Content-Length is rejected. Returns the head; writes nothing, so a
    --  validation failure leaves the wire untouched. Extra_Name = "" adds

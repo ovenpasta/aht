@@ -3,39 +3,16 @@
 
 --  Abort-deferred allocation gate for a single `new`.
 --
---  GNAT attaches a heap object to its access type's collection BEFORE
---  the object is initialized, from inside the runtime's global task
---  lock (`Allocate_Any_Controlled`, steps 2 to 4 of `s-stposu.adb`),
---  and releasing that lock is an abort completion point
---  (`Task_Lock`/`Task_Unlock`, `s-tasini.adb`). An abort landing
---  anywhere inside a `new` -- the allocator call included -- is
---  therefore delivered with the object attached, wholly
---  uninitialized, and unreachable: the allocator never returned, so
---  no pointer to the object exists and no `Free` can be aimed at it.
---  It survives to library finalization, which finalizes it as though
---  it were real.
---
---  A protected action is abort-deferred for its whole duration, so
---  performing the allocation inside one closes the window: either
---  nothing was allocated, or Into holds a fully-initialized object.
---  Into is an access parameter, never `out` -- an `out` parameter's
---  copy-back happens AFTER the protected action ends, which is
---  exactly where the abort lands, and would leave a complete object
---  that the aborted caller never receives a pointer to.
---
---  Generic over the object type and its access type so any caller
---  facing this hazard can instantiate it rather than hand-rolling the
---  protected wrapper, including one whose object type is not visible
---  outside its own body (as with the TLS backends' Backend_State,
---  Taft-amended and completed differently by each). A private child
---  of AHT because nothing about this utility is meant for consumers
---  of the library.
---
---  `AHT.Websocket.Client.Lifecycle_Controller.Create_Session` closes
---  this same window for a session without instantiating this. Its
---  allocation is discriminated and sets a field, neither of which the
---  one bare `new` below can express, and the controller it sits on is
---  already a protected object.
+--  GNAT attaches a heap object to its access type's collection before
+--  initializing it, inside the runtime's global task lock
+--  (Allocate_Any_Controlled, s-stposu.adb); releasing that lock is an
+--  abort completion point (s-tasini.adb). An abort inside `new` leaves
+--  an attached, uninitialized, unreachable object that library
+--  finalization treats as real. Allocating inside a protected action
+--  (abort-deferred throughout) closes the window: nothing allocated,
+--  or Into holds a fully initialized object. Into is an access
+--  parameter, not `out`: `out` copy-back happens after the action.
+--  Generic so a body can instantiate it for a type visible only there.
 private generic
    type Object is limited private;
    type Object_Access is access Object;

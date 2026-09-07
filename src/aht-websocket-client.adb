@@ -151,9 +151,8 @@ package body AHT.Websocket.Client is
    end Host_Header;
 
    --  Sec-WebSocket-Key must be a nonce selected randomly per
-   --  connection (RFC 6455 4.1). The previous implementation reset a
-   --  clock-seeded generator on every call, so two connections made
-   --  in the same tick could draw the same key.
+   --  connection (RFC 6455 sec. 4.1); the bytes come from the OS
+   --  entropy pool. See AHT.Random.
    procedure Fill_Random (B : out AHT.Bytes.Byte_Array)
      renames AHT.Random.Fill;
 
@@ -173,14 +172,14 @@ package body AHT.Websocket.Client is
    procedure Free is new Ada.Unchecked_Deallocation
      (Session_Type, Session_Access);
 
-   --  Build + send one masked frame on a transport. Caller MUST hold
-   --  the Send_Guard (Acquire / Release wrap this). The transport
-   --  Write happens *outside* the guard's own lock so a slow socket
-   --  can't block other tasks' Acquires.
+   --  Build and send one masked frame on a transport. The caller must
+   --  hold the Send_Guard. The transport Write happens outside the
+   --  guard's own lock so a slow socket cannot block other tasks'
+   --  Acquires.
    --
    --  The mask comes from the OS entropy pool rather than from state
    --  the guard has to protect, so drawing it needs no lock of its
-   --  own -- see AHT.Random for why a PRNG will not do here.
+   --  own. See AHT.Random for why a PRNG will not do here.
    procedure Send_Frame
      (Transport : in out AHT.Transport.Transport_Type'Class;
       Op        : AHT.Websocket.Opcode;
@@ -259,8 +258,6 @@ package body AHT.Websocket.Client is
          end if;
       end Try_Mark_Local_Close;
 
-      function Local_Close_Sent return Boolean is (Local_Closed);
-
    end State_PO;
 
    protected body Inbox_PO is
@@ -271,16 +268,16 @@ package body AHT.Websocket.Client is
       begin
          if Q.Is_Empty then
             --  Closed_F is the only other thing that could open
-            --  the barrier — raise so the caller observes the
+            --  the barrier; raise so the caller observes the
             --  closed connection.
             raise AHT.Websocket.Closed_Error
               with "Websocket.Client.Receive: connection closed";
          end if;
          Msg := Q.First_Element;
          Q.Delete_First;
-         --  Exact, deliberately. The counter is only ever incremented
-         --  after an insertion succeeded, so it cannot drift; clamping
-         --  here would hide an accounting bug rather than fix one.
+         --  Exact: the counter is only ever incremented after an
+         --  insertion succeeded, so it cannot drift; clamping here
+         --  would hide an accounting bug rather than fix one.
          Queued_Bytes := Queued_Bytes - Msg.Payload.Length;
       end Receive;
 
@@ -292,7 +289,7 @@ package body AHT.Websocket.Client is
          --  overflow the very comparison meant to reject it. Written
          --  this way the arithmetic stays in Natural's base type, and
          --  a message larger than the whole budget makes the
-         --  right-hand side negative — which refuses, as it should.
+         --  right-hand side negative, which refuses.
          if Closed_F
            or else Q.Length >= Capacity
            or else Queued_Bytes > Max_Bytes - Len
@@ -317,8 +314,6 @@ package body AHT.Websocket.Client is
 
       function Byte_Count return Natural is (Queued_Bytes);
 
-      function Is_Closed return Boolean is (Closed_F);
-
    end Inbox_PO;
 
    protected body Lifecycle_Controller is
@@ -330,17 +325,11 @@ package body AHT.Websocket.Client is
          L         : out Limits;
          Result    : out Admission_Result) is
       begin
-         --  Every refusal leaves the object exactly as it was. A
-         --  rejected Connect must not burn a generation number, move
-         --  the state machine, or commit a delivery mode.
-         --
-         --  Disconnected is admitted alongside Idle: a client whose
-         --  connection has been fully reclaimed is as ready to dial as
-         --  one that never has. What stays refused is Connecting (an
-         --  attempt is already in flight) and Open or Closing — a live
-         --  connection is never silently dropped to make room for a
-         --  new one; the caller closes it first, or asks for the
-         --  drain-and-redial that Reconnect will provide.
+         --  Every refusal leaves the object as it was: no generation
+         --  burnt, no state moved, no delivery mode committed. Idle
+         --  and Disconnected are admitted; Connecting, Open and
+         --  Closing are refused, so a live connection is never
+         --  dropped for a new one.
          if St not in Idle | Disconnected then
             Gen    := 0;
             L      := Pending;
@@ -428,12 +417,12 @@ package body AHT.Websocket.Client is
          --  Next_Gen is what tells them apart.
          if St = Connecting and then Next_Gen = Gen then
             --  Unpublished by definition, so the client goes back to
-            --  where admission found it and stays retryable. Which
-            --  state that was is not a matter of memory: admission
-            --  only accepts Idle and Disconnected, and those are
-            --  exactly "nothing has ever connected" and "something
-            --  has". Collapsing both to Idle would erase the fact
-            --  that this client has a past — which is what a later
+            --  where admission found it and stays retryable.
+            --  Admission only accepts Idle and Disconnected, which
+            --  are exactly "nothing has ever connected" and
+            --  "something has", so the state is recomputed rather
+            --  than remembered. Collapsing both to Idle would erase
+            --  the fact that this client has a past, which a later
             --  Reconnect needs in order to know it has parameters
             --  worth replaying.
             St   := (if Published_Gen > 0 then Disconnected else Idle);
@@ -460,14 +449,10 @@ package body AHT.Websocket.Client is
          --  Nothing below can fail.
          Has_Saved     := True;
          Cur           := S;
-         --  Counted, not copied from the session's reserved number.
-         --  Those two are different things: reservations are handed
-         --  out per ATTEMPT and have gaps where attempts failed,
-         --  which is exactly what makes them useful for identifying
-         --  an attempt's cleanup. Exposing them would mean a client
-         --  whose first dial was refused reports "generation 2" for
-         --  its first connection, which is not what the number is
-         --  for.
+         --  Counted, not copied from the reserved number, which has
+         --  gaps where attempts failed; a client whose first dial was
+         --  refused would otherwise report generation 2 for its first
+         --  connection.
          Published_Gen := Published_Gen + 1;
          Admitting     := True;
          Forced        := False;
@@ -508,9 +493,9 @@ package body AHT.Websocket.Client is
       begin
          if Admitting and then Cur /= null then
             --  Winner. Stopping admission and taking the borrow in
-            --  the SAME protected action is what pins the session:
-            --  the receiver's Wait_No_Borrowers cannot pass while we
-            --  hold it, so S stays valid for the close handshake.
+            --  the same protected action pins the session: the
+            --  receiver's Wait_No_Borrowers cannot pass while we hold
+            --  it, so S stays valid for the close handshake.
             Admitting := False;
             Forced    := Forced or else By_Caller;
             St        := Closing;
@@ -518,7 +503,7 @@ package body AHT.Websocket.Client is
             S         := Cur;
             Result    := Won_Teardown;
          elsif not Done then
-            --  Teardown already under way — possibly already past
+            --  Teardown already under way, possibly already past
             --  Wait_No_Borrowers, so the session must not be touched.
             S      := null;
             Result := Join_Teardown;
@@ -632,8 +617,8 @@ package body AHT.Websocket.Client is
    ---------------------------------------------------------------
 
    --  Every public operation that touches a session takes its borrow
-   --  through one of these, so every exit path — a raise, the Receive
-   --  timeout branch, an ordinary return — releases exactly once.
+   --  through one of these, so every exit path (a raise, the Receive
+   --  timeout branch, an ordinary return) releases exactly once.
    --  Mirrors the feeder scope guard in the TLS engines.
    type Lease (Ctl : access Lifecycle_Controller) is
      new Ada.Finalization.Limited_Controlled with record
@@ -658,52 +643,14 @@ package body AHT.Websocket.Client is
       end if;
    end Finalize;
 
-   --  Owns an admitted, still-UNPUBLISHED connection attempt. Every
-   --  exit that did not hand the session to the receiver -- a raise,
-   --  or an abort of the connecting task -- drops the transport, frees
-   --  the session and releases admission, so the client is never
-   --  stranded in Connecting with a leaked transport.
-   --
-   --  Whether the handoff happened is asked of the CONTROLLER, keyed
-   --  by this attempt's generation. Two simpler answers are both
-   --  wrong:
-   --
-   --    * A local flag set after Start returns leaves a window where
-   --      an abort makes this Finalize free a session the receiver
-   --      already owns -- trading a leak for a double free.
-   --    * Clearing the caller's pointer through an `in out` entry
-   --      parameter looks like it closes that window, but does not:
-   --      GNAT does not deliver the copy-back when the caller is
-   --      aborted during the rendezvous, so the pointer stays set and
-   --      the double free is back. Measured, not assumed -- and the
-   --      handoff sweep in test_ws_abort is what caught it.
-   --
-   --  Publish records the generation from inside a protected action,
-   --  which IS abort-deferred, so the record cannot be lost. Gen also
-   --  qualifies the admission release: by the time an early
-   --  generation's frame finalizes, its session may already have been
-   --  published, reclaimed AND a fresh Connect admitted, and this
-   --  cleanup must not release an admission belonging to that newer
-   --  attempt.
-   --  Gen is a mutable component and NOT a discriminant, which is
-   --  what lets this object exist before admission is asked for.
-   --
-   --  As a discriminant it could only be elaborated once
-   --  Begin_Connect had returned the generation — so between the end
-   --  of that protected action and the elaboration of the owner there
-   --  was a window with the client already in Connecting and nobody
-   --  able to take it back out. A pending abort takes effect at
-   --  exactly that point (the end of a protected action, before the
-   --  statement that follows), and one landing there stranded the
-   --  client in Connecting permanently: no owner, so no
-   --  Abandon_Connect, so no later Connect ever admitted again.
-   --
-   --  Now the owner is declared first and Begin_Connect records the
-   --  generation into it from INSIDE its own protected action, which
-   --  is abort-deferred. There is no window: either the record was
-   --  made and Finalize releases the admission, or it was not and
-   --  Gen is still 0, meaning this owner never held one. Same shape
-   --  as Send_Guard.Acquire, and for the same reason.
+   --  Owns an admitted, still-unpublished connection attempt. Every
+   --  exit that did not hand the session to the receiver drops the
+   --  transport, frees the session and releases admission. Whether
+   --  the handoff happened is asked of the controller by generation;
+   --  Publish records it inside a protected action, so an abort of
+   --  the connecting task cannot lose it. Gen is a component, not a
+   --  discriminant, so Begin_Connect records it inside its own action
+   --  too. See docs/websocket.md, "Abort safety is structural".
    type Attempt_Owner
      (Ctl : access Lifecycle_Controller) is
      new Ada.Finalization.Limited_Controlled with record
@@ -715,12 +662,11 @@ package body AHT.Websocket.Client is
 
    overriding procedure Finalize (A : in out Attempt_Owner) is
    begin
-      --  Admission was never granted — the state check refused, the
+      --  Admission was never granted: the state check refused, the
       --  parameter copy raised, or an abort landed before the record
-      --  could be made. In every one of those the client was left
-      --  exactly as admission found it, so there is nothing to
-      --  release and releasing anyway would clear an admission
-      --  belonging to somebody else.
+      --  could be made. In each case the client was left as admission
+      --  found it, so there is nothing to release, and releasing
+      --  anyway would clear an admission belonging to somebody else.
       if A.Gen = 0 then
          return;
       end if;
@@ -748,11 +694,10 @@ package body AHT.Websocket.Client is
       A.Ctl.Abandon_Connect (Positive (A.Gen));
    end Finalize;
 
-   --  Holds the teardown borrow for whoever wins it. Taking the borrow
-   --  in Initialize and returning it in Finalize is what makes the win
-   --  survive an abort of the closing task: a manual release skipped
-   --  that way would leave the borrow count above zero and the
-   --  receiver waiting on it forever.
+   --  Holds the teardown borrow for whoever wins it. Taken in
+   --  Initialize and returned in Finalize, so an abort of the closing
+   --  task cannot skip the release and leave the receiver waiting on
+   --  the borrow count forever.
    type Teardown_Pin (Ctl : access Lifecycle_Controller) is
      new Ada.Finalization.Limited_Controlled with record
         Sess   : Session_Access  := null;
@@ -806,27 +751,12 @@ package body AHT.Websocket.Client is
    --  Receive accumulator
    ---------------------------------------------------------------
 
-   --  Bytes read off the wire but not yet consumed by a successful
-   --  Frames.Decode live here. A growable heap Byte_Array plus a
-   --  consumed-prefix cursor (Head) keeps the receive path linear
-   --  for large payloads (RFC 6455 §9):
-   --
-   --    * consuming a decoded frame is an O(1) bump of Head, not an
-   --      element-by-element Delete_First (which shifted the whole
-   --      tail down per byte → O(N²) for one big frame);
-   --    * feeding Decode is the slice Data (Head .. Tail), passed by
-   --      reference, not a fresh full-buffer copy on every loop turn;
-   --    * appending a read is one block move, and the consumed prefix
-   --      is reclaimed by lazy compaction (move-to-front) only when
-   --      a read won't otherwise fit.
-   --
-   --  Live bytes are Data (Head .. Tail); the buffer is empty when
-   --  Tail < Head (kept normalised to Head = 1, Tail = 0 when drained).
-   --  Data is allocated lazily on the first read (Ensure_Room). The
-   --  buffer is controlled so that ANY exit from the per-connection
-   --  receive loop — normal, protocol error, abort, or an unexpected
-   --  exception — reclaims it; an explicit Free on the normal path
-   --  would leak on every other one.
+   --  Bytes read off the wire but not yet consumed by Frames.Decode.
+   --  Live bytes are Data (Head .. Tail), normalised to Head = 1,
+   --  Tail = 0 when drained; consuming a frame bumps Head, and the
+   --  consumed prefix is compacted only when a read would not fit,
+   --  so the receive path is linear in the payload size. Controlled
+   --  so every exit from the receive loop frees Data.
    type Byte_Array_Access is access AHT.Bytes.Byte_Array;
 
    procedure Free is new Ada.Unchecked_Deallocation
@@ -986,7 +916,7 @@ package body AHT.Websocket.Client is
          --  but not yet consumed by a successful Frames.Decode.
          Buf : Recv_Buffer;
 
-         --  Reassembly state for fragmented messages (RFC 6455 §5.4).
+         --  Reassembly state for fragmented messages (RFC 6455 sec. 5.4).
          --  A Text/Binary frame with FIN=0 starts a reassembly; later
          --  Continuation frames append; FIN=1 closes it.
          In_Reassembly   : Boolean      := False;
@@ -1077,10 +1007,11 @@ package body AHT.Websocket.Client is
            (Kind : Message_Kind; Payload : AHT.Bytes.Buffer)
          is
          begin
-            --  RFC 6455 §8.1: a text message (the complete, reassembled
-            --  payload) MUST be valid UTF-8. On an ill-formed one we fail
-            --  the connection with close code 1007 rather than delivering
-            --  the bad bytes. Binary messages carry no such constraint.
+            --  RFC 6455 sec. 8.1: a text message (the complete,
+            --  reassembled payload) MUST be valid UTF-8. An ill-formed
+            --  one fails the connection with close code 1007 rather
+            --  than delivering the bad bytes. Binary messages carry no
+            --  such constraint.
             if Kind = Text_Message
               and then not AHT.Websocket.UTF8.Is_Valid (Payload)
             then
@@ -1098,9 +1029,8 @@ package body AHT.Websocket.Client is
                  (Kind => Kind, Payload => Payload);
                Accepted : Boolean := True;
             begin
-               --  Callback_Only never enqueues, which is what removes
-               --  the inbox as a growth path rather than merely
-               --  bounding it.
+               --  Callback_Only never enqueues; the inbox is not a
+               --  growth path in that mode.
                if S.Delivery /= Callback_Only then
                   --  Inbox first so a pull-mode Receive doesn't starve
                   --  if the push callback runs slow.
@@ -1145,10 +1075,10 @@ package body AHT.Websocket.Client is
          begin
             --  Inbound close policy that Decode defers (it accepts the
             --  full Any_Close_Code range and ignores the reason text).
-            --  RFC 6455 §7.4.1: 1004/1005/1006/1015 must never be sent
-            --  by a peer → fail with 1002. §8.1: a Close reason must be
-            --  valid UTF-8 → fail with 1007. Either way we don't deliver
-            --  an On_Close for a malformed close, we report On_Error.
+            --  RFC 6455 sec. 7.4.1: 1004/1005/1006/1015 must never be
+            --  sent by a peer, so fail with 1002. Sec. 8.1: a Close
+            --  reason must be valid UTF-8, so fail with 1007. A
+            --  malformed close reaches On_Error, not On_Close.
             case AHT.Websocket.Frames.Classify_Inbound_Close (Payload) is
                when AHT.Websocket.Frames.Reserved_Code =>
                   Maybe_Send_Close_Echo (Code => 1002);
@@ -1202,10 +1132,10 @@ package body AHT.Websocket.Client is
             Payload : AHT.Bytes.Buffer)
          is
          begin
-            --  RFC 6455 §5.1: a client MUST NOT accept a masked
+            --  RFC 6455 sec. 5.1: a client MUST NOT accept a masked
             --  frame from the server. The Frames codec is
-            --  direction-neutral (it'll happily unmask), so the
-            --  direction-specific check is ours.
+            --  direction-neutral (it unmasks whatever it is given), so
+            --  the direction-specific check lives here.
             if Hdr.Masked then
                raise AHT.Websocket.Protocol_Error
                  with "Receiver: server sent a masked frame "
@@ -1252,7 +1182,7 @@ package body AHT.Websocket.Client is
                   Send_Pong (Payload.To_Array);
 
                when AHT.Websocket.Pong_Op =>
-                  --  Unsolicited Pong → drop (v1 doesn't track Pings).
+                  --  Unsolicited Pong: dropped. Pings are not tracked.
                   null;
 
                when AHT.Websocket.Close_Op =>
@@ -1305,8 +1235,8 @@ package body AHT.Websocket.Client is
                end if;
             exception
                when AHT.Transport.Aborted_Error =>
-                  --  Split out from the others on purpose. An abort is
-                  --  how a Close or Reconnect stops us, so when the
+                  --  Separate from the others: an abort is how a Close
+                  --  or Reconnect stops the receiver, so when the
                   --  application asked for the teardown this is the
                   --  mechanism working, not a fault to report. A
                   --  peer-driven abort still reaches On_Error.
@@ -1347,62 +1277,47 @@ package body AHT.Websocket.Client is
       end Run_Session;
 
       ------------------------------------------------------------
-      --  Reclamation — receiver only
+      --  Reclamation, receiver only
       ------------------------------------------------------------
 
-      --  Steps 2, 3 and 7 are hard safety gates and carry no local
-      --  handler: if admission did not stop, a fresh borrow could be
-      --  granted after the zero-borrower check; if the published
-      --  pointer were not cleared, it would dangle past the Free. A
-      --  surprise there must propagate, not be masked. Only the
-      --  genuinely best-effort steps — the abort, the transport close
-      --  and the deallocation — swallow exceptions, and the signal
-      --  runs regardless so nobody waits forever on a completion that
-      --  never comes.
+      --  Steps 1, 2, 4 and 6 are safety gates and have no timeout.
       procedure Reclaim (S : in out Session_Access) is
       begin
-         --  2. GATE: no new borrows. Before marking anything closed,
-         --     or a lease could be granted against a session whose
-         --     teardown has already begun. Idempotent — a Close that
-         --     won the teardown already did it.
+         --  1. GATE: no new borrows; idempotent.
          Conn.Ctl.Stop_Admission;
 
-         --  3. GATE: wake every borrower parked on this session.
+         --  2. GATE: wake every borrower parked on this session.
          S.State.Set (Closed);
          S.Inbox.Mark_Closed;
 
-         --  4. Best effort: release a borrower parked in Read/Write.
-         --     Required even on receiver-initiated reclamation — a
-         --     Send parked on a dead socket holds a borrow, and
-         --     without this step 5 would wait out its write deadline.
+         --  3. Best effort: release a borrower parked in Read/Write.
          begin
             Active (S).Abort_Pending;
          exception
             when others => null;
          end;
 
-         --  5. The memory-safety gate, deliberately unbounded.
+         --  4. GATE: no borrowers left; unbounded.
          Conn.Ctl.Wait_No_Borrowers;
 
-         --  6. Best effort.
+         --  5. Best effort.
          begin
             Active (S).Close;
          exception
             when others => null;
          end;
 
-         --  7. GATE: drop the published pointer before the free.
+         --  6. GATE: drop the published pointer before the free.
          Conn.Ctl.Clear_Published;
 
-         --  8. Best effort. Every nested resource — transports,
-         --     protected objects, buffers, strings — finalizes here.
+         --  7. Best effort; every nested resource finalizes here.
          begin
             Free (S);
          exception
             when others => S := null;
          end;
 
-         --  9.
+         --  8.
          Conn.Ctl.Signal_Generation_Done;
       end Reclaim;
 
@@ -1487,9 +1402,9 @@ package body AHT.Websocket.Client is
       Adm : Admission_Result;
       Lim : Limits;
 
-      --  Deep copies by construction: Unbounded_String and the header
-      --  map both own their storage, so a caller reusing its buffers
-      --  after this cannot change what a later Reconnect dials.
+      --  Deep copies: Unbounded_String and the header map own their
+      --  storage, so a caller reusing its buffers afterwards cannot
+      --  change what a later Reconnect dials.
       Params : constant Connect_Params :=
         (URL          => To_Unbounded_String (URL),
          Extra        => Extra_Headers,
@@ -1506,13 +1421,12 @@ package body AHT.Websocket.Client is
       --  Connect still cannot release an admission it never took.
       Attempt : Attempt_Owner (Self.Ctl'Unchecked_Access);
    begin
-      --  Before admission, so a contradictory pair never reserves a
-      --  generation, and before the URL's scheme is consulted -- this
-      --  is the only place that catches it on a ws:// dial, where no
-      --  TLS transport is ever built to notice. No precedence, and
-      --  the refusal stands even under Insecure: a caller who gave
-      --  two sets of trust anchors is wrong about which is in force,
-      --  and honouring one silently leaves that belief intact.
+      --  Checked before admission, so a contradictory pair never
+      --  reserves a generation, and before the scheme is consulted,
+      --  since a ws:// dial builds no TLS transport to notice it.
+      --  Supplying both raises TLS_Error before anything is dialled;
+      --  there is no precedence, and the refusal stands even under
+      --  Insecure.
       if CA_Path /= "" and then CA_PEM /= "" then
          raise AHT.Transport.TLS.TLS_Error
            with "Websocket.Client.Connect: CA_Path and CA_PEM are "
@@ -1520,15 +1434,10 @@ package body AHT.Websocket.Client is
              & "as a path or as PEM data, not both";
       end if;
 
-      --  Admission. One protected action decides whether an attempt
-      --  may start, reserves its generation number and takes the
-      --  snapshot the session will be built from. Idle and
-      --  Disconnected are admitted; Connecting, Open and Closing are
-      --  not, so a live connection is never displaced by a bare
-      --  Connect. A failed attempt returns the client to where
-      --  admission found it, and that retry genuinely works because
-      --  it builds a fresh session with fresh transports rather than
-      --  re-dialing one whose single-use latch is already set.
+      --  Admission: one protected action decides whether an attempt
+      --  may start, reserves its generation and snapshots the limits.
+      --  A failed attempt returns the client to where admission found
+      --  it, and a retry builds a fresh session.
       Self.Ctl.Begin_Connect
         (Params, Attempt.Gen'Unchecked_Access, Gen, Lim, Adm);
       case Adm is
@@ -1551,7 +1460,7 @@ package body AHT.Websocket.Client is
 
       --  From here the attempt owns the session outright: nothing
       --  else can reach it, and its cleanup runs on every exit. The
-      --  owner itself is declared further up, before admission — see
+      --  owner itself is declared further up, before admission; see
       --  the note there.
       declare
          Key_Bytes : AHT.Bytes.Byte_Array (1 .. 16);
@@ -1604,8 +1513,8 @@ package body AHT.Websocket.Client is
             --  needs. Scheme is already narrowed to WS | WSS above.
             declare
                --  Callback_Only gets no queue at all rather than an
-               --  unused one, so "does not enqueue" is a property of
-               --  the allocation and not merely of the code path.
+               --  unused one: "does not enqueue" is a property of the
+               --  allocation as well as of the code path.
                Cap : constant Ada.Containers.Count_Type :=
                  (if Lim.Delivery = Callback_Only
                   then 0 else Lim.Max_Inbox_Messages);
@@ -1737,17 +1646,14 @@ package body AHT.Websocket.Client is
                   Attempt.Sess.Selected_Protocol := To_Unbounded_String (Got);
                end;
 
-               --  Handshake good. Disarm the upgrade budget BEFORE
-               --  publishing, and not merely as tidiness: both
-               --  deadlines are compound and measured from the setter
-               --  call (see AHT.Transport), so one left armed does
-               --  not go on bounding the upgrade -- the upgrade is
-               --  over -- it expires under the receiver partway
-               --  through a healthy session and surfaces as a
+               --  Handshake good. Disarm the upgrade budget before
+               --  publishing: both deadlines are compound and measured
+               --  from the setter call (see AHT.Transport), so one
+               --  left armed would expire under the receiver partway
+               --  through a healthy session and surface as a
                --  Timeout_Error on a connection that was never in
-               --  trouble. Nothing between the Response.Read above
-               --  and here touches the transport, so this is the
-               --  whole of the exposure.
+               --  trouble. Nothing between the Response.Read above and
+               --  here touches the transport.
                Active (Attempt.Sess).Set_Read_Deadline (Duration'Last);
                Active (Attempt.Sess).Set_Write_Deadline (Duration'Last);
 
@@ -1775,20 +1681,11 @@ package body AHT.Websocket.Client is
                   --  Finalize, so no exit path can skip them.
                   raise;
                when AHT.Transport.Timeout_Error =>
-                  --  Upgrade_Deadline expired, reported as itself
-                  --  rather than wrapped. The two bounds ahead of
-                  --  this one raise Timeout_Error straight out of the
-                  --  transport, and wrapping only this third one
-                  --  would make "the peer never answered" arrive as
-                  --  Handshake_Error, which means the opposite: that
-                  --  it answered and the answer was wrong.
-                  --
-                  --  This block arms no other deadline and the
-                  --  transport is fresh, so Timeout_Error here can
-                  --  only be that one. With Upgrade_Deadline left at
-                  --  its default the case is unreachable, which is
-                  --  why adding it changes nothing for callers who
-                  --  do not pass one.
+                  --  Upgrade_Deadline expired. Reported as itself:
+                  --  wrapped, "never answered" would arrive as
+                  --  Handshake_Error, which means the answer was
+                  --  wrong. This block arms no other deadline, so
+                  --  Timeout_Error here can only be that one.
                   raise;
                when E : others =>
                   raise AHT.Websocket.Handshake_Error
@@ -1925,15 +1822,14 @@ package body AHT.Websocket.Client is
          Token : Guards.Guard_Token (L.Sess.Guard'Unchecked_Access);
       begin
          Token.Take;
-         --  Re-check under the guard, not just at borrow time.
-         --  We may have queued here for a long time behind
-         --  another writer, and teardown may have started --
-         --  and fired its one-shot Abort_Pending -- while we
-         --  waited. Starting a write now would park with
-         --  nothing left to cancel it, and the reclaimer would
-         --  wait on our borrow forever. This is the sender-side
-         --  form of the rule the receiver echo paths follow.
-         --  Close_Frame_Sent alone does not cover it: a
+         --  Re-check under the guard, not just at borrow time. The
+         --  sender may have queued for a long time behind another
+         --  writer, and teardown may have started, and fired its
+         --  one-shot Abort_Pending, meanwhile. Starting a write now
+         --  would park with nothing left to cancel it, and the
+         --  reclaimer would wait on this borrow forever. This is the
+         --  sender-side form of the rule the receiver echo paths
+         --  follow. Close_Frame_Sent alone does not cover it: a
          --  peer-initiated teardown never latches it.
          if not L.Ctl.Is_Open
            or else L.Sess.Guard.Close_Frame_Sent
@@ -1963,16 +1859,7 @@ package body AHT.Websocket.Client is
          Token : Guards.Guard_Token (L.Sess.Guard'Unchecked_Access);
       begin
          Token.Take;
-         --  Re-check under the guard, not just at borrow time.
-         --  We may have queued here for a long time behind
-         --  another writer, and teardown may have started --
-         --  and fired its one-shot Abort_Pending -- while we
-         --  waited. Starting a write now would park with
-         --  nothing left to cancel it, and the reclaimer would
-         --  wait on our borrow forever. This is the sender-side
-         --  form of the rule the receiver echo paths follow.
-         --  Close_Frame_Sent alone does not cover it: a
-         --  peer-initiated teardown never latches it.
+         --  Re-check under the guard; see Send_Text.
          if not L.Ctl.Is_Open
            or else L.Sess.Guard.Close_Frame_Sent
          then
@@ -2001,16 +1888,7 @@ package body AHT.Websocket.Client is
          Token : Guards.Guard_Token (L.Sess.Guard'Unchecked_Access);
       begin
          Token.Take;
-         --  Re-check under the guard, not just at borrow time.
-         --  We may have queued here for a long time behind
-         --  another writer, and teardown may have started --
-         --  and fired its one-shot Abort_Pending -- while we
-         --  waited. Starting a write now would park with
-         --  nothing left to cancel it, and the reclaimer would
-         --  wait on our borrow forever. This is the sender-side
-         --  form of the rule the receiver echo paths follow.
-         --  Close_Frame_Sent alone does not cover it: a
-         --  peer-initiated teardown never latches it.
+         --  Re-check under the guard; see Send_Text.
          if not L.Ctl.Is_Open
            or else L.Sess.Guard.Close_Frame_Sent
          then
@@ -2042,17 +1920,10 @@ package body AHT.Websocket.Client is
 
          Phase_Start : constant Ada.Real_Time.Time := Ada.Real_Time.Clock;
 
-         --  Timeout is a budget for the whole handshake, not an
-         --  allowance renewed per phase. Both phases are "waiting for
-         --  somebody else" -- another writer to put the latch down,
-         --  then the peer to echo -- and a caller that asked for T
-         --  must not be able to spend 2T because the first phase
-         --  nearly exhausted it and the second started afresh.
-         --
-         --  Computed by subtracting elapsed rather than from an
-         --  absolute deadline, so Duration'Last stays usable: adding
-         --  it to a clock reading would overflow, while subtracting a
-         --  small elapsed span from it does not.
+         --  Timeout is one budget for the whole handshake: waiting
+         --  for the latch and then for the peer's echo share it.
+         --  Computed from elapsed time so Duration'Last stays usable;
+         --  adding it to a clock reading would overflow.
          function Remaining return Duration is
             use type Ada.Real_Time.Time;
             Spent : constant Duration :=
@@ -2062,10 +1933,10 @@ package body AHT.Websocket.Client is
             return AHT.Websocket.Budgets.Remaining (Timeout, Spent);
          end Remaining;
       begin
-         --  RFC 6455 §1.4 close: send our Close (if we haven't yet),
-         --  then wait for the receiver to see the peer's echo.
-         --  Abort_Pending guarantees Wait_Closed doesn't hang forever
-         --  if the peer goes silent.
+         --  RFC 6455 sec. 1.4 close: send our Close (if not already
+         --  sent), then wait for the receiver to see the peer's echo.
+         --  Abort_Pending keeps Wait_Closed from hanging forever if
+         --  the peer goes silent.
          S.State.Try_Mark_Local_Close (Should_Send);
          if Should_Send then
             declare
@@ -2081,18 +1952,11 @@ package body AHT.Websocket.Client is
                Token.Try_Take (Remaining, Got);
 
                if Got then
-                  --  The write needs bounding too, or the budget only
-                  --  ever bounded the WAITING. A writer that completes
-                  --  while leaving the socket buffer full puts the
-                  --  latch down on a healthy transport, and this write
-                  --  would then park with neither Remaining nor
-                  --  Drain_Timeout able to reach it, since both are
-                  --  already behind us.
-                  --
-                  --  See AHT.Websocket.Budgets for why a budget of
-                  --  exactly zero is the only one that gets a grace,
-                  --  and why every positive one gets what is left of
-                  --  it and no more.
+                  --  The write needs bounding too: a writer that put
+                  --  the latch down with the socket buffer full would
+                  --  otherwise park this write beyond both Remaining
+                  --  and Drain_Timeout. See AHT.Websocket.Budgets for
+                  --  the zero-budget grace.
                   begin
                      Active (S).Set_Write_Deadline
                        (AHT.Websocket.Budgets.Close_Frame_Budget
@@ -2132,10 +1996,10 @@ package body AHT.Websocket.Client is
                   --  their I/O so the teardown can proceed, and send
                   --  no Close at all: a writer interrupted part-way
                   --  has left a partial frame on the wire, and
-                  --  RFC 6455 §5.5.1 admits nothing after a Close --
-                  --  including the rest of the frame it would be
-                  --  following. A truncated stream with no Close is
-                  --  the honest signal here.
+                  --  RFC 6455 sec. 5.5.1 admits nothing after a
+                  --  Close, including the rest of the frame it would
+                  --  be following. A truncated stream with no Close
+                  --  is the honest signal here.
                   begin
                      Active (S).Abort_Pending;
                   exception
@@ -2168,9 +2032,9 @@ package body AHT.Websocket.Client is
          end if;
       exception
          when others =>
-            --  Best effort, and safe to swallow precisely because the
-            --  wake gates are NOT here: they run from the pin's
-            --  Finalize, which no exit path can skip.
+            --  Best effort, and safe to swallow because the wake
+            --  gates are not here: they run from the pin's Finalize,
+            --  which no exit path can skip.
             null;
       end Close_Handshake;
 
@@ -2251,9 +2115,9 @@ package body AHT.Websocket.Client is
            with "Websocket.Client.Receive: delivery is Callback_Only; "
              & "messages are delivered to On_Message, not queued";
       end if;
-      --  Blocked on THIS session's inbox: when it is reclaimed,
-      --  Mark_Closed wakes us with Closed_Error, and we can never
-      --  observe a later generation's messages.
+      --  Blocked on this session's inbox: when it is reclaimed,
+      --  Mark_Closed wakes the caller with Closed_Error, and a later
+      --  generation's messages are never observed here.
       select
          L.Sess.Inbox.Receive (Msg);
       or

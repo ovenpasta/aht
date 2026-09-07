@@ -10,16 +10,12 @@ with System;
 
 with AHT.Mbedtls.Error;
 --  Withed so the callback aht_mbedtls_entropy_new registers is in the
---  closure. Nothing on this side calls it -- the caller is C, through
---  a function pointer -- so without a with the symbol is undefined at
---  link and the entropy pool has no source.
+--  link closure; only C calls it, through a function pointer.
 with AHT.Mbedtls.Entropy;
 pragma Unreferenced (AHT.Mbedtls.Entropy);
 with AHT.Mbedtls.Glue;
---  Withed for its pragma Linker_Options and nothing else -- the unit
---  declares no entities, so there is nothing here to reference. It has
---  to be in some binary's closure for the pragma to fire, and this
---  body is the one unit every mbedTLS-using binary pulls in.
+--  Withed for its pragma Linker_Options; the unit declares nothing.
+--  This body is in every mbedTLS-using binary's closure.
 with AHT.Mbedtls.Link;
 with AHT.Mbedtls.SSL;
 with AHT.Mbedtls.X509;
@@ -28,33 +24,17 @@ with AHT.Guarded_New;
 with AHT.PEM;
 with AHT.Transport.TCP;
 
---  mbedTLS backend, structured as a buffered engine.
---
---  mbedTLS does the crypto; the bytes travel over an
---  AHT.Transport.TCP instance held in Backend_State. The BIO callbacks
---  do NOT touch the socket: they move bytes to and from two in-memory
---  queues, so every mbedtls_ssl_* call returns promptly (WANT_READ
---  when the inbound queue is dry) and all network waiting happens in
---  plain Ada outside the library.
---
---  That structure exists for concurrency. An mbedtls_ssl_context is
---  NOT safe for two tasks at once — the library's own mutexes, where
---  the build has any, guard its shared internals and never one
---  session's state — and mbedtls_ssl_read may itself write (alerts),
---  yet the WebSocket client runs a receiver task in Read while
---  senders call Write. So every mbedtls_ssl_* call is serialized under
---  SSL_Lock and
---  is non-blocking; wire output is serialized and kept in order by
---  Drain_Lock (strict order: Drain_Lock outer, SSL_Lock inner); and a
---  shared coordinator (AHT.TLS_Sync) arbitrates which task performs
---  the single TCP.Read while the other parks on a single-waiter latch.
---  Sound because the transport contract allows at most one reader and
---  one writer task.
---
---  Every blocking step (lock seize, latch wait, TCP read/write) is
---  bounded by the deadline of the OPERATION performing it (the
---  absolute mirrors in the outer record) and re-checks the abort epoch
---  afterwards. This mirrors the openssl backend; see docs/tls.md.
+--  mbedTLS backend. Same engine as the openssl body; differences:
+--    * the BIO callbacks move bytes to and from two in-memory queues
+--      (Engine_IO) instead of memory BIOs;
+--    * an abrupt TCP EOF is a clean Last = 0, not an error;
+--    * mbedtls_ssl_set_hostname covers IP literals too (iPAddress
+--      SANs), so there is no separate IP-SAN path;
+--    * no default trust with CA_Path = "";
+--    * every context, entropy source and DRBG included, is per
+--      transport; nothing is shared between sessions;
+--    * Set_*_Deadline are also forwarded to the inner TCP.
+--  See docs/tls.md.
 package body AHT.Transport.TLS is
 
    use type System.Address;
@@ -90,23 +70,14 @@ package body AHT.Transport.TLS is
 
    function To_IO is new Ada.Unchecked_Conversion
      (System.Address, Engine_IO_Access);
-   --  Recover the context in a callback. An access conversion rather
-   --  than an address overlay on purpose: Engine_IO holds controlled
-   --  Buffers, and an imported overlay object would be finalized when
-   --  the callback returns, freeing storage the session still owns.
+   --  Recover the context in a callback. Not an address overlay,
+   --  which would finalize Engine_IO's controlled Buffers when the
+   --  callback returns.
 
-   --  Every mbedTLS context this backend owns is per transport object,
-   --  including the entropy source and the DRBG. Nothing is shared
-   --  between sessions, and therefore nothing is shared between tasks
-   --  beyond what SSL_Lock already serializes.
-   --
-   --  That is worth stating because a whole build configuration rests
-   --  on it: the Windows archive is built without MBEDTLS_THREADING_C,
-   --  which is sound precisely because the mutexes it would add all
-   --  guard state this backend does not have. Making CTR_DRBG or
-   --  Entropy a library-level singleton — a tempting optimisation,
-   --  since seeding is the expensive part of connecting — would
-   --  invalidate that argument silently. See docs/tls.md.
+   --  Every context, the entropy source and DRBG included, is per
+   --  transport; nothing is shared between sessions. The Windows
+   --  archive is built without MBEDTLS_THREADING_C on that basis; a
+   --  library-level DRBG or entropy singleton would break it.
    type Backend_State is record
       TCP      : aliased TCP_Access;
       --  aliased so AHT.Guarded_New can be handed
@@ -124,11 +95,9 @@ package body AHT.Transport.TLS is
 
       Engine_Dead  : Boolean := False;
       Death_Reason : AHT.Bytes.Buffer;
-      --  Guarded by SSL_Lock. Latched when a session-fatal error is
-      --  seen, with the reason, so the operations rejected afterwards
-      --  report what actually killed the session (the task that hit
-      --  the original failure is often not the one the caller sees
-      --  fail).
+      --  Guarded by SSL_Lock. Latched with the reason on a
+      --  session-fatal error, so operations rejected afterwards
+      --  report what killed the session.
    end record;
 
    procedure Free_TCP is new Ada.Unchecked_Deallocation
@@ -136,16 +105,14 @@ package body AHT.Transport.TLS is
    procedure Free_State is new Ada.Unchecked_Deallocation
      (Backend_State, Backend_State_Access);
 
-   --  See AHT.Guarded_New: each instantiation's Gate is
-   --  elaborated once, at library level, and closes the
-   --  Allocate_Any_Controlled abort window around its one `new`.
+   --  Library-level gates; see AHT.Guarded_New for the abort window.
    package New_State is new AHT.Guarded_New
      (Backend_State, Backend_State_Access);
    package New_TCP is new AHT.Guarded_New
      (AHT.Transport.TCP.TCP_Transport, TCP_Access);
 
    ---------------------------------------------------------------
-   --  BIO callbacks — memory only, never the socket
+   --  BIO callbacks: memory only, never the socket
    ---------------------------------------------------------------
 
    function Send_CB
@@ -266,16 +233,10 @@ package body AHT.Transport.TLS is
       end;
    end Seize;
 
-   --  Tear a desynchronised session down hard. A write that failed
-   --  partway through a TLS record may already have put some bytes on
-   --  the wire while mbedTLS believes none were sent — the outbound
-   --  record stream is corrupt and must never be reused. Latch Fatal
-   --  (so further Read/Write raise and Is_Connected reports False) and
-   --  poison the TCP *without* a close_notify, which would only push
-   --  another record onto the broken stream. Poison rather than Close
-   --  because a WSS receiver task may still be parked on the socket;
-   --  Close would race its selector. The contexts are left for the
-   --  eventual Close/finalization.
+   --  Tear a desynchronised session down: latch Fatal (further
+   --  Read/Write raise, Is_Connected reports False) and poison the
+   --  TCP without a close_notify. Poison, not Close: a WSS receiver
+   --  may still be parked on the socket. Contexts are left for Close.
    procedure Drop_Connection (St : Backend_State_Access) is
    begin
       St.Coord.Latch_Fatal;
@@ -315,7 +276,7 @@ package body AHT.Transport.TLS is
    end Raise_From_Code;
 
    ---------------------------------------------------------------
-   --  Phase B — drain queued ciphertext to the wire
+   --  Phase B: drain queued ciphertext to the wire
    ---------------------------------------------------------------
 
    procedure Drain_Output
@@ -368,7 +329,7 @@ package body AHT.Transport.TLS is
    end Drain_Output;
 
    ---------------------------------------------------------------
-   --  Feed — more inbound ciphertext, or wait for the other task's
+   --  Feed: more inbound ciphertext, or wait for the other task's
    ---------------------------------------------------------------
 
    procedure Feed
@@ -422,7 +383,7 @@ package body AHT.Transport.TLS is
    end Feed;
 
    ---------------------------------------------------------------
-   --  Phase A — one engine call under SSL_Lock
+   --  Phase A: one engine call under SSL_Lock
    ---------------------------------------------------------------
 
    type Engine_Op is (Op_Read, Op_Write);
@@ -478,13 +439,10 @@ package body AHT.Transport.TLS is
       Pending := St.IO.Out_Data.Length;
       St.SSL_Lock.Release;
 
-      --  Poison and raise HERE, so a session-fatal error reaches the
-      --  caller the same way whichever direction hit it. Latching
-      --  Engine_Dead alone is not enough: Is_Connected reads the
-      --  coordinator's Fatal latch, so leaving it unset let a session
-      --  killed by e.g. a bad record MAC keep reporting Is_Connected
-      --  True (the read path raised without dropping, and only the
-      --  write path had a fail-closed handler).
+      --  Poison and raise here so a session-fatal error reaches the
+      --  caller the same way from either direction. Is_Connected
+      --  reads the coordinator's Fatal latch, so Engine_Dead alone
+      --  would leave it True.
       if Is_Fatal then
          Drop_Connection (St);
          Raise_From_Code (Fatal_Ret, Where);
@@ -587,40 +545,24 @@ package body AHT.Transport.TLS is
    begin
       if Self.Used or else Self.Connected then
          --  Single-use after success (see the spec): a completed
-         --  session — live or poisoned — is never reconnected in
-         --  place; a WSS receiver may still be unwinding through Read.
+         --  session, live or poisoned, is never reconnected in place;
+         --  a WSS receiver may still be unwinding through Read.
          raise TLS_Error with "TLS transport already connected";
       end if;
 
-      --  Backend_State carries two Lock_Type and a Coordinator_Type,
-      --  both protected types with entries (AHT.TLS_Sync), so a
-      --  stranded, zero-filled one is not inert: a zeroed
-      --  CRITICAL_SECTION reads as contended -- LockCount 0, where an
-      --  initialized and unheld one is -1 -- and finalizing it hangs.
-      --  Measured for this shape of object, on this target, by the
-      --  Session_Type case New_State's construct mirrors (see
-      --  AHT.Websocket.Client.Lifecycle_Controller.Create_Session)
-      --  and by a standalone zero-fill probe; whether an abort
-      --  actually lands inside this particular `new` in a live run
-      --  has not been separately observed. See AHT.Guarded_New for
-      --  why the bracket is a protected action taking Into by access
-      --  rather than a plain `new` or an `out` parameter.
+      --  Through AHT.Guarded_New, which states the abort window this
+      --  closes. Backend_State holds protected objects with entries,
+      --  and a stranded zero-filled one hangs finalization on Windows
+      --  (a zeroed CRITICAL_SECTION reads as contended).
       New_State.Gate.Allocate (Self.State'Access);
 
-      --  Everything from here on runs inside a cleanup block: ANY
-      --  exception — the expected Fail paths, but equally an
-      --  allocation failure or a filesystem error from the CA-kind
-      --  classification — must release the state so the object stays
-      --  retryable. Release_State is idempotent, so the inner Fail
-      --  paths that already released are unaffected.
+      --  Cleanup block: any exception from here on (Fail, allocation
+      --  failure, a filesystem error classifying CA_Path) releases
+      --  the state so the object stays retryable. Release_State is
+      --  idempotent.
       begin
 
-      --  Refused before anything is dialled, and refused even under
-      --  Insecure. A caller who supplied two sets of trust anchors
-      --  holds a mistaken belief about which one is in force;
-      --  honouring one silently leaves that belief intact. Under
-      --  Insecure neither is used, which makes accepting the
-      --  contradiction more misleading rather than less.
+      --  Raises before dialling, even under Insecure; no precedence.
       if CA_Path /= "" and then CA_PEM /= "" then
          raise TLS_Error
            with "TLS connect: CA_Path and CA_PEM are mutually "
@@ -629,17 +571,9 @@ package body AHT.Transport.TLS is
       end if;
 
       --  Validated here, before anything is dialled and regardless of
-      --  Insecure.
-      --
-      --  Regardless of Insecure, because the two backends disagreed
-      --  otherwise: OpenSSL skips CA loading entirely when
-      --  verification is off, mbedTLS parsed it anyway, so the same
-      --  malformed bundle was accepted by one and rejected by the
-      --  other. Checking the shape unconditionally makes supplying
-      --  broken trust material an error the caller hears about even
-      --  when this particular dial would not have used it -- which is
-      --  the fail-closed reading, and the one that does not depend on
-      --  which backend is linked.
+      --  Insecure, so a malformed bundle is an error under both
+      --  backends: OpenSSL skips CA loading when verification is off,
+      --  mbedTLS parses it anyway.
       if CA_PEM /= "" then
          declare
             Problem : constant String := AHT.PEM.Bundle_Problem (CA_PEM);
@@ -653,21 +587,9 @@ package body AHT.Transport.TLS is
          end;
       end if;
 
-      --  1. Plain TCP first (fresh per attempt, so a failed handshake
-      --     leaves this object retryable): DNS multi-candidate
-      --     fallback, the selectors, deadlines and Abort_Pending all
-      --     come from AHT.Transport.TCP unchanged.
-      --
-      --  AHT.Transport.TCP.TCP_Transport is limited-controlled too,
-      --  so it is stranded by the same window, but the consequence
-      --  differs: it holds no CRITICAL_SECTION, and
-      --  Transport_Type.Finalize (src/aht-transport.adb) dispatches
-      --  on the object's tag before touching anything else -- on
-      --  zero-filled memory that tag is null, so the dispatch faults
-      --  and Finalize's own blanket handler swallows it. A stranded
-      --  one is a leak and a swallowed fault, not a hang -- reasoned
-      --  from that code, not measured -- and closing the same window
-      --  here costs nothing.
+      --  1. Plain TCP first, fresh per attempt so a failed handshake
+      --     leaves this object retryable. Through AHT.Guarded_New for
+      --     the same abort window as State above.
       New_TCP.Gate.Allocate (Self.State.TCP'Access);
       AHT.Transport.TCP.Connect
         (Self.State.TCP.all, Host, Port,
@@ -716,22 +638,18 @@ package body AHT.Transport.TLS is
 
          if CA_PEM /= "" then
             declare
-               --  To_C with Append_Nul, and the NUL is COUNTED in the
-               --  length. mbedTLS picks PEM over DER by finding
-               --  "-----BEGIN", and its PEM branch requires the
-               --  terminator inside the counted length; passing the
-               --  text length alone makes it try DER and fail
-               --  obscurely.
+               --  To_C with Append_Nul, and the NUL is counted in the
+               --  length: mbedTLS picks PEM over DER by finding
+               --  "-----BEGIN" and its PEM branch requires the
+               --  terminator inside the counted length.
                Buf : aliased C.char_array := C.To_C (CA_PEM, True);
             begin
                Ret := AHT.Mbedtls.X509.CRT_Parse
                  (Self.State.CA_Cert, Buf'Address, Buf'Length);
             end;
             --  0 only. A positive result counts certificates that
-            --  failed to parse, which is exactly the partial success
-            --  this must refuse: installing the ones that did parse
-            --  would trust a prefix of what the caller supplied and
-            --  say nothing about the rest.
+            --  failed to parse; installing the rest would trust a
+            --  prefix of the bundle.
             if Ret /= 0 then
                Fail (Ret,
                      "TLS connect (CA_PEM parse; the bundle is "
@@ -791,7 +709,7 @@ package body AHT.Transport.TLS is
          Send_CB'Access, Recv_CB'Access, System.Null_Address);
 
       --  9. Handshake pump: run the engine, push what it produced,
-      --     pull what it asked for — all bounded by HS_Bound. Single
+      --     pull what it asked for, all bounded by HS_Bound. Single
       --     task, so no locks are needed yet.
       Handshake :
       loop
@@ -801,12 +719,10 @@ package body AHT.Transport.TLS is
 
          if Ret = M.ERR_WANT_READ then
             if Self.State.IO.In_EOF then
-               --  The peer's stream already ended and mbedTLS still
-               --  wants input. It normally reports that itself (a recv
-               --  callback returning 0 becomes CONN_EOF, handled
-               --  below), but relying on that would make the loop spin
-               --  on an at-EOF socket if it ever didn't — and with no
-               --  Handshake_Deadline that spin would be unbounded.
+               --  The stream ended and mbedTLS still wants input. It
+               --  normally reports this itself (recv returning 0
+               --  becomes CONN_EOF); without this check a miss would
+               --  spin unbounded when there is no Handshake_Deadline.
                Fail (M.ERR_CONN_EOF, "TLS handshake (peer closed)");
             end if;
             declare
@@ -906,11 +822,10 @@ package body AHT.Transport.TLS is
               or else Ret = M.ERR_PEER_CLOSE_NOTIFY
               or else Ret = M.ERR_CONN_EOF
             then
-               --  Clean TLS shutdown, or the peer's stream simply
-               --  ending: both mirror the TCP transport's "Last = 0
-               --  means peer closed" contract. (Unlike the openssl
-               --  backend, an abrupt EOF is NOT an error here — a
-               --  documented backend difference, see docs/tls.md.)
+               --  Clean shutdown or the peer's stream ending: both are
+               --  Last = 0, the TCP contract. Unlike the openssl
+               --  backend, an abrupt EOF is not an error; see
+               --  docs/tls.md.
                Last := 0;
                return;
             elsif Ret = M.ERR_WANT_READ then
@@ -918,10 +833,9 @@ package body AHT.Transport.TLS is
             elsif Ret = M.ERR_WANT_WRITE then
                null;  --  output already drained above; call again
             else
-               --  Defensive: Engine_Call classifies and poisons every
-               --  fatal code, so nothing should reach here — but an
-               --  unclassifiable state means the stream's integrity is
-               --  unknown, so fail closed rather than stay usable.
+               --  Engine_Call poisons every fatal code, so nothing
+               --  should reach here; an unclassifiable state means the
+               --  stream's integrity is unknown, so fail closed.
                Drop_Connection (St);
                Raise_From_Code (Ret, "TLS read");
             end if;
@@ -973,8 +887,9 @@ package body AHT.Transport.TLS is
                   null;  --  output drained above; call again
                elsif Ret = M.ERR_WANT_READ then
                   --  mbedTLS needs a record from the peer mid-write.
-                  --  Get it ourselves, or wait for the reader task —
-                  --  bounded by OUR (write) deadline either way.
+                  --  Get it ourselves, or wait for the reader task,
+                  --  bounded by this operation's (write) deadline
+                  --  either way.
                   Feed (St, DL, Epoch0, "TLS write");
                   if St.Coord.EOF then
                      raise TLS_Error
@@ -987,11 +902,9 @@ package body AHT.Transport.TLS is
                when E : TLS_Error | AHT.Transport.Timeout_Error
                   | AHT.Transport.Aborted_Error
                   | AHT.Transport.Transport_Error =>
-                  --  Fail-closed: the record stream may be half-
-                  --  written and irrecoverable, so the session is
-                  --  dropped before the exception propagates — a retry
-                  --  then raises rather than emitting onto a
-                  --  desynchronised stream.
+                  --  Fail-closed: the record stream may be half
+                  --  written, so the session is dropped before the
+                  --  exception propagates.
                   Latch_Engine_Dead
                     (St, "TLS write failed: "
                      & Ada.Exceptions.Exception_Name (E) & " - "
@@ -1018,9 +931,8 @@ package body AHT.Transport.TLS is
       Self.State := null;
 
       --  Block 1 (best-effort): close_notify + its drain, skipped for
-      --  a session that died fatally (another record on a
-      --  desynchronised stream helps nobody). Close is documented
-      --  single-threaded, so plain state reads are fine here.
+      --  a session that died fatally. Close is single-threaded, so
+      --  plain state reads are fine.
       begin
          if Self.Connected
            and then not St.Coord.Fatal
@@ -1059,7 +971,7 @@ package body AHT.Transport.TLS is
       end;
 
       --  Block 3 (unconditional): every free runs even if the blocks
-      --  above failed — Finalize only swallows exceptions after Close
+      --  above failed; Finalize only swallows exceptions after Close
       --  has unwound, so Close itself must never skip cleanup.
       if St.SSL /= System.Null_Address then
          AHT.Mbedtls.Glue.SSL_Free (St.SSL);

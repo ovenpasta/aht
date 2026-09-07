@@ -28,7 +28,7 @@ package body AHT.HTTP.Client is
       elsif Self.Timeout_Seconds > 0 then Duration (Self.Timeout_Seconds)
       else Duration'Last);
 
-   --  "host" or "host:port" — only emits the port when it differs
+   --  "host" or "host:port": the port is emitted only when it differs
    --  from the URL scheme's default, matching how browsers and curl
    --  format the Host header.
    function Host_Header (U : AHT.URL.URL_Type) return String is
@@ -44,18 +44,12 @@ package body AHT.HTTP.Client is
             (AHT.URL.Port_Number'Image (U.Port), Ada.Strings.Both);
    end Host_Header;
 
-   --  Merge `Self.Default_Headers` and the auto-set Host /
-   --  User-Agent / Connection onto `Working`, with the rule
-   --  "request beats defaults, defaults beat auto":
-   --    1. For each Name in Default_Headers, if Req.Headers does
-   --       not contain Name, copy *all* of Default_Headers's entries
-   --       for that Name across (preserves multi-valued defaults
-   --       like repeated Accept).
-   --    2. Then for Host / User-Agent / Connection, set them only
-   --       if Working still doesn't contain them — so a default of
-   --       `User-Agent: my-app/1` overrides `Self.User_Agent`, and
-   --       an explicit `Connection: Upgrade` on the request (e.g.
-   --       from the WebSocket layer) is preserved.
+   --  Merges Self.Default_Headers and the auto-set Host / User-Agent
+   --  / Connection onto Working: request beats defaults, defaults
+   --  beat auto. A default name absent from Req.Headers is copied
+   --  with all its values; Host, User-Agent and Connection are set
+   --  only if still absent, so a request's Connection: Upgrade is
+   --  preserved.
    procedure Merge_Headers
      (Self    : Client_Type;
       Req     : AHT.HTTP.Request.Request_Type;
@@ -81,22 +75,11 @@ package body AHT.HTTP.Client is
       end if;
    end Merge_Headers;
 
-   --  Wire round-trip on an already-connected transport: optional
-   --  read deadline, write the request, then loop over
-   --  Response.Read_Streaming until the status is not 1xx. 101
-   --  Switching Protocols is terminal — exit with the response so
-   --  post-header bytes (e.g. WebSocket frames) stay buffered on
-   --  the transport for the next layer.
-   --
-   --  Sink receives the body bytes chunk-by-chunk. The buffered
-   --  Send overload supplies a sink that appends to Resp.Body_B;
-   --  Send_Streaming forwards the caller's sink unchanged.
-   --
-   --  Source, when non-null, streams the *request* body from the
-   --  caller's pull source (Write_Streaming) instead of emitting the
-   --  buffered Request.Body_B; Cancel feeds the between-window abort
-   --  check so a cross-task Cancel trips Aborted_Error out of the
-   --  upload loop even between transport syscalls.
+   --  Round trip on a connected transport: write the request, then
+   --  loop over Response.Read_Streaming until the status is not 1xx.
+   --  101 is terminal, leaving post-header bytes buffered for the
+   --  next layer. Source, when non-null, streams the request body via
+   --  Write_Streaming with Cancel as the between-window abort check.
    procedure Wire_Round_Trip
      (Self    : Client_Type;
       Working : AHT.HTTP.Request.Request_Type;
@@ -112,14 +95,11 @@ package body AHT.HTTP.Client is
         (Cancel /= null and then Cancel.Was_Cancelled);
    begin
       if Source /= null then
-         --  Streaming upload only: bound a stuck *send* (a peer that
-         --  stops reading mid-upload) by the same budget as the response
-         --  read, so a parked Write raises Timeout_Error instead of
-         --  hanging. The deadline bites only once control is inside
-         --  Transport.Write; a Source.Read_Chunk that blocks is the
-         --  caller's responsibility (see the spec). Buffered Write needs
-         --  no write deadline -- its body is already in RAM and drains in
-         --  one shot -- so this leaves the buffered Send path unchanged.
+         --  Streaming upload only: a parked Write raises
+         --  Timeout_Error instead of hanging. The deadline bites only
+         --  inside Transport.Write; a blocked Read_Chunk is the
+         --  caller's. A buffered body drains in one shot and arms
+         --  none.
          declare
             Bound : constant Duration :=
               Resolve_Bound (Self, Self.Write_Deadline);
@@ -156,21 +136,12 @@ package body AHT.HTTP.Client is
       end loop;
    end Wire_Round_Trip;
 
-   --  Single core for every Send overload. `Sink` always points to a
-   --  callback that receives body chunks; the buffered overloads
-   --  pass a sink that appends to `Resp.Body_B`, the streaming
-   --  overloads forward the caller's. When `Cancel` is null, the
-   --  pre-cancel and bind paths short-circuit; when non-null, the
-   --  live transport is threaded into the protected state so a
-   --  concurrent Cancel can Abort_Pending on it.
-   --
-   --  `Source`, when non-null, streams the request body from the
-   --  caller's pull source (Send_Streaming_Body); when null the
-   --  buffered `Req.Body_B` is written. Either way the response is
-   --  delivered through `Sink`.
-   --
-   --  Pre-cancel is honoured *before* connect — a handle that was
-   --  Cancelled before Send started must not even dial.
+   --  Single core for every Send overload. Sink receives body chunks;
+   --  the buffered overloads pass one that appends to Resp.Body_B.
+   --  Source, when non-null, streams the request body; otherwise
+   --  Req.Body_B is written. Cancel, when non-null, is bound to the
+   --  live transport so a concurrent Cancel can Abort_Pending it,
+   --  and a pre-cancelled handle does not dial.
    procedure Run_Request
      (Self   : Client_Type;
       Req    : AHT.HTTP.Request.Request_Type;
@@ -216,11 +187,11 @@ package body AHT.HTTP.Client is
                   Resolve_Timeout => Resolve_B);
 
                --  Race window: Cancel could fire between Connect
-                --  returning and Bind running. Bind itself
-                --  re-checks Cancelled under the protected lock and
-                --  triggers Abort_Pending on the freshly-bound
-                --  transport, so a Cancel landing here still takes
-                --  effect on the next Read.
+               --  returning and Bind running. Bind itself re-checks
+               --  Cancelled under the protected lock and triggers
+               --  Abort_Pending on the freshly bound transport, so a
+               --  Cancel landing here still takes effect on the next
+               --  Read.
                if Cancel /= null then
                   Cancel.Bind (T'Unchecked_Access);
                end if;
@@ -526,8 +497,6 @@ package body AHT.HTTP.Client is
 
       function Is_Done_Flag return Boolean is (Done_Flag);
 
-      function Is_Bound return Boolean is (Bound /= null);
-
    end Cancel_State;
 
    ---------------------------------------------------------------------
@@ -565,8 +534,8 @@ package body AHT.HTTP.Client is
 
       --  Run the request, stash the result in the shared state,
       --  and terminate. Await reads from the protected state, so
-      --  there's no second rendezvous — multiple Awaits and
-      --  "drop without Await" both work cleanly.
+      --  there is no second rendezvous; multiple Awaits and "drop
+      --  without Await" both work.
       begin
          Run_Request (Client_Snap, Req_Snap, Resp,
                       Sink   => Append_To_Resp'Access,
@@ -593,15 +562,15 @@ package body AHT.HTTP.Client is
              & "started; declare a fresh handle per request";
       end if;
       Async.Started := True;
-      --  'Unchecked_Access bypasses Ada's static accessibility check
+      --  'Unchecked_Access bypasses the static accessibility check
       --  because the named Cancel_State_Access type has library-level
       --  accessibility but Async.State is on the caller's stack. The
-      --  unsafety the check guards against is the access outliving
-      --  the designated object — that can't happen here: the only
-      --  holder of State_Ref is Async.Worker, which is also a
-      --  component of Async_Handle and is finalized together with
-      --  Async.State when the handle goes out of scope (master waits
-      --  for the task before component finalization, RM 9.3).
+      --  check guards against the access outliving the designated
+      --  object, which cannot happen here: the only holder of
+      --  State_Ref is Async.Worker, itself a component of
+      --  Async_Handle, finalized together with Async.State when the
+      --  handle goes out of scope (the master waits for the task
+      --  before component finalization, RM 9.3).
       Async.Worker.Start
         (Client_Snapshot  => Self,
          Request_Snapshot => Req,

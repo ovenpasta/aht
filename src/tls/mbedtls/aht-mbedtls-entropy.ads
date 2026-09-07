@@ -4,19 +4,13 @@
 with Interfaces.C;
 with System;
 
---  The entropy source mbedTLS draws from.
---
---  The vendored library is configured MBEDTLS_NO_PLATFORM_ENTROPY, so
---  it has no source of its own: mbedtls_entropy_init leaves the pool
---  empty and mbedtls_ctr_drbg_seed fails unless something is
---  registered. aht_mbedtls_entropy_new registers the callback below.
---
---  Routing mbedTLS through AHT.Random rather than letting it call the
---  OS itself keeps the platform entropy decision in one place. That is
---  what makes it maintainable on Windows: entropy_poll.c's Windows
---  branch calls BCryptGenRandom, which imports bcrypt.dll and leaves
---  the image unloadable on the XP target. One source, one place to
---  keep XP-clean, one place a mistake can hide.
+--  The entropy source mbedTLS draws from. The vendored library is
+--  built MBEDTLS_NO_PLATFORM_ENTROPY, so mbedtls_entropy_init leaves
+--  the pool empty and seeding fails unless a source is registered;
+--  aht_mbedtls_entropy_new registers Poll. Routing through AHT.Random
+--  keeps the platform entropy decision in one place: entropy_poll.c's
+--  Windows branch calls BCryptGenRandom, which imports bcrypt.dll and
+--  leaves the image unloadable on XP.
 package AHT.Mbedtls.Entropy is
 
    function Poll
@@ -27,17 +21,11 @@ package AHT.Mbedtls.Entropy is
      with Export, Convention => C,
           External_Name => "aht_mbedtls_entropy_poll";
    --  An mbedtls_entropy_f_source_ptr. Fills Output with Len bytes
-   --  from AHT.Random, reports Len through Olen, and returns 0;
-   --  returns MBEDTLS_ERR_ENTROPY_SOURCE_FAILED on any failure.
-   --
-   --  Data is the context pointer registered alongside the callback.
-   --  It is null here, because this source has no state -- which is
-   --  also why one callback serves every session concurrently.
-   --
-   --  Never propagates an Ada exception. AHT.Random.Fill raises
-   --  Entropy_Error when the system CSPRNG refuses, and letting that
-   --  cross into C would unwind through mbedTLS frames that have no
-   --  handler and own heap allocations. The return code is the only
-   --  channel the caller can read.
+   --  from AHT.Random, reports Len through Olen and returns 0; on any
+   --  failure returns MBEDTLS_ERR_ENTROPY_SOURCE_FAILED with Olen = 0.
+   --  Data is the registered context pointer, null here: the source
+   --  has no state, so one callback serves every session. Never
+   --  propagates an Ada exception; the return code is the only
+   --  channel the C caller can read.
 
 end AHT.Mbedtls.Entropy;

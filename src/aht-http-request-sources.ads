@@ -7,33 +7,14 @@ with AHT.Bytes;
 
 package AHT.HTTP.Request.Sources is
 
-   --  Streams a request body from any Ada stream -- a file (via
-   --  Ada.Streams.Stream_IO.Stream), a socket, an in-memory stream, a
-   --  generator -- without ever buffering it, so a caller need not
-   --  hand-roll a Body_Source + Read_Chunk for the common "send this
-   --  stream" case. Ada.Streams.Read already uses the same pull-fill,
-   --  short-Last-at-EOF convention Read_Chunk wants, so Stream_Source is a
-   --  thin delegate.
-   --
-   --  The source *borrows* the stream (it holds an access, not a copy): the
-   --  caller owns the stream's open/close lifetime and must keep it alive
-   --  across the synchronous Send_Streaming_Body / Write_Streaming call.
-   --  That holds by construction -- the call drives the whole upload and
-   --  returns before the source (and the stream it points at) goes out of
-   --  scope, the same reasoning that makes Send_Streaming_Body's
-   --  Source'Access safe.
-   --
-   --  Framing is header-driven and untouched by the source: a generic
-   --  stream has no length, so for fixed framing set Content-Length on the
-   --  request yourself (e.g. Set_Content_Length
-   --  (Byte_Count (Ada.Directories.Size (Path))) for a file); omit it for
-   --  Transfer-Encoding: chunked.
-   --  Indefinite (unknown-discriminant) partial view: there is no valid
-   --  default Stream_Source -- the only way to make one is Create, which
-   --  installs the borrowed stream. This makes "Src : Stream_Source;"
-   --  (which would leave Stream null and fault on the first Read_Chunk) a
-   --  compile error rather than a runtime trap, statically forcing
-   --  construction through Create.
+   --  Streams a request body from any Ada stream (a file via
+   --  Ada.Streams.Stream_IO.Stream, a socket, a generator) without
+   --  buffering it. The source borrows the stream: the caller keeps
+   --  it open across the synchronous Send_Streaming_Body call.
+   --  Framing is header-driven: set Content-Length on the request
+   --  for fixed framing, omit it for chunked. The partial view has
+   --  unknown discriminants, so a Stream_Source can only be made by
+   --  Create; a default one would hold a null stream.
    type Stream_Source (<>) is new Body_Source with private;
 
    function Create

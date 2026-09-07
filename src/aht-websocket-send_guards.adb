@@ -9,9 +9,9 @@ package body AHT.Websocket.Send_Guards is
       begin
          Busy    := True;
          Held_By := Owner;
-         --  Saturating: this is a diagnostic, and a counter that
-         --  wrapped into Constraint_Error would take every
-         --  subsequent send on the connection down with it.
+         --  Saturating: a diagnostic counter that wrapped into
+         --  Constraint_Error would take every subsequent send on the
+         --  connection down with it.
          if Taken < Natural'Last then
             Taken := Taken + 1;
          end if;
@@ -20,9 +20,9 @@ package body AHT.Websocket.Send_Guards is
       procedure Release_If_Owner (Owner : System.Address) is
          use type System.Address;
       begin
-         --  Conditional on purpose: a caller whose acquisition was
-         --  cancelled still runs its release, and must not free a
-         --  latch somebody else is holding.
+         --  Conditional: a caller whose acquisition was cancelled still
+         --  runs its release, and must not free a latch somebody else
+         --  is holding.
          if Busy and then Held_By = Owner then
             Busy    := False;
             Held_By := System.Null_Address;

@@ -67,9 +67,8 @@ package body AHT.Transport.TCP is
       Timed_Out  : Boolean := False;
 
       Budgeted : constant Boolean := Connect_Timeout /= Duration'Last;
-      --  A single absolute instant the whole connect phase must finish
-      --  by, computed once so every candidate draws from the same
-      --  budget rather than each getting a fresh Connect_Timeout.
+      --  One absolute instant for the whole connect phase; every
+      --  candidate draws from the same budget.
       Deadline : constant Time :=
         (if Budgeted then Clock + To_Time_Span (Connect_Timeout) else Clock);
 
@@ -158,18 +157,11 @@ package body AHT.Transport.TCP is
       end Try;
 
    begin
-      --  A transport is permanently single-use. `Used` latches True at the
-      --  first fully-successful Connect and is never cleared, so a reused
-      --  object is rejected even after Close — crucially even if that Close
-      --  raced a parked reader and could only best-effort the selector
-      --  teardown (leaving the ownership bits looking clean). The
-      --  Socket/Selector checks additionally reject any object that still
-      --  owns OS resources before a first success completes (live or
-      --  poisoned). We must NOT reclaim in place: a reader parked in Read on
-      --  the old session could wake after this swaps in a new fd and then
-      --  Receive_Socket against the wrong generation. The caller must Close
-      --  (single-threaded, after every read/write task has quiesced) and
-      --  connect a *fresh* object instead.
+      --  Single-use: Used latches at the first successful Connect and
+      --  is never cleared, so a reused object is rejected even after
+      --  Close. The Socket/Selector checks also reject an object still
+      --  owning OS resources. Nothing is reclaimed in place: a reader
+      --  parked on the old session could wake against a new fd.
       if Self.Used
         or else Self.Socket /= No_Socket
         or else Self.Selector_Open
@@ -201,12 +193,9 @@ package body AHT.Transport.TCP is
          end if;
       end if;
 
-      --  Socket is connected. Now create the selector Read/Abort_Pending
-      --  need. Deferred until here so that a failed connect path (every
-      --  candidate refused, DNS lookup failure, etc.) never leaves the
-      --  transport holding an open selector that only a later Close
-      --  would have released. If Create_Selector itself fails we unwind
-      --  the just-opened socket too, keeping the object reusable.
+      --  Create the selectors only now, so a failed connect never
+      --  leaves the transport holding an open selector. If
+      --  Create_Selector fails the socket is unwound too.
       if not Self.Selector_Open then
          begin
             Create_Selector (Self.Selector);
@@ -237,11 +226,9 @@ package body AHT.Transport.TCP is
          end;
       end if;
 
-      --  Switch to non-blocking IO so neither Send_Socket nor
-      --  Receive_Socket can block in the kernel: the per-connection
-      --  Selector becomes the *only* place Read/Write park, which is what
-      --  lets the read/write deadlines and Abort_Pending bite at every
-      --  re-park instead of being stuck inside an in-flight syscall.
+      --  Non-blocking IO: the selectors become the only place Read
+      --  and Write park, so deadlines and Abort_Pending bite at every
+      --  re-park and never inside a syscall.
       declare
          Nonblock : Request_Type (Name => Non_Blocking_IO) :=
            (Name => Non_Blocking_IO, Enabled => True);
@@ -274,7 +261,7 @@ package body AHT.Transport.TCP is
 
       --  Fully connected: socket up, both selectors open, non-blocking set.
       --  Latch single-use here (the definite-success point) so every later
-      --  Connect is rejected even after a Close — see the guard above.
+      --  Connect is rejected even after a Close; see the guard above.
       Self.Used := True;
    end Connect_Candidates;
 
@@ -308,10 +295,8 @@ package body AHT.Transport.TCP is
             N      : AHT.DNS.Address_Count;
             Status : AHT.DNS.Resolve_Status;
          begin
-            --  Through AHT.DNS rather than Get_Host_By_Name, which
-            --  has no deadline: the budget has to exist before the
-            --  call, since nothing can interrupt one already running.
-            --  This also reaches IPv6, which gethostbyname does not.
+            --  AHT.DNS, not Get_Host_By_Name: the latter has no
+            --  deadline and does not reach IPv6.
             AHT.DNS.Resolve
               (Host    => Host,
                Service => "",
@@ -324,11 +309,9 @@ package body AHT.Transport.TCP is
                when AHT.DNS.Resolved =>
                   null;
                when AHT.DNS.Timed_Out =>
-                  --  Timeout_Error and not Transport_Error: the name
-                  --  may be perfectly good and the resolver merely
-                  --  slow, which is a different thing from a lookup
-                  --  that answered "no such host" — and the two want
-                  --  different retry decisions.
+                  --  Timeout_Error, not Transport_Error: a slow
+                  --  resolver and a bad name want different retry
+                  --  decisions.
                   raise Timeout_Error with
                     "TCP connect to " & Host
                     & ": DNS lookup did not answer within"
@@ -364,10 +347,10 @@ package body AHT.Transport.TCP is
       Has_Deadline : Boolean;
       Deadline_At  : Ada.Real_Time.Time)
    is
-      --  Send in bounded windows. A Data'Length-sized Stream_Element_Array
-      --  would be a dynamically-sized *primary*-stack object that overflows
-      --  the fixed thread stack on multi-MB frames (RFC 6455 §9 8M/16M);
-      --  a fixed window keeps the stack footprint O(1) in the payload size.
+      --  A Data'Length-sized Stream_Element_Array would be a
+      --  dynamically-sized primary-stack object and overflow the
+      --  thread stack on multi-MB frames (RFC 6455 section 9); a
+      --  fixed window keeps the footprint O(1).
       Window_Max : constant := 65_536;
       Buffer     : Stream_Element_Array (1 .. Window_Max);
       Sent       : Stream_Element_Offset;
@@ -376,10 +359,9 @@ package body AHT.Transport.TCP is
       W_Set      : Socket_Set_Type;
       Status     : Selector_Status;
 
-      --  True once any byte of this Write has been accepted by the kernel.
-      --  If a later park then fails (deadline, abort, peer close, socket
-      --  error), the application message on the wire is truncated and the
-      --  connection must not be reused — see the exception handler.
+      --  True once any byte of this Write reached the kernel. A later
+      --  failure then truncates the message on the wire and the
+      --  connection must not be reused; see the exception handler.
       Progress   : Boolean := False;
    begin
       if not Self.Connected then
@@ -399,7 +381,7 @@ package body AHT.Transport.TCP is
             --  The socket is non-blocking, so a single Send_Socket only
             --  accepts whatever the kernel buffer has room for. Park in
             --  Check_Selector until the socket is writable, send the
-            --  partial count, advance, re-park — so the write deadline
+            --  partial count, advance, re-park, so the write deadline
             --  and Abort_Pending bite at every park, never inside an
             --  in-flight syscall.
             while Cursor <= Slice'Last loop
@@ -432,16 +414,11 @@ package body AHT.Transport.TCP is
                         then AHT.Transport.Waits.Bounded (Timeout)
                         else GNAT.Sockets.Forever));
 
-                  --  Poison may have fired underneath this park, from a
-                  --  read-side fatal path rather than from here. Same
-                  --  reasoning as the read loop: decide on Connected, so
-                  --  the outcome does not depend on which wake arrived.
-                  --
-                  --  Distinct message from the pre-loop guard's, for the
-                  --  reason the read loop gives at length -- including
-                  --  both caveats: the entry check is the landmark, not
-                  --  the call, and this says nothing about whether the
-                  --  caller was blocked when the poison landed.
+                  --  Poison may have fired under this park, from a
+                  --  read-side path. Decide on Connected, as the read
+                  --  loop does, so the outcome does not depend on
+                  --  which wake arrived. Distinct wording from the
+                  --  entry-guard message.
                   if not Self.Connected then
                      Log.Debug
                        ("write found the transport poisoned after entry");
@@ -459,15 +436,12 @@ package body AHT.Transport.TCP is
                               Cursor := Sent + 1;
                               Progress := True;
                            else
-                              --  Selector reported writable but the send
-                              --  accepted zero bytes (Last < First). On a
-                              --  non-blocking socket a transient can't-send is
-                              --  EAGAIN (the Socket_Error path below), so a
-                              --  zero-length send on a ready socket is GNAT's
-                              --  closed-peer signal (cf. Stream_Write's
-                              --  "exit when Index < First"). Re-parking would
-                              --  busy-spin on the still-writable socket, so
-                              --  fail fast instead.
+                              --  Ready but accepted zero bytes. A
+                              --  transient can't-send on a
+                              --  non-blocking socket is EAGAIN (the
+                              --  Socket_Error path), so this is GNAT's
+                              --  closed-peer signal (cf. Stream_Write).
+                              --  Re-parking would busy-spin.
                               raise Transport_Error
                                 with "TCP write: peer closed connection";
                            end if;
@@ -481,16 +455,12 @@ package body AHT.Transport.TCP is
                               --  would-block: re-park
                         end;
                      when Expired =>
-                        --  The chunk ran out, which is not necessarily
-                        --  the deadline: a budget longer than
-                        --  Longest_Finite is served in pieces. Only
-                        --  the absolute deadline decides.
-                        --
-                        --  Deliberately not exercised by a test:
-                        --  reaching here needs a budget above
-                        --  Longest_Finite, which on Linux nothing can
-                        --  exceed and on Windows means waiting ~49.7
-                        --  days. See the note in test_waits.
+                        --  An expired chunk is the deadline only if
+                        --  the absolute deadline arrived: a budget
+                        --  above Longest_Finite is served in pieces.
+                        --  Not exercised by a test: it needs a budget
+                        --  above Longest_Finite, ~49.7 days on
+                        --  Windows and unreachable on Linux.
                         if Has_Deadline
                           and then Clock < Deadline_At
                         then
@@ -509,31 +479,26 @@ package body AHT.Transport.TCP is
          end;
       end loop;
    exception
-      --  Poison the connection on any fatal write so a desynchronised or
-      --  dead socket is never reused (the TCP analogue of TLS's
-      --  Drop_Connection): Is_Connected then reads False and a retry raises
-      --  "TCP write on closed transport". The decision is by *cause*, not
-      --  just by how many bytes went out:
+      --  Poison on any fatal write so a desynchronised or dead socket
+      --  is never reused: Is_Connected reads False and a retry raises.
+      --  The decision is by cause, not by bytes sent:
       when E : Socket_Error =>
-         --  Non-EAGAIN socket error = the endpoint is gone (reset, broken
-         --  pipe, ...). Dead regardless of progress, so always poison. We
-         --  poison rather than Close because a concurrent reader may still
-         --  be parked in Check_Selector and Close would race its selector.
+         --  A non-EAGAIN socket error: the endpoint is gone. Poison,
+         --  not Close: a concurrent reader may be parked on its
+         --  selector.
          Poison (Self);
          raise Transport_Error with
            "TCP write failed: " & Ada.Exceptions.Exception_Message (E);
       when Transport_Error =>
-         --  Peer-closed-mid-write (the zero-byte send signal) — the endpoint
-         --  is gone, so always poison. (The pre-loop "closed transport"
-         --  guard lands here too, as does the poisoned-wake check inside
-         --  the park loop; Poison is then a harmless no-op.)
+         --  Peer closed mid-write: always poison. The entry guard and
+         --  the poisoned-wake check land here too; Poison is then a
+         --  no-op.
          Poison (Self);
          raise;
       when others =>
-         --  A *local* interruption (Timeout_Error / Aborted_Error). With no
-         --  byte accepted the byte stream is intact and the connection stays
-         --  reusable; only a partial send (Progress) truncated a message and
-         --  forces a teardown.
+         --  A local interruption (Timeout_Error / Aborted_Error): with
+         --  no byte accepted the stream is intact and the connection
+         --  stays usable; a partial send forces a teardown.
          if Progress then
             Poison (Self);
          end if;
@@ -615,41 +580,12 @@ package body AHT.Transport.TCP is
                then AHT.Transport.Waits.Bounded (Timeout)
                else GNAT.Sockets.Forever));
 
-         --  Poison may have fired while this task was parked, and the
-         --  wake is reported differently depending on which mechanism
-         --  got there: the selector abort shows up as Aborted, and on
-         --  POSIX the socket shutdown may beat it to Completed, after
-         --  which Receive_Socket would report 0 and this would look
-         --  like an orderly EOF from the peer. It is not — the
-         --  connection was torn down under the reader by a failing
-         --  write on the other side of it.
-         --
-         --  Deciding on Connected rather than on Status settles both:
-         --  one outcome, the same on either platform, and it says the
-         --  true thing. Same field the entry guard above reads, and
-         --  read the same way.
-         --
-         --  Distinct message from that entry guard, and load-bearing:
-         --  without different wording a test cannot tell which of the
-         --  two it provoked.
-         --
-         --  The two are separated by the entry check, and by nothing
-         --  else. Reaching here means Connected was True there and
-         --  False now. Reaching the guard's raise means it was already
-         --  False there -- which does NOT mean the poison preceded the
-         --  call, since the caller may have entered, been descheduled,
-         --  and been poisoned before it got as far as looking.
-         --
-         --  Nor does reaching here mean the caller was parked.
-         --  Abort_Selector queues an event that satisfies the next
-         --  Check_Selector as readily as a current one, so a task that
-         --  passed the guard, lost the CPU, and arrived at the selector
-         --  after Poison had run lands here without ever having
-         --  blocked.
-         --
-         --  So the wording names the entry check rather than the call
-         --  or the wait, because the entry check is the only landmark
-         --  either side of this actually establishes.
+         --  Poison may have fired during the park. The selector abort
+         --  reports Aborted; on POSIX the shutdown may instead report
+         --  Completed, after which Receive_Socket returns 0 and looks
+         --  like a peer EOF. Deciding on Connected gives one outcome
+         --  on every platform. Distinct wording from the entry-guard
+         --  message; neither says whether the caller was parked.
          if not Self.Connected then
             Log.Debug ("read found the transport poisoned after entry");
             raise Transport_Error
@@ -803,11 +739,9 @@ package body AHT.Transport.TCP is
       if Deadline = Duration'Last then
          Self.Has_Write_Deadline := False;
       else
-         --  Compute before assigning either field. Converting an
-         --  absurd Deadline raises, and doing it after setting the
-         --  flag would leave the transport claiming a deadline it
-         --  never computed -- whose stale value is in the past, so
-         --  every later write would fail instantly.
+         --  Compute before assigning either field: converting an
+         --  absurd Deadline raises, and a flag set over a stale value
+         --  would fail every later write instantly.
          declare
             At_Time : constant Time := Clock + To_Time_Span (Deadline);
          begin
@@ -845,12 +779,10 @@ package body AHT.Transport.TCP is
       Self.Connected := False;
       Log.Debug ("poison");
 
-      --  Shutdown (not close) the data socket, without freeing the FD or
-      --  the selectors. Closing the selectors here would race a
-      --  concurrent reader (GNAT forbids Close_Selector while a task is
-      --  in Check_Selector); reclamation is left to the single-threaded
-      --  Close, which the Socket /= No_Socket guard lets run even though
-      --  Connected is already False.
+      --  Shutdown, not close, and the selectors stay open: GNAT
+      --  forbids Close_Selector while a task is in Check_Selector.
+      --  Reclamation is left to Close, whose Socket /= No_Socket
+      --  guard runs even though Connected is already False.
       if Self.Socket /= No_Socket then
          begin
             Shutdown_Socket (Self.Socket, Shut_Read_Write);
@@ -859,30 +791,12 @@ package body AHT.Transport.TCP is
          end;
       end if;
 
-      --  The shutdown alone does not wake a reader parked in
-      --  Check_Selector, and used to be all this did.
-      --
-      --  On POSIX it looks like it does: shutting a socket down makes it
-      --  readable, so the parked select returns and Receive_Socket then
-      --  reports 0. Winsock does not do that — a locally initiated
-      --  shutdown changes what later calls may do and signals nothing to
-      --  a select already waiting, which only the peer's FIN does.
-      --  Measured, not inferred: a two-line C probe parks a select and
-      --  shuts the socket down under it; POSIX wakes readable with
-      --  recv=0, Windows runs to the select's own timeout.
-      --
-      --  So the wake goes through the selector instead, the same channel
-      --  Abort_Pending uses. That one is portable because GNAT gives
-      --  every selector an explicit signalling channel rather than
-      --  inferring readiness from socket state.
-      --
-      --  Both selectors, as Abort_Pending does. The caller is not
-      --  necessarily the writer: TLS's Drop_Connection poisons from
-      --  read-side fatal paths as well, so a writer can be parked in
-      --  Check_Selector on the write selector at this moment and would
-      --  otherwise stay there. Aborting a selector nobody is waiting on
-      --  is harmless -- the transport is dead either way, and every
-      --  later operation is refused before it parks.
+      --  Shutdown alone does not portably wake a parked reader: POSIX
+      --  wakes a parked select on shutdown, Windows does not (only the
+      --  peer's FIN does). The wake goes through the selectors, as in
+      --  Abort_Pending. Both selectors: Drop_Connection poisons from
+      --  read-side paths too, so a writer may be parked. Aborting an
+      --  idle selector is harmless.
       if Self.Selector_Open then
          begin
             Abort_Selector (Self.Selector);

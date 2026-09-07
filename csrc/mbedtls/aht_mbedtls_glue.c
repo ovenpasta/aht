@@ -2,26 +2,13 @@
  *  SPDX-License-Identifier: Apache-2.0
  */
 
-/*
- * aht_mbedtls_glue.c — minimal C glue for the Ada mbedTLS binding.
+/* aht_mbedtls_glue.c - C glue for the Ada mbedTLS binding.
  *
- * Why this exists: the mbedTLS context structs (ssl, config, ctr_drbg,
- * entropy, x509_crt) have layouts and sizes that depend on the target
- * ABI *and* the build configuration (our build enables
- * MBEDTLS_THREADING_C, which adds a mutex member). Hardcoding those
- * sizes — or modelling the structs — in Ada would break on any platform
- * whose layout differs from the box the bindings were generated on. So
- * Ada treats every context as an opaque pointer and the *target's* C
- * compiler computes sizeof here, where it is always correct.
- *
- * Scope is deliberately tiny:
- *   - per-context new/free (where sizeof matters), and
- *   - the two calls that pass mbedTLS's own function pointers
- *     (mbedtls_entropy_func, mbedtls_ctr_drbg_random), which is naturally
- *     C's job.
- * Every other mbedTLS operation is bound directly from Ada against these
- * opaque handles — function signatures are ABI-stable, struct layouts
- * are not.
+ * The context structs (ssl, config, ctr_drbg, entropy, x509_crt)
+ * have ABI- and configuration-dependent layouts (the posix archive
+ * enables MBEDTLS_THREADING_C, the Windows one is threadless), so Ada
+ * treats each as an opaque pointer and sizeof is computed here.
+ * Also here: the two calls that pass mbedTLS's own function pointers.
  */
 
 #include <stdlib.h>
@@ -74,25 +61,18 @@ void aht_mbedtls_ctr_drbg_free(void *c)
 }
 
 /* AHT.Mbedtls.Entropy.Poll. Declared here rather than in a header
- * because it is the only symbol crossing in this direction, and a
- * header for one extern would be a file to keep in step by hand. */
+ * because it is the only symbol crossing in this direction. */
 extern int aht_mbedtls_entropy_poll(void *data, unsigned char *output,
                                     size_t len, size_t *olen);
 
-/* The library is built MBEDTLS_NO_PLATFORM_ENTROPY, so entropy_poll.c
- * contributes nothing and mbedtls_entropy_init leaves the pool with no
- * sources at all -- seeding would fail rather than fall back. The
- * source registered here is AHT.Random, which is also what the rest of
- * the library draws masks and nonces from.
- *
- * MBEDTLS_ENTROPY_BLOCK_SIZE is the number of bytes the pool must take
- * from this source before it considers itself seeded; SOURCE_STRONG
- * says the source is fit to be the only one, which here it is.
- *
- * A failed registration is reported as allocation failure. The
- * alternative -- returning a context with no sources -- defers the
- * report to mbedtls_ctr_drbg_seed, which cannot say which of several
- * things went wrong. */
+/* The library is built MBEDTLS_NO_PLATFORM_ENTROPY, so the pool has
+ * no sources and seeding would fail. The source registered here is
+ * AHT.Random, which the rest of the library also draws from.
+ * MBEDTLS_ENTROPY_BLOCK_SIZE is the number of bytes the pool takes
+ * from a source before it counts as seeded; SOURCE_STRONG says the
+ * source may be the only one. A failed registration is reported as
+ * allocation failure: a context with no sources would defer the
+ * report to mbedtls_ctr_drbg_seed. */
 void *aht_mbedtls_entropy_new(void)
 {
     mbedtls_entropy_context *c = malloc(sizeof *c);
@@ -130,8 +110,8 @@ void aht_mbedtls_x509_crt_free(void *c)
 }
 
 /* Seed CTR_DRBG from the entropy source. mbedtls_entropy_func is the
- * library's own entropy callback; passing it (a C function pointer) is
- * cleaner here than from Ada. No personalization string. */
+ * library's own entropy callback; passing a C function pointer is
+ * simpler here than from Ada. No personalization string. */
 int aht_mbedtls_ctr_drbg_seed(void *ctr_drbg, void *entropy)
 {
     return mbedtls_ctr_drbg_seed((mbedtls_ctr_drbg_context *) ctr_drbg,

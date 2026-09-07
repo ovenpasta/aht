@@ -18,8 +18,8 @@ package AHT.HTTP.Headers is
    subtype Value_List is Value_Vectors.Vector;
 
    --  Number of individual header entries (multi-valued headers count once
-   --  per value because they are stored as repeated entries — matching
-   --  RFC 7230 §3.2.2 semantics).
+   --  per value because they are stored as repeated entries, matching
+   --  RFC 7230 sec. 3.2.2 semantics).
    function Count (Self : Map) return Natural;
 
    procedure Set    (Self : in out Map; Name, Value : String)
@@ -42,7 +42,7 @@ package AHT.HTTP.Headers is
    function Values (Self : Map; Name : String) return Value_List;
    --  Returns every value set for Name, in insertion order. Empty
    --  vector if absent. No combining is performed: some headers
-   --  (notably Set-Cookie, RFC 6265 §3) are NOT comma-combinable,
+   --  (notably Set-Cookie, RFC 6265 sec. 3) are NOT comma-combinable,
    --  so the caller decides how to join them.
 
    procedure Iterate

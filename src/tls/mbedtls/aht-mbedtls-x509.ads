@@ -26,16 +26,11 @@ package AHT.Mbedtls.X509 is
       Len   : Interfaces.C.size_t) return Interfaces.C.int
      with Import, Convention => C,
           External_Name => "mbedtls_x509_crt_parse";
-   --  In-memory form, for PEM held in the binary rather than on disk.
-   --
-   --  Len MUST include a terminating NUL when Buf holds PEM: mbedTLS
-   --  decides between PEM and DER by looking for "-----BEGIN" and
-   --  requires the PEM branch's buffer to be NUL-terminated *within*
-   --  the counted length. Passing the text length alone makes it try
-   --  to parse the bytes as DER and fail with a confusing error.
-   --
-   --  Returns 0 when every certificate parsed, a positive count of
-   --  certificates that failed when some did, and a negative mbedTLS
-   --  error otherwise -- so only 0 is a clean load.
+   --  In-memory form. Len MUST include a terminating NUL when Buf
+   --  holds PEM: mbedTLS picks PEM over DER by finding "-----BEGIN"
+   --  and requires the NUL inside the counted length; the text length
+   --  alone makes it try DER. Returns 0 when every certificate
+   --  parsed, a positive count of failed certificates, or a negative
+   --  mbedTLS error; only 0 is a clean load.
 
 end AHT.Mbedtls.X509;

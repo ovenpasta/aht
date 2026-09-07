@@ -5,8 +5,8 @@ with Interfaces.C;
 with System;
 
 --  Curated binding for the libssl surface AHT.Transport.TLS uses. Only
---  *function* symbols are bound — every handle is an opaque
---  System.Address — plus the API constants we branch on, which are
+--  *function* symbols are bound, every handle is an opaque
+--  System.Address, plus the API constants we branch on, which are
 --  plain header-defined integers (not ABI-dependent). Macro-defined
 --  entry points live in AHT.Openssl.Glue instead.
 package AHT.Openssl.SSL is
@@ -28,11 +28,10 @@ package AHT.Openssl.SSL is
    --  Protocol version for SSL_CTX_set_min_proto_version (via Glue).
    TLS_1_2_VERSION : constant Interfaces.C.int := 16#0303#;
 
-   --  SSL_CTX_set_options bits (uint64_t since 3.0). Curated subset:
-   --  NO_RENEGOTIATION hardens the client against server-initiated
-   --  TLS 1.2 renegotiation, which would complicate the concurrency
-   --  reasoning for no benefit. (SSL_OP_IGNORE_UNEXPECTED_EOF is
-   --  deliberately NOT bound: truncation must fail — see docs/tls.md.)
+   --  SSL_CTX_set_options bits (uint64_t since 3.0). NO_RENEGOTIATION
+   --  refuses server-initiated TLS 1.2 renegotiation.
+   --  SSL_OP_IGNORE_UNEXPECTED_EOF is not bound: truncation must fail,
+   --  see docs/tls.md.
    OP_NO_RENEGOTIATION : constant Interfaces.Unsigned_64 :=
      16#4000_0000#;  --  SSL_OP_BIT(30)
 
@@ -98,7 +97,7 @@ package AHT.Openssl.SSL is
       WBio : System.Address)
      with Import, Convention => C, External_Name => "SSL_set_bio";
    --  Transfers ownership of both BIOs to the SSL (they are freed by
-   --  Free above) — after this call, never BIO_free them directly.
+   --  Free above), after this call, never BIO_free them directly.
 
    procedure Set_Connect_State (S : System.Address)
      with Import, Convention => C, External_Name => "SSL_set_connect_state";
@@ -138,7 +137,7 @@ package AHT.Openssl.SSL is
 
    function Shutdown (S : System.Address) return Interfaces.C.int
      with Import, Convention => C, External_Name => "SSL_shutdown";
-   --  Special result protocol — NOT followed by Get_Error on >= 0:
+   --  Special result protocol, NOT followed by Get_Error on >= 0:
    --  0 = close_notify sent (ours queued to the BIO), 1 = bidirectional
    --  shutdown complete, < 0 = error.
 

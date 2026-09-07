@@ -17,41 +17,20 @@ package body AHT.PEM is
    ---------------------
 
    function Bundle_Problem (Data : String) return String is
-      --  Scanned by OFFSET from Data'First, never by absolute index.
-      --
-      --  A String's bounds are arbitrary, and the scan needs to
-      --  represent "one past the last character" -- which as an
-      --  absolute position is Data'Last + 1 and overflows when the
-      --  bounds sit near Positive'Last. The object can be tiny and
-      --  still do this; it is the bounds, not the size, that are
-      --  extreme. An offset in 0 .. Len has no such edge: Len is a
-      --  length, and Data'First + O is only ever formed while
-      --  O < Len, so it cannot exceed Data'Last.
+      --  Scanned by offset from Data'First, never by absolute index:
+      --  "one past the last character" as an absolute position is
+      --  Data'Last + 1, which overflows when the bounds sit near
+      --  Positive'Last. An offset in 0 .. Len has no such edge.
       Len    : constant Natural := Data'Length;
       O      : Natural := 0;
       Blocks : Natural := 0;
 
-      --  Both halves are written to keep every intermediate inside
-      --  the type.
-      --
-      --  The bound is M'Length <= Len - O rather than
-      --  O + M'Length <= Len: the sum can exceed Integer'Last while
-      --  the comparison it feeds is false, so the check meant to
-      --  prevent the overrun would itself overflow.
-      --
-      --  That one is defensive and is NOT covered: reaching it needs
-      --  Len itself near Integer'Last, i.e. a genuinely
-      --  multi-gigabyte bundle, which no test here allocates. Kept
-      --  because it costs nothing and the subtraction is no harder to
-      --  read. The other two below are covered, and each fails the
-      --  suite on its own when backed out.
-      --
-      --  The slice endpoint is Data'First + (O + M'Length - 1), not
-      --  Data'First + O + M'Length - 1. Ada evaluates the latter
-      --  left-to-right, so it forms Data'Last + 1 on the way to
-      --  Data'Last -- which overflows for a bundle ending exactly at
-      --  Positive'Last. Bracketing keeps the offset arithmetic among
-      --  small numbers and adds Data'First exactly once.
+      --  The bound is M'Length <= Len - O: the sum O + M'Length can
+      --  overflow while the comparison is false. Not covered by a
+      --  test (needs Len near Integer'Last); the other two overflow
+      --  guards in this function are. The slice endpoint brackets
+      --  (O + M'Length - 1) so Data'Last + 1 is never formed on the
+      --  way to Data'Last.
       function At_Marker (M : String) return Boolean is
         (M'Length <= Len - O
          and then Data (Data'First + O
@@ -82,18 +61,16 @@ package body AHT.PEM is
 
          --  Nothing follows the marker. Checked before the slice
          --  below, because with O = Len the start expression
-         --  Data'First + O is itself Data'Last + 1 and overflows --
-         --  the same hazard as the endpoint above, reached by a
-         --  different route.
+         --  Data'First + O is itself Data'Last + 1 and overflows,
+         --  the same hazard as the endpoint above.
          if O = Len then
             return "certificate" & Natural'Image (Blocks + 1)
               & " has no " & End_Line
               & "; it is truncated or corrupt";
          end if;
 
-         --  The matching END, searched for from here rather than
-         --  anywhere in the input, so a stray END before the next
-         --  BEGIN cannot be claimed by the wrong block.
+         --  The matching END, searched for from here so a stray END
+         --  before the next BEGIN cannot be claimed by the wrong block.
          declare
             Tail  : String renames Data (Data'First + O .. Data'Last);
             E_Abs : constant Natural :=

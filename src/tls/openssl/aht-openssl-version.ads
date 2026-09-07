@@ -2,10 +2,11 @@
 --  SPDX-License-Identifier: Apache-2.0
 
 --  Version introspection for the linked OpenSSL. The three numeric
---  functions are new in OpenSSL 3.0, so merely LINKING this unit is a
---  LibreSSL/1.1 tripwire; AHT.Transport.TLS additionally checks
---  Major >= 3 at Connect so the guarantee is consumer-facing, and
---  test_tls_version asserts it in the suite.
+--  functions are new in OpenSSL 3.0, so linking this unit already
+--  fails against LibreSSL or OpenSSL 1.1; AHT.Transport.TLS
+--  additionally checks Major >= 3 at Connect so the failure is
+--  reported as a TLS_Error, and test_tls_version
+--  (tests/src/openssl/) asserts it in the suite.
 package AHT.Openssl.Version is
 
    function Major return Natural;

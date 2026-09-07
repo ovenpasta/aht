@@ -95,7 +95,7 @@ package body AHT.URL is
          end if;
 
          --  Split off userinfo at the LAST '@' in the authority (any '@'
-         --  inside userinfo must be percent-encoded per RFC 3986 §3.2.1).
+         --  inside userinfo must be percent-encoded, RFC 3986 3.2.1).
          At_Sign :=
            Ada.Strings.Fixed.Index
              (Input (Auth_Start .. Auth_End), "@",
@@ -139,7 +139,7 @@ package body AHT.URL is
             end;
 
          else
-            --  Regular host[:port] — split on the LAST ':' (hosts cannot
+            --  Regular host[:port], split on the LAST ':' (hosts cannot
             --  contain ':' outside IPv6 brackets).
             declare
                Colon : constant Natural :=

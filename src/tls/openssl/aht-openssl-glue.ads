@@ -37,15 +37,11 @@ package AHT.Openssl.Glue is
       Len : Interfaces.C.int) return Interfaces.C.int
      with Import, Convention => C,
           External_Name => "aht_openssl_ctx_load_ca_pem";
-   --  Load one or more concatenated PEM certificates from memory into
-   --  Ctx's trust store. Returns the number added (> 0), or a negative
-   --  code: -1 allocation / no store, -2 no certificate found,
-   --  -3 trailing or malformed data, -4 could not add to the store.
-   --
-   --  All-or-nothing, which is why this is glue rather than an Ada
-   --  loop over PEM_read_bio_X509: classifying "clean end of input"
-   --  apart from "malformed tail" needs ERR_GET_REASON and the
-   --  PEM_R_/X509_R_ reason codes, whose values and masking drift
-   --  across OpenSSL releases.
+   --  Load concatenated PEM certificates from memory into Ctx's trust
+   --  store, all-or-nothing. Returns the number added (> 0), or -1
+   --  allocation / no store, -2 no certificate found, -3 trailing or
+   --  malformed data, -4 could not add to the store. Glue, because
+   --  telling a clean end of input from a malformed tail needs
+   --  ERR_GET_REASON and reason codes that vary across releases.
 
 end AHT.Openssl.Glue;

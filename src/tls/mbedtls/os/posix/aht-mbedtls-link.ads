@@ -5,19 +5,17 @@
 --
 --  One body-less spec per OS directory, the same one-unit-per-target
 --  shape as AHT.Random.Source; aht.gpr puts exactly one of them on
---  Source_Dirs. It exists because the vendored library is not
---  configured identically for every target, and the link line has to
---  follow that choice rather than restate a guess about it.
+--  Source_Dirs. The vendored library is not configured identically
+--  for every target, and the link line follows that configuration.
 --
 --  Here, POSIX: scripts/fetch_mbedtls.sh enables
 --  MBEDTLS_THREADING_PTHREAD, so the archive calls pthread_mutex_*
 --  and something has to supply them. Harmless where the C library
---  already does (glibc 2.34 and later, macOS libSystem); load-bearing
+--  already does (glibc 2.34 and later, macOS libSystem); required
 --  where it does not.
 --
 --  The archives themselves stay in the parent spec: they are the same
---  three names everywhere, and duplicating them per OS would be a
---  drift hazard for no gain.
+--  three names everywhere.
 package AHT.Mbedtls.Link is
 
    pragma Linker_Options ("-lpthread");

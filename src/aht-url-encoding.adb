@@ -22,9 +22,9 @@ package body AHT.URL.Encoding is
      (if V < 10 then Character'Val (V + Character'Pos ('0'))
       else Character'Val (V - 10 + Character'Pos ('A')));
 
-   --  RFC 3986 §2.3 unreserved = ASCII ALPHA / DIGIT / '-' / '.' / '_' / '~'.
-   --  Deliberately NOT Ada.Characters.Handling.Is_Alphanumeric, which would
-   --  let Latin-1 accented letters through and produce non-portable URLs.
+   --  RFC 3986 2.3 unreserved: ASCII ALPHA / DIGIT / '-' / '.' / '_'
+   --  / '~'. Not Ada.Characters.Handling.Is_Alphanumeric, which would
+   --  let Latin-1 accented letters through.
    function Is_Unreserved (C : Character) return Boolean is
      (C in '0' .. '9' | 'A' .. 'Z' | 'a' .. 'z'
       or else C = '-' or else C = '.' or else C = '_' or else C = '~');

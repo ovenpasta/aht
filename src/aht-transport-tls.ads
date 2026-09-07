@@ -11,12 +11,11 @@ private with Ada.Real_Time;
 --  Abort_Pending. This spec is backend-neutral: two interchangeable
 --  bodies implement it, selected at build time by the AHT_TLS_BACKEND
 --  gpr external (see docs/tls.md):
---    * openssl — system OpenSSL 3 (libssl/libcrypto).
---    * mbedtls — vendored mbedTLS 3.6, fetched and built on demand.
+--    * openssl: system OpenSSL 3 (libssl/libcrypto).
+--    * mbedtls: vendored mbedTLS 3.6, fetched and built on demand.
 package AHT.Transport.TLS is
 
    type TLS_Transport is new Transport_Type with private;
-   type TLS_Transport_Access is access all TLS_Transport;
 
    TLS_Error : exception;
 
@@ -30,79 +29,26 @@ package AHT.Transport.TLS is
       Handshake_Deadline : Duration := Duration'Last;
       CA_PEM             : String  := "";
       Resolve_Timeout    : Duration := Duration'Last);
-   --  TCP-connect to Host:Port, then run the TLS handshake. For a DNS
-   --  name the handshake sends SNI = Host and verifies the peer
-   --  certificate against Host; for an IP-literal Host the certificate
-   --  is checked against its IP SANs (no SNI). Insecure => the peer
-   --  certificate is not verified; otherwise a verification failure
-   --  raises TLS_Error.
-   --
-   --  CA_Path names the trust anchors: a PEM bundle file or a directory
-   --  of certs. With CA_Path = "" the backends differ:
-   --    * openssl verifies against the platform's default trust store,
-   --      so public https:// endpoints work out of the box;
-   --    * mbedtls configures no default trust, so the handshake rejects
-   --      — pass a CA bundle or set Insecure.
-   --  (A CA *directory* is also backend-specific: openssl requires
-   --  c_rehash-style hashed names, mbedtls loads every file. Prefer a
-   --  bundle file for portability.)
-   --
-   --  CA_PEM is the same trust material held in memory rather than on
-   --  disk -- one or more concatenated PEM certificates, for anchors
-   --  compiled into the binary. Empty means "not supplied" and leaves
-   --  the backend-specific default above untouched.
-   --
-   --  It is appended to the parameter list rather than placed beside
-   --  CA_Path so that existing positional callers passing
-   --  Connect_Timeout and Handshake_Deadline keep compiling and keep
-   --  meaning what they meant.
-   --
-   --  Supplying BOTH CA_Path and CA_PEM raises TLS_Error before
-   --  anything is dialled. There is deliberately no precedence rule,
-   --  and the refusal stands even under Insecure: a caller who gave
-   --  two sets of trust anchors has a mistaken belief about which one
-   --  is in force, and silently honouring one of them leaves that
-   --  belief intact. Under Insecure neither is used, which makes
-   --  quietly accepting the contradiction more misleading rather than
-   --  less.
-   --
-   --  Parsing is all-or-nothing. A bundle whose tail is truncated or
-   --  corrupt is rejected outright rather than installing the
-   --  certificates that parsed before the damage -- trusting a prefix
-   --  of what the caller meant to trust is worse than trusting
-   --  nothing, because nobody finds out.
-   --
-   --  Connect_Timeout is forwarded to the underlying TCP connect as its
-   --  total budget across resolved candidates (see
-   --  AHT.Transport.TCP.Connect); exhaustion raises Timeout_Error.
-   --  Duration'Last leaves the TCP connect unbounded.
-   --
-   --  Resolve_Timeout is likewise forwarded, and bounds the DNS lookup
-   --  that runs ahead of the connect. It is safe here in a way that
-   --  resolving in the *caller* is not: Host stays the name
-   --  throughout, so SNI and certificate verification are unaffected.
-   --  An application that resolved on its own and passed the literal
-   --  in Host instead would silently drop SNI and be verified against
-   --  IP SANs, which is the trap this parameter exists to make
-   --  unnecessary.
-   --
-   --  Handshake_Deadline bounds the **TLS handshake only**: a peer that
-   --  stalls mid-handshake raises Timeout_Error instead of blocking
-   --  forever. It does **not** bound DNS resolution or the TCP connect
-   --  (those run before it is armed). Deadlines installed earlier via
-   --  Set_Read_Deadline / Set_Write_Deadline do not apply to the
-   --  handshake either — they govern subsequent Read/Write calls and
-   --  are installed on the connection only after the handshake
-   --  succeeds. Duration'Last (the default) leaves the handshake
-   --  unbounded.
-   --
-   --  A TLS transport is **single-use after success**: once a Connect
-   --  has completed, further Connect calls raise TLS_Error — even after
-   --  a fatal Write poisoned the session (close the object and use a
-   --  fresh transport to reconnect). A **failed** Connect, however —
-   --  TCP failure, handshake timeout, certificate rejection — releases
-   --  everything it allocated and leaves the object ready for another
-   --  Connect attempt.
+   --  TCP-connect to Host:Port, then run the TLS handshake. A DNS name
+   --  gets SNI = Host and certificate verification against Host; an
+   --  IP literal gets no SNI and is checked against its IP SANs. Host
+   --  stays the name for SNI; see AHT.DNS. Insecure skips
+   --  verification; otherwise a failure raises TLS_Error.
+   --  CA_Path: a PEM bundle file or a directory of certificates. With
+   --  CA_Path = "": openssl uses the platform trust store; mbedtls has
+   --  no default trust and the handshake fails. A directory needs
+   --  c_rehash names on openssl; mbedtls loads every file in it.
+   --  CA_PEM: the same trust material as concatenated PEM in memory; a
+   --  malformed bundle raises TLS_Error with nothing of it installed.
+   --  Both CA_Path and CA_PEM supplied: raises TLS_Error before
+   --  dialling; no precedence.
+   --  Resolve_Timeout bounds the DNS lookup; Timeout_Error.
+   --  Connect_Timeout bounds the TCP connect across all candidates
+   --  (AHT.Transport.TCP.Connect); Timeout_Error.
+   --  Handshake_Deadline bounds the handshake only (Set_*_Deadline do
+   --  not apply to it); Timeout_Error. Duration'Last is unbounded.
+   --  Single-use: after a successful Connect, further Connect calls
+   --  raise TLS_Error. A failed Connect leaves the object retryable.
 
    overriding procedure Write
      (Self : in out TLS_Transport;
@@ -113,64 +59,23 @@ package AHT.Transport.TLS is
       Data : out AHT.Bytes.Byte_Array;
       Last : out Natural);
    --  Concurrency contract (both backends): a TLS transport supports at
-   --  most ONE task in Read and ONE task in Write concurrently — the
+   --  most one task in Read and one task in Write concurrently, the
    --  WSS receiver-task-plus-sender shape. Two concurrent readers or
    --  two concurrent writers are not supported (the same restriction
    --  the TCP transport's single-waiter selectors impose).
 
    overriding procedure Close (Self : in out TLS_Transport);
-   --  Single-threaded lifecycle reclaim: best-effort close_notify (
-   --  skipped when the session died of a fatal error), then closes the
-   --  inner TCP transport and unconditionally frees the backend
-   --  contexts. Idempotent.
-   --
-   --  Precondition (caller's responsibility, not enforceable here): no
-   --  other task may be inside ANY operation on this transport while
-   --  Close runs.
-   --
-   --  Not just Read and Write. Close nulls and frees the backend state,
-   --  and every other primitive dereferences it — Is_Connected, the
-   --  deadline setters, Abort_Pending — so any of them racing Close is
-   --  a use-after-free, not merely a stale answer. Enumerating the
-   --  operations invites the list to fall behind the body; the rule is
-   --  the whole object, and the caller must quiesce every task using it
-   --  before calling this.
-   --
-   --  Websocket.Client keeps that rule two different ways, depending on
-   --  whether the session ever became reachable by a second task:
-   --
-   --    * Published sessions are closed by the RECEIVER, in Reclaim,
-   --      after Stop_Admission has shut the door and Wait_No_Borrowers
-   --      has seen the last borrow returned. Exclusivity comes from
-   --      that borrow protocol.
-   --    * An attempt that never published -- a failed or aborted
-   --      Connect -- is closed by Attempt_Owner.Finalize, on the
-   --      connecting task itself. Exclusivity holds because ownership
-   --      never completed. The receiver task exists -- it is a
-   --      component of the client and outlives any one connection --
-   --      and may even have accepted the Start rendezvous, since
-   --      Cur_Sess is assigned inside it and Publish can still raise
-   --      afterwards; what matters is that the handler then drops the
-   --      pointer, so the receiver retains no path to this session and
-   --      the connecting task is its only owner. Which is why the owner
-   --      checks Attempt_Handed_Off first and does nothing if it fired.
-   --
-   --  Wait_Closed is NOT that point, and cannot be. It is a protected
-   --  entry that opens when the connection state reaches Closed, which
-   --  Reclaim publishes *before* it drains borrowers — and the caller
-   --  waits on it while still holding its own teardown borrow, so a
-   --  Wait_Closed that meant "reclaimed" would deadlock against the
-   --  drain it is part of. The caller learns that the transport is
-   --  closed and the session freed from Wait_Generation_Done, which it
-   --  reaches only after leaving the pin's scope and giving that borrow
-   --  back.
-   --
-   --  For the concurrent fatal-write case the inner TCP is Poison'ed
-   --  (reader-safe), deferring this reclaim until the reader has
-   --  exited.
+   --  Closes: best-effort close_notify (skipped after a fatal error),
+   --  then the inner TCP transport, then frees the backend contexts.
+   --  Idempotent.
+   --  Precondition: no other task is inside any operation on this
+   --  transport, Is_Connected and the deadline setters included; they
+   --  dereference the state Close frees. Not enforced. For the
+   --  concurrent fatal-write case the inner TCP is Poison'ed and this
+   --  reclaim waits until the reader has exited.
 
    overriding function Is_Connected (Self : TLS_Transport) return Boolean;
-   --  True after a successful Connect until Close — except that a
+   --  True after a successful Connect until Close, except that a
    --  session poisoned by a fatal Read/Write reports False (via a
    --  task-safe latch, so a reader may query it while a writer fails).
 
@@ -182,13 +87,12 @@ package AHT.Transport.TLS is
      (Self     : in out TLS_Transport;
       Deadline : Duration);
    --  Compound budgets measured from the call, per the base contract.
-   --  Both are mirrored here (as absolute times computed once) and
-   --  forwarded to the inner TCP transport; the mirrors let the
-   --  backends bound every internal wait — including waits performed on
-   --  behalf of the *other* direction's protocol traffic — by the
-   --  deadline of the operation that performs them. Callable before
-   --  Connect: the deadline then applies to Read/Write on the future
-   --  connection (not to the handshake).
+   --  Mirrored here as absolute times and forwarded to the inner TCP
+   --  transport; every internal wait, including one performed for the
+   --  other direction's traffic, is bounded by the deadline of the
+   --  operation performing it. Callable before Connect: the deadline
+   --  then applies to Read/Write on the future connection, not to the
+   --  handshake.
 
    overriding procedure Abort_Pending (Self : in out TLS_Transport);
    --  Unblocks a Read/Write in progress with Aborted_Error. No-op when
@@ -205,11 +109,10 @@ private
 
    type TLS_Transport is new Transport_Type with record
       State              : aliased Backend_State_Access := null;
-      --  aliased so AHT.Guarded_New can be handed State'Access --
-      --  see the allocation sites in each backend body for why the
-      --  allocation goes through it.
+      --  aliased so AHT.Guarded_New can be handed State'Access at the
+      --  allocation site in each backend body.
       Used               : Boolean := False;
-      --  Latched by a SUCCESSFUL handshake only, so a failed Connect
+      --  Latched by a successful handshake only, so a failed Connect
       --  leaves the object retryable while a completed session makes
       --  the transport single-use.
       Connected          : Boolean := False;
@@ -220,10 +123,9 @@ private
       Read_Deadline      : Ada.Real_Time.Time := Ada.Real_Time.Time_First;
       Has_Write_Deadline : Boolean := False;
       Write_Deadline     : Ada.Real_Time.Time := Ada.Real_Time.Time_First;
-      --  Absolute deadline mirrors, computed ONCE in the setters (the
-      --  budget is measured from the setter call; recomputing later
-      --  would silently refresh it). Out here rather than in
-      --  Backend_State because the setters must work with State = null.
+      --  Absolute deadline mirrors, computed once in the setters (the
+      --  budget is measured from the setter call). Kept outside
+      --  Backend_State: the setters must work with State = null.
    end record;
 
 end AHT.Transport.TLS;

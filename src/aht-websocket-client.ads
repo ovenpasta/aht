@@ -52,83 +52,41 @@ package AHT.Websocket.Client is
       Handshake_Deadline : Duration := Duration'Last;
       Upgrade_Deadline   : Duration := Duration'Last;
       Resolve_Timeout    : Duration := Duration'Last);
-   --  Four bounds on a dial, each covering a different stage, all
-   --  defaulting to Duration'Last — unbounded, which is what a dial
-   --  was before they existed. They are separate knobs because a
-   --  caller willing to wait out a slow TLS handshake may still
-   --  refuse to wait on a peer that never answers the upgrade.
+   --  Dials URL and runs the opening handshake. Legal from Idle or
+   --  Disconnected; raises Handshake_Error from Connecting, Open or
+   --  Closing (a live connection is never displaced; use Reconnect).
+   --  Raises Mode_Error if delivery is Callback_Only and no
+   --  On_Message callback is installed.
    --
-   --  Set all four and the dial is bounded end to end. Set none and
-   --  it behaves exactly as it always has.
+   --  Four bounds, each on one stage, all Duration'Last by default:
+   --    Resolve_Timeout     the DNS lookup; unused for an IP literal.
+   --    Connect_Timeout     the TCP connect, one budget across every
+   --                        resolved address.
+   --    Handshake_Deadline  the TLS handshake; ignored on ws://.
+   --    Upgrade_Deadline    writing the GET and reading the 101;
+   --                        cleared once the 101 is validated.
+   --  Exhausting any of them raises AHT.Transport.Timeout_Error, not
+   --  Handshake_Error. Handshake_Error means the peer answered and
+   --  the answer was wrong; Timeout_Error means it did not answer in
+   --  time.
    --
-   --    Resolve_Timeout     the DNS lookup, which runs before any of
-   --                        the others and so cannot be bounded by
-   --                        them. Nothing to bound when the URL
-   --                        carries an IP literal. See AHT.DNS: the
-   --                        bound is on this caller, not on the
-   --                        lookup, which nothing can interrupt.
+   --  A failed or timed-out Connect releases the admission and frees
+   --  the half-built session; the client is back where admission
+   --  found it and a retry is legal.
    --
-   --    Connect_Timeout     the TCP connect, as ONE total budget
-   --                        across every address DNS resolved to, not
-   --                        a per-candidate one. See
-   --                        AHT.Transport.TCP.Connect. Applies to
-   --                        ws:// and wss:// alike.
-   --
-   --    Handshake_Deadline  the TLS handshake alone, and so only on
-   --                        wss://; a ws:// dial runs none and
-   --                        ignores it. See AHT.Transport.TLS.Connect.
-   --
-   --    Upgrade_Deadline    the HTTP exchange that follows: writing
-   --                        the GET and reading the 101. Armed on
-   --                        both directions before the request goes
-   --                        out, so it bounds a peer that stops
-   --                        draining as well as one that never
-   --                        replies, and cleared once the response
-   --                        has been validated — a live connection
-   --                        never inherits it.
-   --
-   --  They are appended to the parameter list rather than placed
-   --  beside the ones they relate to, so that existing positional
-   --  callers keep compiling and keep meaning what they meant.
-   --
-   --  Exhaustion of any of the three raises Timeout_Error — the same
-   --  AHT.Transport.Timeout_Error that Close raises, not
-   --  Handshake_Error. The distinction is the point: Handshake_Error
-   --  means the peer answered and the answer was wrong, Timeout_Error
-   --  means it did not answer in time, and a caller deciding whether
-   --  to retry should not have to read the message text to tell them
-   --  apart.
-   --
-   --  A timed-out Connect leaves the client where admission found it
-   --  (Idle or Disconnected), releases the admission and closes the
-   --  half-built session, exactly as any other failed attempt does —
-   --  so a retry is legal and builds fresh transports.
-   --
-   --  Resolving is done for you, and deliberately not by the caller:
-   --  Host stays the name for SNI and certificate verification, so
-   --  bounding the lookup costs nothing. An application that resolved
-   --  on its own and put the literal in the URL would silently drop
-   --  SNI and be verified against IP SANs, which typical certificates
-   --  do not carry — that is why Resolve_Timeout is a parameter here
-   --  rather than advice to resolve elsewhere.
+   --  Supplying both CA_Path and CA_PEM raises
+   --  AHT.Transport.TLS.TLS_Error before dialling; there is no
+   --  precedence. Host stays the name for SNI; see AHT.DNS.
 
-   --  How decoded messages reach the application.
-   --
-   --  Callback_Only does not enqueue at all, which is the only mode
-   --  that removes the inbox as a growth path outright; the others
-   --  keep a bounded queue that Receive drains. It also requires an
-   --  On_Message callback, since with none there is no consumer and
-   --  every message would be dropped in silence.
+   --  How decoded messages reach the application. Callback_Only
+   --  never enqueues, so the inbox is not a growth path in that
+   --  mode, and it requires an On_Message callback.
    type Delivery_Mode is (Pull_Only, Callback_Only, Both);
 
-   --  Ceilings for one connection. Defaults are policy, not minimums:
-   --  32 MiB covers the Autobahn §9 cases (~16 MiB) with room to
-   --  spare and matches what the test fixture itself accepts.
-   --
-   --  Max_Message_Bytes bounds the *logical* message — a fragment
-   --  sequence is measured across its parts, not per frame. It bounds
-   --  what the library will accumulate, not peak RSS: framing overhead
-   --  and copies sit on top.
+   --  Ceilings for one connection. Max_Message_Bytes bounds the
+   --  logical message across its fragments, not per frame, and what
+   --  is accumulated, not peak RSS. The 32 MiB default covers the
+   --  Autobahn section 9 cases.
    type Limits is record
       Max_Message_Bytes  : Natural := 32 * 1024 * 1024;
       Max_Inbox_Messages : Ada.Containers.Count_Type := 1_024;
@@ -136,28 +94,17 @@ package AHT.Websocket.Client is
       Delivery           : Delivery_Mode := Both;
    end record;
 
-   --  Sets what the NEXT connection is built from. Legal only while
-   --  fully disconnected; raises Mode_Error during Connecting, Open or
-   --  Closing, because every limit becomes an immutable property of a
-   --  session at the moment it is allocated. A running connection
-   --  therefore cannot have its ceilings moved underneath it, and the
-   --  receiver never has to re-read a limit that might have changed
-   --  since it last looked.
+   --  Sets what the next connection is built from. Raises Mode_Error
+   --  unless fully disconnected: a session's limits are fixed when
+   --  it is allocated.
    procedure Configure (Self : in out Client_Type; L : Limits);
 
    function Is_Open (Self : Client_Type) return Boolean;
 
    --  Send_Text / Send_Binary / Send_Ping raise Closed_Error if the
-   --  connection is not Open. `Is_Open` is deliberately NOT a
-   --  precondition: the receiver task can tear the connection down
-   --  concurrently (e.g. the peer closes between the app pulling a
-   --  message and echoing it), so the caller cannot guarantee it
-   --  across the call. The check is therefore a runtime guard raising
-   --  a catchable Closed_Error rather than an Assertion_Error, and it
-   --  is expressed as a *borrow*: a sender that cannot borrow the
-   --  current session — because none was ever published, or because
-   --  teardown has begun — raises instead of touching a session it
-   --  does not hold.
+   --  connection is not Open. Is_Open is not a precondition: the
+   --  receiver can tear the connection down concurrently, so the
+   --  check is a runtime guard. Safe to call from a callback.
    procedure Send_Text
      (Self : in out Client_Type;
       Text : String);
@@ -180,85 +127,44 @@ package AHT.Websocket.Client is
       Reason        : String := "";
       Timeout       : Duration := 5.0;
       Drain_Timeout : Duration := Default_Drain_Timeout);
-   --  Runs the RFC 6455 §1.4 close handshake: send our Close frame
-   --  (if we haven't already), then wait up to `Timeout` seconds
-   --  for the peer's echo before forcing the receiver out via
-   --  the active transport's Abort_Pending. The receiver then owns
-   --  the teardown — it closes the transport and reclaims the
-   --  session — and Close returns only once that has completed, so
-   --  it is synchronous with respect to receiver exit and callbacks.
+   --  Runs the RFC 6455 sec. 1.4 close handshake: sends our Close
+   --  frame unless one was already sent, waits up to Timeout for the
+   --  peer's echo, then forces the receiver out via Abort_Pending.
+   --  The receiver closes the transport and reclaims the session;
+   --  Close returns once that has completed, so it is synchronous
+   --  with respect to receiver exit and callbacks.
    --
-   --  The two bounds measure different things, which is why they are
-   --  separate knobs rather than one.
+   --  Timeout bounds the peer's Close echo: 0.0 does not wait,
+   --  Duration'Last waits indefinitely. Drain_Timeout bounds our own
+   --  receiver's reclamation, which Timeout says nothing about.
    --
-   --  `Timeout` bounds the PEER: how long to wait for its Close echo
-   --  before giving up on the handshake and forcing the receiver out.
-   --    * Default 5.0 s — safe for a cooperating peer on a LAN
-   --      / loopback.
-   --    * Duration'Last — wait indefinitely (only sensible when
-   --      you trust the peer to echo).
-   --    * 0.0 — don't wait at all; tear the receiver out via
-   --      Abort_Pending immediately. Useful when the caller
-   --      already knows the peer is unresponsive.
+   --  On expiry raises AHT.Transport.Timeout_Error. Nothing is
+   --  abandoned: the client stays Closing, reclamation continues, and
+   --  a later Close joins the same completion. The usual cause is a
+   --  callback that has not returned; the receiver cannot reclaim
+   --  while inside user code.
    --
-   --  `Drain_Timeout` bounds US: how long to wait for our own
-   --  receiver to finish reclaiming the session afterwards. Telling
-   --  Close not to wait for an unresponsive peer says nothing about
-   --  how long our own cleanup may take, so a single knob would make
-   --  `Timeout => 0.0` mean "and fail if reclamation is not already
-   --  finished", which is not what anyone asking for it wants.
+   --  Concurrent Close calls are safe: one drives the teardown, the
+   --  others wait for the same completion. Must not be called from a
+   --  callback; raises Reentrant_Error.
    --
-   --  On expiry Close raises `Timeout_Error`. Nothing is abandoned:
-   --  the client stays Closing, reclamation continues, and a later
-   --  Close joins the same completion. What the bound reports is a
-   --  liveness problem, not a safety decision — most often a callback
-   --  that has not returned, since the receiver cannot reclaim a
-   --  connection while it is inside user code. That is why "callbacks
-   --  must not block" is a contract and not advice.
-   --
-   --  Concurrent Close calls are safe: one drives the teardown and
-   --  the others simply wait for the same completion.
-   --
-   --  The synthetic codes 1005/1006/1015 are ruled out by the
-   --  Valid_Close_Code subtype so they cannot be sent on the wire.
+   --  Valid_Close_Code excludes the synthetic 1005/1006/1015.
 
-   --  Re-establish the connection this client last had, using the
-   --  parameters of its last SUCCESSFUL Connect. Reconnect therefore
-   --  always means "the connection I had", never "the one I last
-   --  asked for" — a failed attempt does not become the thing that
-   --  gets replayed.
-   --
+   --  Re-establishes the connection using the parameters of the last
+   --  successful Connect; a failed attempt is never replayed.
    --    Idle          raises Handshake_Error: nothing to repeat.
    --    Disconnected  redials.
-   --    Connecting    raises Handshake_Error: an attempt is already
-   --                  in flight, and this would race it.
-   --    Open/Closing  drains the current connection first, then
-   --                  redials. This is the one operation that will
-   --                  displace a live connection, and it does so
-   --                  explicitly rather than silently — Connect
-   --                  refuses instead.
+   --    Connecting    raises Handshake_Error: an attempt is in flight.
+   --    Open/Closing  drains the current connection, then redials.
    --
-   --  Reconnect has six bounds, and they split two-and-four at the
-   --  drain/redial seam.
-   --
-   --  Timeout and Drain_Timeout are Close's, and mean exactly what
-   --  they mean there: Timeout for the peer's Close echo,
-   --  Drain_Timeout for our own receiver. They bound the drain only.
-   --  If the drain does not finish in time this raises Timeout_Error
-   --  WITHOUT redialing, leaving the teardown to continue; a later
-   --  Reconnect joins it.
-   --
+   --  Timeout and Drain_Timeout are Close's and bound the drain only;
+   --  if it does not finish in time this raises Timeout_Error without
+   --  redialling, and a later Reconnect joins the teardown.
    --  Resolve_Timeout, Connect_Timeout, Handshake_Deadline and
-   --  Upgrade_Deadline are Connect's, and bound the redial that
-   --  follows, stage by stage in that order. They are
-   --  parameters of this call rather than replayed from the last
-   --  successful Connect: what Reconnect repeats is the connection —
-   --  URL, headers, trust anchors — and how long to wait for it is a
-   --  decision the caller is entitled to make differently each time,
-   --  not a property the session froze.
+   --  Upgrade_Deadline are Connect's and bound the redial; they are
+   --  per call, not replayed.
    --
-   --  Raises Reentrant_Error from inside a callback, for the same
-   --  reason Close does.
+   --  Must not be called from a callback; raises Reentrant_Error.
    procedure Reconnect
      (Self               : in out Client_Type;
       Timeout            : Duration := 5.0;
@@ -269,126 +175,64 @@ package AHT.Websocket.Client is
       Resolve_Timeout    : Duration := Duration'Last);
 
 
-   --  Blocking pull API: blocks up to Timeout for the next decoded message.
-   --  Raises Closed_Error if the connection has been closed, and
-   --  Mode_Error under Callback_Only delivery -- where nothing is ever
-   --  enqueued, so blocking here would wait on an inbox that by
-   --  construction no one will fill.
+   --  Blocks up to Timeout for the next decoded message. Raises
+   --  Closed_Error if the connection has been closed, Timeout_Error
+   --  on expiry, and Mode_Error under Callback_Only delivery, where
+   --  nothing is ever enqueued. Must not be called from a callback;
+   --  raises Reentrant_Error.
    procedure Receive
      (Self    : in out Client_Type;
       Msg     : out Message_Type;
       Timeout : Duration := Duration'Last);
 
-   --  Push API: callbacks fire from inside the receiver task as
-   --  frames arrive.
-   --
-   --  Which of them fire depends on the delivery mode, and only
-   --  On_Message is affected by it: under Both it fires alongside the
-   --  inbox; under Callback_Only it is the sole consumer; under
-   --  Pull_Only it does not fire at all, even if one is installed.
-   --  On_Close and On_Error are not message delivery and fire in
-   --  every mode.
-   --
-   --  Under Both, pull and push agree on what is ACCEPTED: a message
-   --  the inbox refuses is not passed to the callback either.
-   --
-   --  They do not agree on what is eventually OBSERVED, and the
-   --  difference matters once teardown begins. The callback fires
-   --  from the receiver as the message is decoded, so it has already
-   --  run; Receive has to borrow the session to reach the inbox, and
-   --  a borrow is refused the moment admission stops. A message that
-   --  was accepted and enqueued, but not yet pulled when the
-   --  connection failed or was replaced, is discarded with its
-   --  session — the caller sees Closed_Error rather than the message.
-   --
-   --  That is the same generation-scoping that keeps a reconnect from
-   --  inheriting a previous connection's backlog, and it is
-   --  deliberate. It is visible from outside: Autobahn case 5.15
-   --  sends a complete fragmented message and an illegal continuation
-   --  in one chop, and the message is dropped rather than delivered
-   --  ahead of the failure. See tests/autobahn/BASELINE.md.
-   --
-   --  Callbacks run on the receiver task, so they must be
-   --  task-safe and must not block: the receiver cannot reclaim a
-   --  connection while it is inside user code, so a callback that
-   --  never returns stalls Close. Exceptions raised inside a
-   --  callback are swallowed by the receiver so the task can keep
-   --  draining the wire.
-   --
-   --  The installed callbacks live in the client, not in a
-   --  connection, so they are read afresh for every event rather
-   --  than captured once.
-   --  Set_On_Message raises Mode_Error if it would clear the callback
-   --  while a Callback_Only connection is in force -- that is, from
-   --  admission through to the end of teardown. Both ends matter: the
-   --  gap before publication is where a race could strip the only
-   --  consumer from a session already committed to callback delivery,
-   --  and during teardown a message may already be decoded and waiting
-   --  to be dispatched.
+   --  Callbacks fire from the receiver task as frames arrive. Only
+   --  On_Message depends on the delivery mode: it fires under Both
+   --  and Callback_Only, never under Pull_Only. Under Both, a message
+   --  the inbox refuses is not passed to the callback either; one
+   --  enqueued but not yet pulled when the connection ends is
+   --  discarded with its session (Autobahn case 5.15; see
+   --  tests/autobahn/BASELINE.md). Callbacks must be task-safe and
+   --  must not block: the receiver cannot reclaim a connection while
+   --  inside user code. Exceptions raised in a callback are
+   --  swallowed. Callbacks are read afresh per event. Set_On_Message
+   --  raises Mode_Error if it would clear the callback while a
+   --  Callback_Only connection is in force, admission to teardown.
    procedure Set_On_Message (Self : in out Client_Type; CB : On_Message_Callback);
    procedure Set_On_Close   (Self : in out Client_Type; CB : On_Close_Callback);
    procedure Set_On_Error   (Self : in out Client_Type; CB : On_Error_Callback);
 
    --  What the peer selected for the connection currently in place,
-   --  or "" if there is none. It belongs to the connection, not to
-   --  the client, so it stops answering once that connection has been
-   --  reclaimed rather than lingering until some later one overwrites
-   --  it — read it while the connection is up.
+   --  or "" if there is none or it has been reclaimed.
    function Selected_Subprotocol (Self : Client_Type) return String;
 
-   --  How many connections this client has successfully established:
-   --  0 before the first, then one more on each. Reserved numbers are
-   --  not counted, so a failed attempt does not advance it — which is
-   --  what makes it usable as "am I looking at the same connection I
-   --  was?" across a reconnect.
+   --  How many connections this client has successfully established.
+   --  A failed attempt does not advance it.
    function Generation (Self : Client_Type) return Natural;
 
 private
 
-   --  Connection state machine (RFC 6455 §1.4), scoped to ONE
-   --  connection.
-   --    Connecting → Open    : on successful handshake.
-   --    Open       → Closing : on a Close frame sent (locally or
-   --                           echoed by the receiver).
-   --    *          → Closed  : the connection is finished; no more
-   --                           messages will arrive.
-   --
-   --  Closed says that and no more. It does NOT mean the receiver has
-   --  exited, nor that the transport has been closed, nor that nobody
-   --  will touch it again: reclamation still has to run Abort_Pending,
-   --  close the transport and free the session, and it publishes Closed
-   --  before draining borrowers rather than after. Nor is the receiver
-   --  necessarily the one that published it -- Teardown_Pin.Finalize
-   --  sets it from whichever task drove the teardown.
-   --
-   --  What waits for reclamation to have finished is
-   --  Ctl.Wait_Generation_Done, not Wait_Closed below.
-   --  Not to be confused with Client_State below, which is the
-   --  *client*-level lifecycle and outlives any single connection.
+   --  Per-connection state (RFC 6455 sec. 1.4): Connecting -> Open on
+   --  handshake; Open -> Closing on a Close frame sent; * -> Closed
+   --  when no more messages will arrive. Closed does not mean the
+   --  receiver has exited or the transport is closed: reclamation
+   --  runs after it, and Teardown_Pin.Finalize may publish it from
+   --  another task. Ctl.Wait_Generation_Done waits for reclamation,
+   --  not Wait_Closed. Client_State below is the client-level
+   --  lifecycle and outlives any connection.
    type State_Kind is (Connecting, Open, Closing, Closed);
 
    protected type State_PO is
       procedure Set (S : State_Kind);
       function  Get return State_Kind;
       entry     Wait_Closed;
-      --  Atomically move Open/Closing -> Closing without ever
-      --  downgrading a Closed the receiver published concurrently.
-      --  Returns Already_Closed = True iff Current is already Closed --
-      --  the connection is finished, whether the receiver marked it so
-      --  on one of its EOF/echo/protocol-failure paths or a teardown pin
-      --  did. The caller must then skip the close handshake: there is
-      --  nobody left to exchange it with, Wait_Closed is already open,
-      --  and no further Closed will ever be published.
-      --
-      --  It does not mean the transport is closed or done being used;
-      --  see the note on State_Kind above.
+      --  Moves Open/Closing -> Closing without downgrading a Closed
+      --  published concurrently. Already_Closed is True iff the
+      --  connection was already Closed; the caller must then skip the
+      --  close handshake, since no further Closed will be published.
       procedure Begin_Closing (Already_Closed : out Boolean);
-      --  Atomic "did we already send a Close on the wire?". Both
-      --  the user-initiated Close path and the receiver's echo
-      --  path call this; whichever wins (returns True via the
-      --  out parameter) is the one that emits the Close frame.
+      --  Whichever of the user's Close and the receiver's echo path
+      --  gets Should_Send = True emits the Close frame.
       procedure Try_Mark_Local_Close (Should_Send : out Boolean);
-      function  Local_Close_Sent return Boolean;
    private
       Current      : State_Kind := Connecting;
       Local_Closed : Boolean    := False;
@@ -397,64 +241,41 @@ private
    package Message_Lists is new Ada.Containers.Bounded_Doubly_Linked_Lists
      (Message_Type);
 
-   --  Bounded FIFO of decoded messages. Receiver pushes; the user's
-   --  Receive entry pulls. Mark_Closed flips the barrier so a parked
-   --  Receive wakes and raises Closed_Error if the connection went
-   --  away while it was blocked.
-   --
-   --  Two ceilings, because one does not imply the other: the list's
-   --  capacity bounds how many messages are held, and Max_Bytes bounds
-   --  how much payload they amount to. A thousand queued megabytes is
-   --  as much a runaway as a million queued empties.
+   --  Bounded FIFO of decoded messages: the receiver pushes, Receive
+   --  pulls. Mark_Closed wakes a parked Receive, which raises
+   --  Closed_Error. Capacity bounds the count, Max_Bytes the payload
+   --  total.
    protected type Inbox_PO
      (Capacity  : Ada.Containers.Count_Type;
       Max_Bytes : Natural) is
       entry Receive (Msg : out Message_Type);
-      --  Non-raising: a full inbox means the peer is outrunning the
-      --  application, which is a policy outcome for the receiver to
-      --  act on, not an exception to unwind through it.
+      --  Non-raising: a full inbox is a policy outcome for the
+      --  receiver to act on.
       procedure Try_Push (Msg : Message_Type; Accepted : out Boolean);
       procedure Mark_Closed;
       function  Count return Natural;
       function  Byte_Count return Natural;
-      function  Is_Closed return Boolean;
    private
       Q            : Message_Lists.List (Capacity);
-      --  Maintained in the same protected action as the list itself,
-      --  and only ever after an insertion actually succeeded.
+      --  Updated in the same protected action as the list, only
+      --  after an insertion succeeded.
       Queued_Bytes : Natural := 0;
       Closed_F     : Boolean := False;
    end Inbox_PO;
 
-   --  ws:// runs on the plain TCP transport, wss:// on the TLS
-   --  transport (TLS over the same TCP machinery via custom BIO). The
-   --  variant constructs only the one actually needed, instead of one
-   --  of each; `Active` in the body maps Kind to the transport, so
-   --  there is no stored pointer that could be left stale.
+   --  ws:// runs on the TCP transport, wss:// on the TLS transport.
+   --  The variant constructs only the one needed; Active in the body
+   --  maps Kind to it.
    type Transport_Kind is (Plain_Transport, Secure_Transport);
 
-   --  Everything belonging to ONE connection: heap-allocated per
-   --  generation, with NO task inside it. `limited` makes a record
-   --  holding protected and controlled components impossible to copy.
-   --
-   --  Ownership passes through three phases, and this is the whole
-   --  memory-safety argument:
-   --
-   --    Unpublished — the connecting task owns it exclusively; it is
-   --                  not reachable from the controller, and that
-   --                  task frees it if the attempt fails.
-   --    Published   — the receiver owns it. Other tasks may touch it
-   --                  only while holding a borrow from the
-   --                  controller.
-   --    Draining    — still the receiver's, but no new borrows are
-   --                  granted; it is freed once the outstanding ones
-   --                  reach zero.
-   --  The limits are discriminants, not fields, and that is the whole
-   --  reason they are here: discriminants are immutable for the life
-   --  of the object, so a session carries the ceilings it was built
-   --  with and Configure cannot move them underneath a running
-   --  receiver. Every one of them is a discrete type, so every one of
-   --  them can be a discriminant.
+   --  Everything belonging to one connection, heap-allocated per
+   --  generation, with no task inside. Ownership:
+   --    Unpublished   the connecting task's; it frees it on failure.
+   --    Published     the receiver's; other tasks touch it only under
+   --                  a borrow from the controller.
+   --    Draining      no new borrows; freed when they reach zero.
+   --  The limits are discriminants so Configure cannot move them
+   --  under a running receiver.
    type Session_Type
      (Kind              : Transport_Kind;
       Inbox_Capacity    : Ada.Containers.Count_Type;
@@ -485,18 +306,16 @@ private
    --    Disconnected : the generation has been fully reclaimed.
    type Client_State is (Idle, Connecting, Open, Closing, Disconnected);
 
-   --  Who drives a teardown. Exactly one caller wins and is handed a
-   --  pinned session; everyone else joins and touches nothing.
+   --  Exactly one caller wins a teardown and is handed a pinned
+   --  session; everyone else joins and touches nothing.
    type Teardown_Result is (Won_Teardown, Join_Teardown, No_Session);
 
-   --  No_Callback is refused admission for the same reason a full
-   --  inbox is refused a message: there would be no consumer, and
-   --  silently discarding is not an option the caller could detect.
+   --  No_Callback: Callback_Only delivery with no On_Message would
+   --  have no consumer.
    type Admission_Result is (Admitted, Wrong_State, No_Callback);
 
-   --  Everything a Reconnect needs to repeat a connect, deep-copied
-   --  so a caller mutating its own buffers afterwards cannot change
-   --  what gets redialed.
+   --  Everything a Reconnect needs to repeat a connect; deep copies,
+   --  so a caller mutating its buffers afterwards changes nothing.
    type Connect_Params is record
       URL          : Ada.Strings.Unbounded.Unbounded_String;
       Extra        : AHT.HTTP.Headers.Map;
@@ -515,66 +334,33 @@ private
       On_Error   : On_Error_Callback   := null;
    end record;
 
-   --  The single point of truth for "which session may be touched,
-   --  and by whom". Every field that outlives a connection lives
-   --  here, under the protected lock: plain fields written by one
-   --  task and read by the receiver would be an unsynchronized
-   --  conflicting access (RM 9.10).
-   --
-   --  Nothing in here may block: Abort_Pending, transport Close and
-   --  user callbacks are all performed by tasks, never from a
-   --  protected body.
+   --  The single point of truth for which session may be touched
+   --  and by whom. Every field that outlives a connection lives here
+   --  under the lock (RM 9.10). Nothing in here blocks: Abort_Pending,
+   --  transport Close and callbacks run in tasks, never here.
    protected type Lifecycle_Controller is
 
-      --  Admission. One protected action does the state check, the
-      --  transition to Connecting and the generation reservation, so
-      --  two tasks cannot both be admitted. Gen is Natural rather
-      --  than Positive because it must hold a defined value (0) when
-      --  admission is refused; only Admitted has any effect.
-      --  One protected action does all of it: the state check, the
-      --  transition, the generation reservation, the limits snapshot
-      --  the session will be built from, and the
-      --  Callback_Only-has-a-callback check. Split into a sequence,
-      --  Configure would race the state check and Set_On_Message
-      --  (null) would race the callback check.
-      --
-      --  Owner_Gen points at the admission owner's own generation
-      --  field, and this writes the reserved generation through it
-      --  from inside the protected action. That is the record of "an
-      --  admission is outstanding, and this object is responsible for
-      --  it", and it has to be made HERE rather than by the caller
-      --  afterwards: abort is deferred inside a protected action and
-      --  takes effect the moment one ends, so anything the caller
-      --  does on the next line can be skipped. An `out` parameter is
-      --  not good enough for the same reason — the copy-back is not
-      --  delivered to an aborted caller.
+      --  Admission. One protected action checks the state, moves to
+      --  Connecting, reserves the generation, snapshots the limits
+      --  and checks Callback_Only has a callback; only Admitted has
+      --  any effect, and Gen is 0 otherwise. The reserved generation
+      --  is written through Owner_Gen inside this action: abort takes
+      --  effect the moment the action ends, so a record made by the
+      --  caller afterwards, or an out parameter's copy-back, can be
+      --  skipped. See docs/websocket.md, "Abort safety is structural".
       procedure Begin_Connect
         (P         : Connect_Params;
          Owner_Gen : access Natural;
          Gen       : out Natural;
          L         : out Limits;
          Result    : out Admission_Result);
-      --  Builds the attempt's session and hands it to the owner. Here,
-      --  and through a pointer, for the same reason Begin_Connect
-      --  records the generation here.
-      --
-      --  It builds it inside a protected action because a bare `new`
-      --  is not abort-safe. AHT.Guarded_New carries that mechanism and
-      --  the general form of this guard; what it costs *here* is a
-      --  hang. The uninitialized wreckage reaches library finalization
-      --  still carrying the Send_Guard, and a zero-filled
-      --  CRITICAL_SECTION reads as contended — LockCount 0, where an
-      --  initialized and unheld one is -1 — so the guard's
-      --  finalization parks in the section's own wait, for an owner
-      --  the section names as thread 0000. A zeroed pthread mutex is a
-      --  valid unlocked one, so no Linux run shows any of it.
-      --
-      --  A Guarded_New gate would not serve: that gate is one bare
-      --  `new`, while this allocation is discriminated and sets the
-      --  generation. Abort is deferred for a whole protected action
-      --  either way, so there is no window here — either nothing was
-      --  allocated, or Into holds a complete session and the attempt
-      --  owner is already the thing that frees it.
+      --  Builds the attempt's session into Into from inside a
+      --  protected action, so an abort finds either nothing allocated
+      --  or a complete session the attempt owner will free. A bare
+      --  `new` is not abort-safe: an abort inside it leaves an
+      --  attached, uninitialized object (AHT.Guarded_New), whose
+      --  zero-filled CRITICAL_SECTION hangs Windows finalization. See
+      --  docs/websocket.md, "Abort safety is structural".
       procedure Create_Session
         (Into              : access Session_Access;
          Kind              : Transport_Kind;
@@ -583,56 +369,39 @@ private
          Max_Inbox_Bytes   : Natural;
          Delivery          : Delivery_Mode;
          Generation        : Positive);
-      --  The parameters of the last connect that actually succeeded.
-      --  OK is False before there has been one.
+      --  The parameters of the last connect that succeeded. OK is
+      --  False before there has been one.
       procedure Saved_Params (P : out Connect_Params; OK : out Boolean);
       --  Public Configure. OK is False unless fully disconnected.
       procedure Set_Pending_Limits (L : Limits; OK : out Boolean);
-      --  MUST run on every failure after a successful Begin_Connect,
-      --  or the client is stranded in Connecting. The attempt was by
-      --  definition unpublished, so the client returns to where
-      --  admission found it and the caller may retry — and that retry
-      --  genuinely works, because it builds a fresh session rather
-      --  than re-dialing a transport already latched by the attempt
-      --  that failed.
-      --
-      --  Takes the attempt's reserved generation and does nothing
-      --  unless that attempt is still the one in flight. Without that
-      --  check a slow cleanup could release an admission belonging to
-      --  a LATER Connect: once repeated connects exist, an early
-      --  generation can be published, reclaimed and replaced before
-      --  its connecting frame finalizes.
+      --  Must run on every failure after a successful Begin_Connect,
+      --  or the client is stranded in Connecting. Returns the client
+      --  to where admission found it. No-op unless Gen is the attempt
+      --  still in flight: an early generation can be published,
+      --  reclaimed and replaced before its connecting frame
+      --  finalizes.
       procedure Abandon_Connect (Gen : Positive);
-      --  Called from INSIDE the Start rendezvous, so publication is
+      --  Called from inside the Start rendezvous, so publication is
       --  atomic with the receiver taking ownership: a receiver that
-      --  hits instant EOF cannot begin reclaiming a session the
-      --  controller has not yet published.
+      --  hits instant EOF cannot reclaim an unpublished session.
       procedure Publish (S : Session_Access);
       --  Whether the attempt that reserved Gen handed its session to
-      --  the receiver. Publish records the generation it published,
-      --  from inside the Start rendezvous and inside a protected
-      --  action, so the record is atomic with the handoff and cannot
-      --  be lost to an abort of the connecting task.
-      --
-      --  Comparing >= rather than = is what makes it attempt-specific
-      --  without keeping a set. Generations are assigned in
-      --  increasing order, and an attempt that did NOT publish still
-      --  holds admission until its own cleanup releases it -- so no
-      --  later generation can have published by the time it asks. A
-      --  later generation's number therefore only ever appears here
-      --  if this attempt published too.
+      --  the receiver. Publish records the generation inside the Start
+      --  rendezvous and inside a protected action, so an abort of the
+      --  connecting task cannot lose the record. True once any
+      --  generation >= Gen is recorded: an attempt that did not
+      --  publish holds admission until its cleanup, so no later
+      --  generation can have published first.
       function  Attempt_Handed_Off (Gen : Positive) return Boolean;
 
       --  Borrowing. The owner never borrows; this is exclusively how
-      --  a task that does NOT own the session gets to touch it.
+      --  a task that does not own the session gets to touch it.
       procedure Acquire (S : out Session_Access; OK : out Boolean);
       procedure Release;
 
-      --  Teardown. The winner is handed a pinned session (its borrow
-      --  is granted in the same protected action that stopped
-      --  admission, so the session cannot be freed under it) and
-      --  drives the close handshake. Joiners get a null session and
-      --  only wait for completion.
+      --  Teardown. The winner's borrow is granted in the same action
+      --  that stops admission, so the session cannot be freed under
+      --  it; joiners get a null session and only wait.
       procedure Begin_Teardown
         (S         : out Session_Access;
          Result    : out Teardown_Result;
@@ -640,17 +409,14 @@ private
       --  Receiver-side, idempotent: stops admission without claiming
       --  a borrow.
       procedure Stop_Admission;
-      --  True once a teardown the *application* asked for is under
-      --  way. Abort_Pending is non-sticky — it wakes the waiters that
-      --  exist when it fires and nothing more — so the receiver must
-      --  consult this before starting any new transport write, or a
-      --  write begun after the abort would park with nothing left to
-      --  cancel it and the borrow count would never reach zero.
+      --  True once a teardown the application asked for is under way.
+      --  Abort_Pending wakes only the waiters that exist when it
+      --  fires, so the receiver must consult this before any new
+      --  transport write, or the write parks with nothing to cancel
+      --  it.
       function  Draining_Forced return Boolean;
-      --  The memory-safety gate, deliberately unbounded: the receiver
-      --  must not close or free a session while a borrower is still
-      --  inside it. A timer here would force a choice between freeing
-      --  a live session and leaking one.
+      --  The memory-safety gate, unbounded: the receiver must not
+      --  close or free a session while a borrower is inside it.
       entry     Wait_No_Borrowers;
       procedure Clear_Published;
       procedure Signal_Generation_Done;
@@ -671,9 +437,8 @@ private
       --  Copied out of the session by Publish, so reading it never
       --  races reclamation.
       function  Protocol return String;
-      --  Whether the caller IS the receiver. The identity is recorded
-      --  once the receiver has a client to belong to; before that
-      --  nobody can be it.
+      --  Whether the caller is the receiver. Recorded once the
+      --  receiver has a client to belong to.
       procedure Set_Receiver_Id (Id : Ada.Task_Identification.Task_Id);
       function  Is_Receiver
         (Id : Ada.Task_Identification.Task_Id) return Boolean;
@@ -683,29 +448,23 @@ private
       St            : Client_State   := Idle;
       Leases        : Natural := 0;
       Admitting     : Boolean := False;
-      --  Two counters, deliberately, and they count different things.
-      --  Next_Gen is handed out per ATTEMPT and is never reused, so
-      --  it identifies an attempt's cleanup even long after the
-      --  attempt is over; it has gaps wherever an attempt failed.
-      --  Published_Gen counts CONNECTIONS and has none, which is what
-      --  the public Generation reports.
+      --  Next_Gen is per attempt, never reused, with gaps where
+      --  attempts failed; Published_Gen counts connections and is
+      --  what Generation reports.
       Next_Gen      : Natural := 0;
       Published_Gen : Natural := 0;
       Done          : Boolean := True;    --  no generation in flight
       Forced        : Boolean := False;
-      --  Highest generation ever published; never reset.
-      --  The handover record, in its own protected type so its
-      --  abort-safety argument is exercised directly by
-      --  test_ws_handoff rather than only through a client.
+      --  In its own protected type so test_ws_handoff can drive it
+      --  directly.
       Handed_Off     : AHT.Websocket.Handoffs.Handoff;
       CBs           : Callbacks;
       Proto         : Ada.Strings.Unbounded.Unbounded_String;
-      --  What the NEXT session is built from.
+      --  What the next session is built from.
       Pending       : Limits;
       --  Snapshotted by an admitted Begin_Connect and held until the
-      --  generation is done, so it still answers during Connecting --
-      --  before any session exists -- and through Closing, while the
-      --  receiver may still be dispatching.
+      --  generation is done, so it answers before any session exists
+      --  and through Closing.
       Active_Mode   : Delivery_Mode := Both;
       Rx            : Ada.Task_Identification.Task_Id :=
                         Ada.Task_Identification.Null_Task_Id;
@@ -717,25 +476,15 @@ private
       Has_Saved     : Boolean := False;
    end Lifecycle_Controller;
 
-   --  Persistent per-client task: it outlives any single connection,
-   --  looping over generations. Blocks at `accept Start or terminate`
-   --  between them, which is what keeps the RM 9.3 guarantee that
-   --  makes `Self'Unchecked_Access` sound — the enclosing master
-   --  awaits this task before finalizing its sibling components. A
-   --  heap-owned session containing the task would delete that
-   --  language guarantee, so only the passive state moved to the
-   --  heap.
-   --
-   --  Per generation it reads frames off the transport, reassembles
-   --  fragmented messages, handles control frames in place, surfaces
-   --  complete data messages to the session inbox, fires the push
-   --  callbacks, and finally reclaims the session. Because there is
-   --  exactly one receiver for the client's whole life, callbacks are
-   --  strictly serialized across generations.
-   --
-   --  Takes a Client_Access plus the session it is to own; RM 9.5.2
-   --  forbids anonymous access on entry parameters, and both are
-   --  named access types.
+   --  Persistent per-client task, looping over generations and
+   --  blocking at `accept Start or terminate` between them. The
+   --  enclosing master awaits it before finalizing its sibling
+   --  components (RM 9.3), which keeps `Self'Unchecked_Access` sound;
+   --  a task inside the heap session would lose that. Per generation
+   --  it reads frames, reassembles messages, handles control frames,
+   --  feeds the inbox, fires callbacks and reclaims the session, so
+   --  callbacks are serialized across generations. Entry parameters
+   --  are named access types (RM 9.5.2).
    task type Receiver_Task is
       entry Start (Owner : Client_Access; Sess : Session_Access);
    end Receiver_Task;

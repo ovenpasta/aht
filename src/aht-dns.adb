@@ -21,10 +21,8 @@ package body AHT.DNS is
    Addr_Len : constant := 46;  --  AHT_DNS_ADDRSTRLEN; INET6_ADDRSTRLEN
 
    --  Status codes, mirroring the AHT_DNS_* constants in
-   --  csrc/dns/aht_dns.c. Two places, unavoidably: the C side is what
-   --  the shim returns and this is what Ada reads. Anything the shim
-   --  might add that is not listed here lands on Internal_Error
-   --  rather than being silently read as one of these.
+   --  csrc/dns/aht_dns.c. Anything the shim returns that is not
+   --  listed here lands on Internal_Error.
    C_OK       : constant Interfaces.C.int := 0;
    C_Timeout  : constant Interfaces.C.int := 1;
    C_Failed   : constant Interfaces.C.int := 2;
@@ -52,9 +50,9 @@ package body AHT.DNS is
         Interfaces.C.To_C (Service);
 
       --  One flat block of Max_Addresses fixed-width slots, which is
-      --  what the shim writes. Fixed width rather than a packed list
-      --  of strings so that a short answer cannot be read as a long
-      --  one: every slot starts where Ada expects it to.
+      --  what the shim writes. Fixed width so that a short answer
+      --  cannot be read as a long one: every slot starts where Ada
+      --  expects it to.
       Buf : Interfaces.C.char_array
               (1 .. Interfaces.C.size_t (Max_Addresses * Addr_Len)) :=
         [others => Interfaces.C.nul];
@@ -64,13 +62,11 @@ package body AHT.DNS is
 
       --  "No bound" is passed as a negative rather than as a very
       --  large millisecond count, because the multiplication would
-      --  overflow C long on a 32-bit target and an overflowed
-      --  deadline is an arbitrarily SHORT one — the opposite of what
-      --  was asked for. Anything from a day upwards is treated the
-      --  same way: it is already past every resolver's own retry
-      --  limits, so the difference between it and Duration'Last is
-      --  not observable, and pretending to distinguish them would
-      --  mean carrying the overflow question for no gain.
+      --  overflow C long on a 32-bit target, and an overflowed
+      --  deadline is an arbitrarily short one. Anything from a day
+      --  upwards is treated the same way: it is already past every
+      --  resolver's own retry limits, so it is not distinguishable
+      --  from Duration'Last.
       Ms : constant Interfaces.C.long :=
         (if Timeout >= 86_400.0
          then -1
@@ -100,10 +96,9 @@ package body AHT.DNS is
          return;
       end if;
 
-      --  Only reached on Resolved. A shim that reported success with
-      --  a count outside the array would be a bug here rather than a
-      --  silent truncation, so it is clamped and the clamp is the
-      --  contract Max_Addresses already states.
+      --  Only reached on Resolved. Clamped so that a shim reporting a
+      --  count outside the array cannot index past it; Max_Addresses
+      --  already states the ceiling.
       Count := Address_Count (Interfaces.C.int'Min
                                 (N, Interfaces.C.int (Max_Addresses)));
 
@@ -128,8 +123,8 @@ package body AHT.DNS is
       end loop;
 
       --  A success with nothing in it is not a success. The shim does
-      --  not produce this, and saying so here means a future one that
-      --  did could not be read as an empty candidate list.
+      --  not produce this; the check keeps one that did from being
+      --  read as an empty candidate list.
       if Count = 0 then
          Status := Failed;
       end if;

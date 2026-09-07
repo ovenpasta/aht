@@ -19,7 +19,8 @@ package AHT.Mbedtls.Version is
    function Full_Version_String return String;
    --  Wraps mbedtls_version_get_string_full. Returns
    --  "Mbed TLS x.y.z" (e.g. "Mbed TLS 3.6.7"). Used by
-   --  test_mbedtls_version as a smoke test that the binding +
-   --  linker chain through to libmbedtls.a works end-to-end.
+   --  test_tls_version (tests/src/mbedtls/) as a smoke test that the
+   --  binding and linker chain through to libmbedtls.a works
+   --  end-to-end.
 
 end AHT.Mbedtls.Version;

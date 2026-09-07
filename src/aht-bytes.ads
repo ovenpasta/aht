@@ -23,7 +23,7 @@ package AHT.Bytes is
    --  Constant_Indexing lets call sites read a byte as `B (I)` (sugar
    --  for `B.Element (I)`), the array-style indexing call sites expect.
    --  Read-only: there is no Variable_Indexing, so `B (I) := X` is not
-   --  provided — mutate through Append / Set.
+   --  provided; mutate through Append / Set.
 
    --  State / size: the length/index surface call sites query.
    function Length      (Self : Buffer) return Natural;
@@ -32,18 +32,15 @@ package AHT.Bytes is
    function Last_Index  (Self : Buffer) return Natural;     --  = Length
    function Element     (Self : Buffer; Index : Positive) return Octet
      with Pre => Index <= Length (Self);
-   --  The Pre states the caller obligation (and is what SPARK would
-   --  discharge). It is *also* enforced in the body: the release profile
-   --  drops -gnata so the contract is inert there, yet Data spans
-   --  capacity (>= Len), so an unchecked index would read a stale byte
-   --  rather than fail. The body raises Constraint_Error to keep the
-   --  guarantee in release builds too (debug fails the Pre first).
+   --  The Pre is also enforced in the body: the release profile drops
+   --  -gnata, and Data spans capacity (>= Len), so an unchecked index
+   --  would read a stale byte. The body raises Constraint_Error.
 
-   --  Whole-buffer conversions — one block copy each.
+   --  Whole-buffer conversions, one block copy each.
    function To_Array  (Self : Buffer) return Byte_Array;
    function To_String (Self : Buffer) return String;
 
-   --  Slice extraction — one block copy of Self (Low .. High). Empty
+   --  Slice extraction, one block copy of Self (Low .. High). Empty
    --  when High < Low (use High => Low - 1), matching Ada slice rules.
    --  As with Element, the Pre is mirrored by a body check so a non-empty
    --  span with High > Length still fails (Constraint_Error) in release.
@@ -57,7 +54,7 @@ package AHT.Bytes is
      (Self : Buffer; Low : Positive; High : Natural) return Buffer
      with Pre => Low <= Length (Self) + 1 and then High <= Length (Self);
 
-   --  Construction — one block copy.
+   --  Construction, one block copy.
    function To_Buffer (Data : Byte_Array) return Buffer;
    function To_Buffer (S    : String)     return Buffer;
 
@@ -73,7 +70,7 @@ package AHT.Bytes is
    --  concatenate two buffers (e.g. reassembling fragmented frames).
    procedure Set     (Self : in out Buffer; Data  : Byte_Array);
    procedure Set     (Self : in out Buffer; S     : String);
-   --  Replace the contents in place — Len := 0 then one block move into
+   --  Replace the contents in place: Len := 0 then one block move into
    --  Self's own (reused/grown) storage. Unlike `Self := To_Buffer (S)`,
    --  there is no temporary buffer and no controlled `Adjust` copy, so a
    --  large body costs one allocation/copy, not two.
@@ -88,7 +85,7 @@ package AHT.Bytes is
    function To_String   (B : Byte_Array) return String;
 
    function Base64_Encode (B : Byte_Array) return String;
-   --  Standard Base64 per RFC 4648 §4 — `+` / `/` alphabet, `=`
+   --  Standard Base64 per RFC 4648 section 4: `+` / `/` alphabet, `=`
    --  padding. Used by the WebSocket handshake to build the
    --  `Sec-WebSocket-Key` header value and to verify the server's
    --  `Sec-WebSocket-Accept` echo. Not URL-safe; if URL-safe

@@ -4,10 +4,11 @@
 with Interfaces.C;
 with System;
 
---  Ada view of the C glue in csrc/aht_mbedtls_glue.c. Each mbedTLS
---  context is an opaque System.Address whose storage is malloc'd (and
---  sized) on the C side, so no struct layout is modelled in Ada. See
---  csrc/aht_mbedtls_glue.c for why the sizing must happen in C.
+--  Ada view of the C glue in csrc/mbedtls/aht_mbedtls_glue.c. Each
+--  mbedTLS context is an opaque System.Address whose storage is
+--  malloc'd (and sized) on the C side, so no struct layout is
+--  modelled in Ada. The glue's header comment says why the sizing
+--  must happen in C.
 package AHT.Mbedtls.Glue is
 
    --  Allocate + init / free + deallocate one context of each kind.

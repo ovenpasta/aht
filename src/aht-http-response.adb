@@ -15,7 +15,7 @@ package body AHT.HTTP.Response is
    function To_Lower (S : String) return String is
      (Ada.Characters.Handling.To_Lower (S));
 
-   --  Trim ASCII HT/SP off both ends of S. RFC 7230 §3.2.4 calls
+   --  Trim ASCII HT/SP off both ends of S. RFC 7230 sec. 3.2.4 calls
    --  this "OWS stripping". Not using Ada.Strings.Fixed.Trim because
    --  its Whitespace_Set default doesn't include HT in some runtimes;
    --  being explicit is cheap and unambiguous.
@@ -223,19 +223,12 @@ package body AHT.HTTP.Response is
          end;
       end loop;
 
-      --  RFC 7230 §3.3.3 rule 1 + RFC 9110 §15.3.6: HEAD responses
-      --  never carry a body (the peer may still send Content-Length
-      --  to advertise the GET body size, and we must not consume any
-      --  bytes after CRLFCRLF). Same rule covers 1xx, 204, 205, and
-      --  304. The empty line after the header block ends the message
-      --  regardless of any framing header. Load-bearing for:
-      --    * HEAD — the peer typically sends the GET Content-Length;
-      --      reading it would block forever (no body coming).
-      --    * 101 Switching Protocols — bytes after CRLFCRLF belong to
-      --      the upgraded protocol (e.g. WebSocket frames).
-      --    * 204 / 205 / 304 on a Connection: close stream with no
-      --      framing header — the EOF fallback would block until the
-      --      peer closes, even though the message is complete.
+      --  RFC 7230 sec. 3.3.3 rule 1 and RFC 9110 sec. 15.3.6: HEAD,
+      --  1xx, 204, 205 and 304 carry no body whatever the framing
+      --  headers say; the message ends at the empty line. Reading on
+      --  would block on a HEAD's advertised Content-Length, eat a
+      --  101's upgraded-protocol bytes, or wait for EOF on a
+      --  Connection: close 204.
       Skip_Body :=
         Method = AHT.HTTP.Methods.HEAD
         or else Self.Status in 100 .. 199
@@ -265,7 +258,7 @@ package body AHT.HTTP.Response is
               To_Lower (Self.Headers.Get ("transfer-encoding"));
          begin
             --  Only "chunked" is supported in v1. Anything else (gzip,
-            --  deflate, chunked+gzip, …) would need a codec stack we
+            --  deflate, chunked+gzip, ...) would need a codec stack we
             --  don't have yet, so refuse cleanly rather than silently
             --  hand back corrupted bytes.
             if TE = "chunked" then

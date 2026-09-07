@@ -5,10 +5,8 @@ with AHT.Random.Source;
 
 package body AHT.Random is
 
-   --  Counting lives here, not in the platform bodies, so the two
-   --  cannot drift: Draws and Bytes_Requested mean exactly the same
-   --  thing on every target, and a new platform gets them for free by
-   --  implementing one procedure.
+   --  Counting lives here rather than in the platform bodies, so Draws
+   --  and Bytes_Requested mean the same thing on every target.
    protected Counter is
       procedure Note (Bytes : Natural);
       function  Total return Natural;
@@ -50,11 +48,8 @@ package body AHT.Random is
          return;
       end if;
 
-      --  Counted on entry, before the attempt: a Fill that goes on to
-      --  raise still increments both. "Did this path ask?" is the
-      --  useful reading for the callers, and counting on success
-      --  would report nothing at all for the failure case, which is
-      --  when one most wants to know.
+      --  Counted on entry, before the attempt, so a Fill that goes on
+      --  to raise still increments both.
       Counter.Note (B'Length);
 
       Source.Get (B);

@@ -21,33 +21,27 @@ package AHT.Transport is
      (Self : in out Transport_Type;
       Data : AHT.Bytes.Byte_Array)
    is abstract;
-   --  Sends every byte of `Data` or raises. May raise `Timeout_Error`
-   --  or `Aborted_Error` on implementations that support the write-side
-   --  hooks below (`Set_Write_Deadline` / `Abort_Pending`).
-   --
-   --  Retry-safety: a `Timeout_Error`/`Aborted_Error` (or `Transport_Error`)
-   --  can be raised *after* some bytes have already reached the peer — a
-   --  write that fails mid-stream is **not** all-or-nothing on the wire.
-   --  Such a failure therefore leaves the request/message partially sent and
-   --  is **retry-unsafe** for anything non-idempotent. Implementations that
-   --  can desynchronise the stream this way must fail-closed (mark the
-   --  connection dead so it is never silently reused — see TCP's `Poison`);
-   --  the caller still owns the decision to retry or not.
+   --  Sends every byte of Data or raises. May raise Timeout_Error or
+   --  Aborted_Error where Set_Write_Deadline / Abort_Pending are
+   --  supported. Any of those, or Transport_Error, can be raised
+   --  after some bytes reached the peer: a failed write is not
+   --  all-or-nothing on the wire and is retry-unsafe for anything
+   --  non-idempotent. An implementation that can desynchronise the
+   --  stream must mark the connection dead (see TCP's Poison). The
+   --  caller decides whether to retry.
 
    procedure Read
      (Self : in out Transport_Type;
       Data : out AHT.Bytes.Byte_Array;
       Last : out Natural)
    is abstract;
-   --  Blocking read: fills `Data` up to its bound or until peer closes;
-   --  Last is the index of the last valid byte (0 if nothing was read,
-   --  which signals a clean peer close). May raise `Timeout_Error` or
-   --  `Aborted_Error` on implementations that support the hooks below.
-   --
-   --  Concurrency contract (all implementations): a transport supports
-   --  at most ONE task in Read and ONE task in Write concurrently — the
-   --  receiver-task-plus-sender shape the WebSocket client uses. Two
-   --  concurrent readers, or two concurrent writers, are not supported.
+   --  Blocking read: fills Data up to its bound or until the peer
+   --  closes; Last is the index of the last valid byte, 0 on a clean
+   --  peer close. May raise Timeout_Error or Aborted_Error where the
+   --  hooks below are supported.
+   --  Concurrency (all implementations): at most one task in Read and
+   --  one task in Write at a time. Two concurrent readers, or two
+   --  concurrent writers, are not supported.
 
    procedure Close (Self : in out Transport_Type) is abstract;
 
@@ -61,26 +55,21 @@ package AHT.Transport is
      (Self     : in out Transport_Type;
       Deadline : Duration) is null
      with Pre'Class => Deadline >= 0.0;
-   --  Sets a wall-clock budget, measured from this call, for every
-   --  subsequent `Read` until it is reset. When the budget elapses,
-   --  any `Read` in progress or started thereafter raises
-   --  `Timeout_Error`. The budget is **compound** — it is not
-   --  refreshed per `Read`, so a slow-drip peer that dribbles one
-   --  byte every (Deadline / N) seconds still trips the deadline on
-   --  call N+1. Pass `Duration'Last` to clear the deadline (the
-   --  default initial state).
+   --  Wall-clock budget, measured from this call, for every subsequent
+   --  Read until reset. When it elapses, a Read in progress or started
+   --  afterwards raises Timeout_Error. Compound: not refreshed per
+   --  Read, so a peer dribbling one byte every Deadline / N seconds
+   --  still trips it on call N+1. Duration'Last clears it (the initial
+   --  state).
 
    procedure Set_Write_Deadline
      (Self     : in out Transport_Type;
       Deadline : Duration) is null
      with Pre'Class => Deadline >= 0.0;
-   --  Write-side parallel of `Set_Read_Deadline`: a **compound**
-   --  wall-clock budget, measured from this call, for every subsequent
-   --  `Write` until it is reset. When the budget elapses, a `Write` in
-   --  progress or started thereafter raises `Timeout_Error`. The default
-   --  body is a no-op, so an implementation that can't enforce it leaves
-   --  `Write` blocking. Pass `Duration'Last` to clear the deadline (the
-   --  default initial state).
+   --  Write-side parallel of Set_Read_Deadline: a compound budget,
+   --  measured from this call, for every subsequent Write until reset;
+   --  when it elapses a Write in progress or started afterwards raises
+   --  Timeout_Error. Duration'Last clears it.
 
    procedure Abort_Pending (Self : in out Transport_Type) is null;
    --  Unblock a Read or Write in progress (typically from another task)
@@ -88,46 +77,14 @@ package AHT.Transport is
    --  when nothing is pending.
 
    overriding procedure Finalize (Self : in out Transport_Type);
-   --  Best-effort reclaim of an abandoned transport: dispatches to the
-   --  concrete `Close` so a TCP/TLS transport that goes out of scope
-   --  without an explicit Close still drops its socket / mbedTLS
-   --  contexts. Never raises — any exception from `Close` is swallowed,
-   --  because Finalize runs during stack unwinding where a propagating
-   --  exception would become Program_Error. Relies on every `Close`
-   --  being idempotent, since component/parent finalization can drive a
-   --  second Close after an explicit one.
-   --
-   --  Finalize performs the **full** reclaiming `Close`, not a
-   --  poison/shutdown-only path: a poison-only finalizer would leak the
-   --  fd, both selectors and (for TLS) the mbedTLS contexts on every
-   --  normal scope exit, since nothing else would ever free them. That
-   --  means Finalize inherits `Close`'s single-threaded precondition: no
-   --  other task may be inside ANY operation on this transport while it
-   --  runs. The whole object rather than a list of primitives, because
-   --  a list falls behind the body — the TLS `Close` frees state that
-   --  `Is_Connected` and the deadline setters dereference too, so those
-   --  race it just as fatally as a `Read` does. For the owners in this
-   --  library the rule is satisfied structurally, not by luck:
-   --    * Standalone transports (the HTTP client's fresh-per-request
-   --      `T`) are used on one task only — no concurrent reader exists at
-   --      scope exit.
-   --    * For a higher-level owner that runs a *separate* receiver task
-   --      against the transport (Websocket.Client), the transport lives
-   --      inside a heap-allocated per-connection session that the
-   --      receiver itself owns, and the receiver is the only thing that
-   --      deallocates it. Before it does, it has left `Read` (that is
-   --      what ended the connection), stopped handing out borrows,
-   --      waited for the outstanding ones to reach zero — so no other
-   --      task is inside the transport either — and called `Close`
-   --      explicitly. This Finalize therefore runs on a transport that
-   --      is already quiesced and already closed, and only has to be
-   --      idempotent. The quiescence comes from that borrow protocol,
-   --      not from the transport being a sibling component of the task.
-   --  A bare `access`-held transport with a *detached* task reading it
-   --  would break the precondition. The WebSocket receiver is not
-   --  detached: it is a component of the client, so RM 9.3 still bounds
-   --  its lifetime by the client's, and the session it owns cannot
-   --  outlive it. That shape — a task on an `access` transport with no
-   --  such protocol — is not offered by the API.
+   --  Dispatches to the concrete Close so an abandoned transport still
+   --  drops its socket or TLS contexts. Never raises: exceptions from
+   --  Close are swallowed, since Finalize runs during unwinding.
+   --  Relies on every Close being idempotent.
+   --  Inherits Close's precondition: no other task is inside any
+   --  operation on this transport while it runs. The owners in this
+   --  library satisfy it by structure: a standalone transport is used
+   --  by one task; the WebSocket receiver closes its session after
+   --  quiescing it, so Finalize runs on an already-closed transport.
 
 end AHT.Transport;

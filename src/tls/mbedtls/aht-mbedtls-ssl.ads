@@ -5,7 +5,7 @@ with Interfaces.C;
 with System;
 
 --  Curated binding for the mbedTLS SSL/TLS surface AHT.Transport.TLS
---  uses. Only *function* signatures are bound here — every context is an
+--  uses. Only *function* signatures are bound here, every context is an
 --  opaque System.Address (allocated by AHT.Mbedtls.Glue), so no
 --  ABI-dependent struct layout is modelled. The API/protocol constants
 --  below are plain ints fixed by the headers (not ABI-dependent), so
