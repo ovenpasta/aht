@@ -26,6 +26,7 @@ Prints `READY http 127.0.0.1:8764` once listening.
 from __future__ import annotations
 
 import http.server
+import socketserver
 import sys
 import time
 
@@ -155,6 +156,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
+
+    def server_bind(self):
+        # HTTPServer.server_bind resolves the bound address with
+        # socket.getfqdn().  These fixtures only use a numeric loopback
+        # address, and that reverse lookup can stall on hosted macOS.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def main() -> int:

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import http.server
 import os
+import socketserver
 import ssl
 import sys
 
@@ -36,6 +37,12 @@ KEY = os.path.join(HERE, "certs", "server.key")
 class Server(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
+
+    def server_bind(self):
+        # Avoid HTTPServer's unnecessary reverse-DNS lookup for the
+        # numeric loopback address; it can stall on hosted macOS.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def shutdown_request(self, request):
         # unwrap() sends close_notify before the TCP close; the default
