@@ -358,10 +358,17 @@ aht_wait_for_done(aht_dns_job *job, long timeout_ms, aht_tick start)
                 break;
             remaining = (unsigned long) timeout_ms - elapsed;
 
-            /* Absolute, on the same clock the condvar was given in
-             * aht_dns_resolve, and recomputed each pass so a wakeup
-             * that is neither done nor the deadline cannot extend the
-             * budget. */
+            /* Darwin has no pthread_condattr_setclock, but its relative
+             * wait is independent of wall-clock changes. Other POSIX
+             * systems use an absolute timeout on the monotonic clock given
+             * to the condvar in aht_dns_resolve. Recompute either form each
+             * pass so a wakeup that is neither done nor the deadline cannot
+             * extend the budget. */
+#ifdef __APPLE__
+            ts.tv_sec  = (time_t) (remaining / 1000UL);
+            ts.tv_nsec = (long) ((remaining % 1000UL) * 1000000UL);
+            pthread_cond_timedwait_relative_np(&job->cv, &job->m, &ts);
+#else
             clock_gettime(CLOCK_MONOTONIC, &ts);
             ts.tv_sec  += (time_t) (remaining / 1000UL);
             ts.tv_nsec += (long) ((remaining % 1000UL) * 1000000UL);
@@ -370,6 +377,7 @@ aht_wait_for_done(aht_dns_job *job, long timeout_ms, aht_tick start)
                 ts.tv_nsec -= 1000000000L;
             }
             pthread_cond_timedwait(&job->cv, &job->m, &ts);
+#endif
         }
     }
     AHT_UNLOCK(&job->m);
@@ -436,6 +444,11 @@ aht_dns_resolve(const char *host, const char *svc, long timeout_ms,
         return AHT_DNS_INTERNAL;
     }
 #else
+#ifdef __APPLE__
+    /* Darwin supplies only its default condition-variable clock; timed
+     * waits use pthread_cond_timedwait_relative_np above instead. */
+    pthread_cond_init(&job->cv, NULL);
+#else
     {
         /* Monotonic, to match aht_elapsed_ms and the absolute deadline
          * pthread_cond_timedwait is given. */
@@ -445,6 +458,7 @@ aht_dns_resolve(const char *host, const char *svc, long timeout_ms,
         pthread_cond_init(&job->cv, &a);
         pthread_condattr_destroy(&a);
     }
+#endif
 #endif
 
     /* Both references exist before the worker does, so the worker can
