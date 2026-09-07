@@ -8,7 +8,12 @@ package body AHT.HTTP.Request.Sources is
       return Stream_Source is
    begin
       return S : Stream_Source do
-         S.Stream := Stream;
+         --  The source deliberately borrows the designated stream. Assigning
+         --  the anonymous access parameter itself gives the function call's
+         --  accessibility level to the component, which GNAT 16 correctly
+         --  rejects when the result is returned. The caller owns the stream
+         --  lifetime promised by the package contract.
+         S.Stream := Stream.all'Unchecked_Access;
       end return;
    end Create;
 
