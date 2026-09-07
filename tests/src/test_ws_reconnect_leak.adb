@@ -32,6 +32,8 @@ with Ada.Directories;
 with Ada.Exceptions;
 with Ada.Text_IO; use Ada.Text_IO;
 
+with GNAT.Directory_Operations;
+
 with AHT.Bytes;
 with AHT.Websocket;
 with AHT.Websocket.Client;
@@ -70,29 +72,34 @@ procedure Test_WS_Reconnect_Leak is
    function To_String (V : AHT.Bytes.Buffer) return String is
      (AHT.Bytes.To_String (V));
 
-   --  Entries in a /proc directory, minus . and ..  The search holds
-   --  a descriptor open while it runs, so the count is biased by one;
-   --  it is only ever compared against another call to itself, so the
-   --  bias cancels.
+   --  Entries in a /proc directory, minus . and ..  Use the raw GNAT
+   --  iterator: Ada.Directories.Start_Search stats every entry, which races
+   --  descriptors disappearing from /proc/self/fd.  The iterator holds a
+   --  descriptor open while it runs, so the count is biased by one; it is
+   --  only ever compared against another call to itself, so the bias cancels.
    function Count_Entries (Path : String) return Natural is
-      use Ada.Directories;
-      S : Search_Type;
-      D : Directory_Entry_Type;
-      N : Natural := 0;
+      use GNAT.Directory_Operations;
+      Dir  : Dir_Type;
+      Name : String (1 .. 256);
+      Last : Natural;
+      N    : Natural := 0;
    begin
-      Start_Search (S, Path, "");
-      while More_Entries (S) loop
-         Get_Next_Entry (S, D);
-         declare
-            Nm : constant String := Simple_Name (D);
-         begin
-            if Nm /= "." and then Nm /= ".." then
-               N := N + 1;
-            end if;
-         end;
+      Open (Dir, Path);
+      loop
+         Read (Dir, Name, Last);
+         exit when Last = 0;
+         if Name (1 .. Last) /= "." and then Name (1 .. Last) /= ".." then
+            N := N + 1;
+         end if;
       end loop;
-      End_Search (S);
+      Close (Dir);
       return N;
+   exception
+      when others =>
+         if Is_Open (Dir) then
+            Close (Dir);
+         end if;
+         raise;
    end Count_Entries;
 
    function Have_Proc return Boolean is

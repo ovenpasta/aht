@@ -22,7 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: alire-project/setup-alire@v4
+      - uses: alire-project/setup-alire@v6.0.0
+        with:
+          toolchain: gnat_native=16.1.0 gprbuild=26.0.1
 
       # Usually preinstalled on the runners — cheap insurance. The CLI
       # is required (not just the headers): test_tls_keyupdate drives
