@@ -1,0 +1,57 @@
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
+
+name: Linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.tls }}
+    strategy:
+      fail-fast: false
+      matrix:
+        tls: [openssl, mbedtls]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      AHT_TLS_BACKEND: ${{ matrix.tls }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: alire-project/setup-alire@v6.0.0
+        with:
+          toolchain: gnat_native=16.1.0 gprbuild=26.0.1
+
+      # Usually preinstalled on the runners — cheap insurance. The CLI
+      # is required (not just the headers): test_tls_keyupdate drives
+      # `openssl s_server` and is mandatory on the openssl jobs.
+      - name: Install OpenSSL 3
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev openssl
+
+      - name: Build library
+        run: alr build
+
+      - name: Build tests
+        run: alr exec -- gprbuild -P tests/tests.gpr
+
+      - name: Run pure unit tests
+        run: |
+          ./tests/bin/debug-$AHT_TLS_BACKEND/test_url
+          ./tests/bin/debug-$AHT_TLS_BACKEND/test_url_encoding
+          ./tests/bin/debug-$AHT_TLS_BACKEND/test_headers
+          ./tests/bin/debug-$AHT_TLS_BACKEND/test_bytes_buffer
+          ./tests/bin/debug-$AHT_TLS_BACKEND/test_log
+          ./tests/bin/debug-$AHT_TLS_BACKEND/test_ws_frames
+
+      - name: Build examples
+        run: alr exec -- gprbuild -P examples/examples.gpr
+
+      - name: Run integration suite
+        run: bash tests/run_tests.sh
+
+      - name: Run examples
+        run: bash examples/run_examples.sh

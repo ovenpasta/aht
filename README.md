@@ -5,6 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # AHT, an Ada HTTP and WebSocket client
 
+[![Linux](https://github.com/ovenpasta/aht/actions/workflows/linux.yml/badge.svg)](https://github.com/ovenpasta/aht/actions/workflows/linux.yml)
+[![macOS](https://github.com/ovenpasta/aht/actions/workflows/macos.yml/badge.svg)](https://github.com/ovenpasta/aht/actions/workflows/macos.yml)
+[![REUSE](https://github.com/ovenpasta/aht/actions/workflows/reuse.yml/badge.svg)](https://github.com/ovenpasta/aht/actions/workflows/reuse.yml)
+
 An Ada 2022 library providing a synchronous HTTP/1.1 client and a
 concurrent WebSocket (RFC 6455) client on top of a shared transport
 layer, with TLS via OpenSSL 3 (default) or mbedTLS.

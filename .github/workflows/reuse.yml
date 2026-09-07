@@ -1,0 +1,16 @@
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
+
+name: REUSE
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fsfe/reuse-action@v5
