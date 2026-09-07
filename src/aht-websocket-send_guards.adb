@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 package body AHT.Websocket.Send_Guards is
 
    protected body Send_Guard is

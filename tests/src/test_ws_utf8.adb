@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  RFC 3629 UTF-8 validation — the check a WebSocket endpoint applies
 --  to inbound text-message payloads (and Close-frame reasons) before
 --  accepting them, failing the connection with code 1007 on ill-formed

@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Cross-cutting log facade. Silent by default: the library only
 --  emits output when the caller installs a sink. See docs/log.md for
 --  the design rationale.

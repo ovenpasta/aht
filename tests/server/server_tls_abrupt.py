@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 """Abrupt-close TLS fixture for the truncation-policy test.
 
 Listens on 127.0.0.1:8771. For every connection: TLS handshake, send a

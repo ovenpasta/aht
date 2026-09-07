@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Aldo Nicolas Bruno
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # TLS Backends
 
 `AHT.Transport.TLS` is one spec with two interchangeable bodies. The

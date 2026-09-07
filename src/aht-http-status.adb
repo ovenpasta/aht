@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 package body AHT.HTTP.Status is
 
    function Reason_Phrase (Code : Status_Code) return String is

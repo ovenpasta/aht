@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  The handover record's own protocol, driven directly.
 --
 --  This replaces test_ws_abort's calibrated sweep, which tried to

@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 with AHT.Bytes;
 
 --  The OS entropy call itself, and nothing else.

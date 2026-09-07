@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 """AHT deaf-TLS test fixture.
 
 Completes the TLS handshake on 127.0.0.1:8769 and then never reads a

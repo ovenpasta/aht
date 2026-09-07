@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  AHT.Websocket.Budgets — the close handshake's budget arithmetic.
 --
 --  Self-contained: no sockets, no client, no fixtures. That is the

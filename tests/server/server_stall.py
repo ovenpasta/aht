@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 """AHT stall fixture for the handshake- and upgrade-timeout tests.
 
 Listens on 127.0.0.1:8767 and accepts TCP connections but never speaks

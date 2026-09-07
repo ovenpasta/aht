@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Mid-session corruption under concurrency (backend-neutral).
 --
 --  test_tls_corrupt proves a corrupted record fails closed on a single

@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Example 1 — the simplest possible request.
 --
 --  `AHT.HTTP.Client.Get` is a one-line convenience wrapper: give it a

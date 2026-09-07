@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 """Mid-session corruption under concurrency.
 
 Listens on 127.0.0.1:8776. Per connection, on ONE thread (an OpenSSL

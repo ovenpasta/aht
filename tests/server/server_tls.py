@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 """AHT HTTPS test fixture.
 
 Wraps the plain-HTTP routes from server.py in a TLS layer and listens

@@ -1,0 +1,32 @@
+version = 1
+SPDX-PackageName = "AHT"
+SPDX-PackageSupplier = "Aldo Nicolas Bruno <ovenpasta@pizzahack.eu>"
+SPDX-PackageDownloadLocation = "https://github.com/ovenpasta/aht"
+
+#  Every authored file carries its own header. The blocks below cover the
+#  files that cannot hold a comment, and the binding specs whose
+#  declarations were generated from third-party headers.
+
+[[annotations]]
+path = [".gitignore", "examples/.gitignore", "tests/autobahn/.gitignore", "tests/httpbin/.gitignore", "tests/autobahn/config/fuzzingserver.json", "LICENSE"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Aldo Nicolas Bruno"
+SPDX-License-Identifier = "Apache-2.0"
+
+#  Curated from `gcc -fdump-ada-spec` output over the OpenSSL 3 headers
+#  (scripts/regen_openssl_bindings.sh). The declarations are OpenSSL's;
+#  the selection and the commentary are ours.
+[[annotations]]
+path = ["src/tls/openssl/aht-openssl-ssl.ads", "src/tls/openssl/aht-openssl-bio.ads", "src/tls/openssl/aht-openssl-x509.ads", "src/tls/openssl/aht-openssl-err.ads"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = ["2026 Aldo Nicolas Bruno", "1998-2025 The OpenSSL Project Authors"]
+SPDX-License-Identifier = "Apache-2.0"
+
+#  Curated from `gcc -fdump-ada-spec` output over the Mbed TLS 3.6
+#  headers (scripts/regen_mbedtls_bindings.sh), used under the
+#  Apache-2.0 option of its licence.
+[[annotations]]
+path = ["src/tls/mbedtls/aht-mbedtls-ssl.ads", "src/tls/mbedtls/aht-mbedtls-x509.ads"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = ["2026 Aldo Nicolas Bruno", "The Mbed TLS Contributors"]
+SPDX-License-Identifier = "Apache-2.0"

@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Coordinator + TLS 1.3 KeyUpdate coverage, openssl backend.
 --
 --  A. The shared white-box coordinator cases (TLS_Sync_Cases, run by

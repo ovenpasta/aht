@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Interop check against go-httpbin (mccutchen/go-httpbin), a real,
 --  widely-used third-party HTTP/1.1 server — proof that AHT.HTTP.Client
 --  talks to more than its own Python fixture. The orchestrator

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Aldo Nicolas Bruno
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Working on this repository
 
 Notes for anyone contributing, human or agent. Most of it is the

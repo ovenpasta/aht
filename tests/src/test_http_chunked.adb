@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  End-to-end exercise of the chunked-transfer decoder. The /chunked
 --  route emits three deliberately uneven chunks ("AHT ", "rocks",
 --  "!\n") with hex-length lines and a zero-size terminator; the

@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Trust anchors supplied as PEM data rather than as a filesystem path.
 --
 --  The point of CA_PEM is anchors compiled into the binary, so the

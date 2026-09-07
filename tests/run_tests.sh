@@ -1,4 +1,6 @@
 #!/bin/sh
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 #
 # AHT test orchestrator: builds the library + test binaries, brings up
 # the Python fixtures, runs every test main listed in tests/tests.gpr,

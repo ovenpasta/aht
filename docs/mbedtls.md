@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Aldo Nicolas Bruno
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # mbedTLS Integration
 
 This is the **mbedtls TLS backend** (`AHT_TLS_BACKEND=mbedtls`; the

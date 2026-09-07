@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 package body AHT.Websocket.UTF8 is
 
    use type AHT.Bytes.Octet;

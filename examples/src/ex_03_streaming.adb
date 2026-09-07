@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Example 3 — streaming a large body without buffering it.
 --
 --  `Send` accumulates the whole response body in `Resp.Body_B`. For a

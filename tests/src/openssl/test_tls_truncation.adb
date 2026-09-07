@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Truncation policy, openssl backend: an abrupt TCP close without
 --  close_notify (tests/server/server_tls_abrupt.py, 127.0.0.1:8771)
 --  must surface as TLS_Error, never as a clean EOF — AHT supports

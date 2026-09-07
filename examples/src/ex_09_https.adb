@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Example 9 — the same one-line GET, but over TLS (https://).
 --
 --  Nothing about the request changes from ex_01: Client.Get parses the

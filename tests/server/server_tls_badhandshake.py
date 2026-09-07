@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 """Malformed-handshake TLS fixtures (two ports, one process).
 
 Neither port ever runs a real TLS server — the point is what the

@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  The record that a generation's session changed hands.
 --
 --  This lives in its own unit for the reason `Send_Guards` does: its

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 """Run one test binary under a hard wall-clock cap.
 
 Why not timeout(1): it is coreutils, and the macOS CI job installs

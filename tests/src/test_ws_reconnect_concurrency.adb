@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Sends racing a forced teardown.
 --
 --  A Reconnect displaces a live connection while application tasks

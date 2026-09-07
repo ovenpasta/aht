@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Aldo Nicolas Bruno
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # AHT — Ada HTTP/WebSocket Client
 
 An Ada 2022 library providing a synchronous HTTP/1.1 client and a

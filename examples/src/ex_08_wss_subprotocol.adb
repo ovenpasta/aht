@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Example 8 — a secure socket (wss://) with subprotocol negotiation.
 --
 --  Two things layered on the basic socket of ex_06:

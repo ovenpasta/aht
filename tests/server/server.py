@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 """AHT plain-HTTP test fixture.
 
 Serves a handful of HTTP/1.1 routes on 127.0.0.1:8764 that the Ada

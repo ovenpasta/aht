@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  The I7 probe: tearing down while the write latch is contended.
 --
 --  One connection has one send guard, and everything that writes a

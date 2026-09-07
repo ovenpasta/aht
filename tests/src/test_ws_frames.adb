@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  RFC 6455 frame codec — encode/decode round-trips plus the
 --  validation cases the Decode contract calls out. No sockets; the
 --  codec works entirely over Byte_Array / Buffer.

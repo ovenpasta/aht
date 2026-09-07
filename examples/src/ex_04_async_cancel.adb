@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Example 4 — fire a request off to the side, and cancel one.
 --
 --  `Send_Async` runs a request on a worker task and returns straight

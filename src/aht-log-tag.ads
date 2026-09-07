@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Generic shortcut bound to a specific subsystem. Instantiate once
 --  per unit body, typically as:
 --

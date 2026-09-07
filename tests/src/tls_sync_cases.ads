@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  White-box cases for AHT.TLS_Sync.Coordinator_Type, the arbiter
 --  both TLS engines rely on. Shared by the per-backend
 --  test_tls_keyupdate mains because the coordinator itself is shared:

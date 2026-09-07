@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Cross-task cancel via AHT.HTTP.Client.Cancel_Handle.
 --
 --  The cancel mechanism rides Transport.Abort_Pending, which is

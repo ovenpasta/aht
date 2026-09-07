@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Bounded resolution: AHT.DNS and the shim under it
 --  (csrc/dns/aht_dns.c).
 --

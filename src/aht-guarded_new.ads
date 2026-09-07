@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Abort-deferred allocation gate for a single `new`.
 --
 --  GNAT attaches a heap object to its access type's collection BEFORE

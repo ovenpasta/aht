@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  AHT.Websocket.Send_Guards — the write latch and its scope guard.
 --
 --  Self-contained: no sockets, no fixtures, and no client. That is

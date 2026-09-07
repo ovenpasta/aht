@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Example 2 — build a request by hand, and the HEAD special case.
 --
 --  `Client.Get` only does GET-with-no-body. For anything else you

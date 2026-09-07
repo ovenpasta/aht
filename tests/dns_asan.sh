@@ -1,4 +1,6 @@
 #!/bin/sh
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 # ASan/UBSan check for the reference-counted handoff in
 # csrc/dns/aht_dns.c.
 #

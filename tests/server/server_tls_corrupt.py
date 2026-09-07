@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 """Corrupted-record TLS fixture.
 
 Listens on 127.0.0.1:8773. Per connection: TLS handshake, send a valid

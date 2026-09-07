@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 package AHT.Mbedtls.Version is
 
    --  Compile-time constants mirrored from mbedtls/version.h.

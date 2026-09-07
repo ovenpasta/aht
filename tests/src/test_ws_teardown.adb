@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  The caller-side bound on reclamation.
 --
 --  Close waits for its own receiver to finish reclaiming the

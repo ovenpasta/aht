@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  POST round-trip against /echo. Verifies that AHT.HTTP.Client.Send
 --  forwards the body bytes intact and that the server's echo comes
 --  back via Content-Length framing. Also pins down the auto-added

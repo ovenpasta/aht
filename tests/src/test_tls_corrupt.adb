@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Integrity-failure fail-closed check (backend-neutral).
 --
 --  Against tests/server/server_tls_corrupt.py (127.0.0.1:8773), which

@@ -1,4 +1,6 @@
 #!/bin/sh
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 #
 # Ensures a go-httpbin binary is available for the suite's optional
 # real-third-party-server fixture (mccutchen/go-httpbin). Strategy:

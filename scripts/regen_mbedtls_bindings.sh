@@ -1,4 +1,6 @@
 #!/bin/sh
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 #
 # scripts/regen_mbedtls_bindings.sh — generate Ada specs for the
 # mbedTLS surface AHT.Transport.TLS uses, into scratch/gen_bindings/.

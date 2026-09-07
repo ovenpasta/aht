@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Streaming request-body upload via AHT.HTTP.Client.Send_Streaming_Body.
 --
 --  The on-the-wire framing (fixed Content-Length vs chunked, the chunk

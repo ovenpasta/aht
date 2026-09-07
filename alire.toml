@@ -1,3 +1,6 @@
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
+
 name = "aht"
 description = "Ada HTTP/WebSocket client with TLS (OpenSSL or mbedTLS)"
 version = "0.1.0-dev"

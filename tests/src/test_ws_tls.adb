@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  WebSocket client over wss://. Exercises the scheme dispatch added
 --  in split C3: AHT.Websocket.Client.Connect now routes wss:// through
 --  AHT.Transport.TLS (Insecure / CA_Path threaded into the handshake),

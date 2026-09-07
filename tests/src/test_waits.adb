@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Check_Selector's timeout contract, without a socket.
 --
 --  The property is one line and cost a Windows hang to learn:

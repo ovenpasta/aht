@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 """WebSocket peer that misbehaves in ways a client has to survive.
 
 Listens on 127.0.0.1:8777. Raw sockets rather than the `websockets`

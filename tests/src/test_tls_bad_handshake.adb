@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Handshake-path fault injection (backend-neutral), the counterpart
 --  to test_tls_corrupt's post-handshake case.
 --

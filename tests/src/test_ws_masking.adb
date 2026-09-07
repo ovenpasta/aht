@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  The masking key and the handshake nonce must be unpredictable.
 --
 --  RFC 6455 §5.3 requires the frame masking key to come from a strong

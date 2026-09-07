@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Bounds on Websocket.Client.Connect: Resolve_Timeout,
 --  Connect_Timeout, Handshake_Deadline and Upgrade_Deadline. Before
 --  these existed the client dialled with all four at Duration'Last,

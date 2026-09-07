@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 """AHT secure-WebSocket test fixture.
 
 TLS-wraps the same echo endpoint as server_ws.py and listens on

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Aldo Nicolas Bruno
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # HTTP Stack
 
 Packages under `AHT.HTTP`:

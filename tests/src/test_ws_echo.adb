@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  End-to-end WebSocket exercise against the Python `websockets`
 --  echo fixture on 127.0.0.1:8765 (commit 2 of the WS client work
 --  — handshake + frame I/O + clean close handshake).

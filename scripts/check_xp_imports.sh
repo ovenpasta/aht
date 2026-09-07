@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 #
 # Refuse a 32-bit Windows image that names an entry point Windows XP
 # does not export.

@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Synchronization primitives shared by BOTH TLS backend engines
 --  (AHT.Transport.TLS). Neither TLS library permits two tasks inside
 --  one connection object, so each backend serializes its engine calls

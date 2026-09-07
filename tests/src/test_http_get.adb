@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Hits the Python fixture's /hello route and asserts the
 --  response body bytes round-trip. The route returns a fixed
 --  "hello, world\n" with Content-Length framing, so this is the

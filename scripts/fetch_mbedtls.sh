@@ -1,4 +1,6 @@
 #!/bin/sh
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 #
 # scripts/fetch_mbedtls.sh — download + build mbedTLS 3.6.7 into a
 # per-target tree under third_party/.

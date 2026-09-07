@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Smoke test for the mbedTLS bind/link chain (the mbedtls source of
 --  the backend-neutral test_tls_version main). By calling
 --  AHT.Mbedtls.Version.Full_Version_String we exercise:

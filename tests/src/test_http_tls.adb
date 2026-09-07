@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  HTTP client over https://. Exercises the scheme dispatch added in
 --  split C2: AHT.HTTP.Client.Send now routes https:// through
 --  AHT.Transport.TLS, threading Client_Type.CA_Path / .Insecure into

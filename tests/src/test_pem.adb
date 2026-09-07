@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  AHT.PEM envelope validation, in isolation.
 --
 --  Fixture-free and pure: this is a string scanner, and every property

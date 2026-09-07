@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  TLS handshake-timeout test. Drives both the transport-level
 --  Handshake_Deadline and the HTTP client's Timeout_Seconds wiring
 --  against tests/server/server_stall.py (127.0.0.1:8767), which

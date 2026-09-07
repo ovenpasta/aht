@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Envelope validation for PEM certificate bundles.
 --
 --  This exists because neither TLS backend can be asked "was the

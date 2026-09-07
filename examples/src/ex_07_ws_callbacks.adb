@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Example 7 — the push API: react to messages with callbacks.
 --
 --  ex_06 *pulled* messages with a blocking Receive. The other style is

@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Reconnecting out of a half-received message.
 --
 --  A fragmented WebSocket message is spread over several frames, and

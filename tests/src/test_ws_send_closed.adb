@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Regression for the Send_* close-race: Send_Text / Send_Binary /
 --  Send_Ping on a connection that is not Open must raise the catchable
 --  Closed_Error, not Assertion_Error (the old `Pre => Is_Open` aspect

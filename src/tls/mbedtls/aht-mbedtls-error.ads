@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 with Interfaces.C;
 
 --  Human-readable mbedTLS error strings. Wraps mbedtls_strerror so

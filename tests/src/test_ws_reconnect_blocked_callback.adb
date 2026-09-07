@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Reconnecting while a callback refuses to return.
 --
 --  Callbacks run ON the receiver task. That is what makes them cheap,

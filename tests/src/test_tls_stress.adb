@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  TLS concurrency stress (backend-neutral): one task floods large
 --  binary messages over wss while the main task receives the echoes —
 --  a sustained bidirectional load through ONE TLS session, forcing

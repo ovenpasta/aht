@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  WebSocket handshake-only integration test (commit 1 of the WS
 --  client work). Exercises the deterministic protocol foundation:
 --  Base64 encoding, the HTTP upgrade request, and the 101 / Upgrade

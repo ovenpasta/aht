@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Version introspection for the linked OpenSSL. The three numeric
 --  functions are new in OpenSSL 3.0, so merely LINKING this unit is a
 --  LibreSSL/1.1 tripwire; AHT.Transport.TLS additionally checks

@@ -1,4 +1,6 @@
 #!/bin/sh
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 #
 # scripts/regen_openssl_bindings.sh — generate Ada specs for the
 # OpenSSL surface AHT.Transport.TLS uses, into

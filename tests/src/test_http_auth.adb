@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  /protected returns 401 with WWW-Authenticate when the request
 --  carries no Authorization header, and 200 echoing the header value
 --  otherwise. Two cases:

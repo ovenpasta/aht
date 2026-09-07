@@ -1,4 +1,6 @@
 #!/bin/sh
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 #
 # AHT example orchestrator: builds the library + the nine example
 # programs, brings up the five Python fixtures the examples dial (HTTP on

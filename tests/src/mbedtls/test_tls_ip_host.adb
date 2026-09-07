@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  IP-literal certificate identity, mbedtls backend: connecting to
 --  https://127.0.0.1:8766 with the fixture CA must verify via the
 --  cert's IP:127.0.0.1 SAN. mbedTLS matches iPAddress SANs, so this

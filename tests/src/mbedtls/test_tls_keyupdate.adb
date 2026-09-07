@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Coordinator coverage, mbedtls backend.
 --
 --  The KeyUpdate half of this main is openssl-only. This backend is

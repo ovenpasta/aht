@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Per-phase timeout bounds on AHT.HTTP.Client.Client_Type.
 --
 --  Timeout_Seconds is one number applied to five phases separately,

@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Smoke test for the OpenSSL bind/link chain (the openssl source of
 --  the backend-neutral test_tls_version main), and the LibreSSL
 --  tripwire: OPENSSL_version_major/minor/patch only exist since

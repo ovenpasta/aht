@@ -1,3 +1,7 @@
+/*  Copyright (C) 2026 Aldo Nicolas Bruno
+ *  SPDX-License-Identifier: Apache-2.0
+ */
+
 /* C glue for the OpenSSL backend.
  *
  * Mostly MACRO-defined entry points. Unlike the mbedTLS glue (which

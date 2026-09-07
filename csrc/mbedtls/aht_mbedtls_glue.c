@@ -1,3 +1,7 @@
+/*  Copyright (C) 2026 Aldo Nicolas Bruno
+ *  SPDX-License-Identifier: Apache-2.0
+ */
+
 /*
  * aht_mbedtls_glue.c — minimal C glue for the Ada mbedTLS binding.
  *

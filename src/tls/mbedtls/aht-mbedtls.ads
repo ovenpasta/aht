@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 package AHT.Mbedtls is
 
    --  Root of the AHT.Mbedtls.* binding tree. Children are curated

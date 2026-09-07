@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 with Ada.Containers;
 with Ada.Task_Identification;
 with Ada.Containers.Bounded_Doubly_Linked_Lists;

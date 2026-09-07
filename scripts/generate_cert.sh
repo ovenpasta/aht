@@ -1,4 +1,6 @@
 #!/bin/sh
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
 #
 # Generate a self-signed cert + key for the HTTPS/WSS test fixtures.
 # The cert carries SANs for both "localhost" and 127.0.0.1 so mbedTLS

@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  The part of the mbedTLS link line that depends on the target OS.
 --
 --  One body-less spec per OS directory, the same one-unit-per-target

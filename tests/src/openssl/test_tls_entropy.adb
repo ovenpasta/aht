@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Where the TLS engine gets its entropy, openssl backend.
 --
 --  The openssl engine has its own RNG and never reaches AHT.Random,

@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  What must NOT cross a generation boundary, and what must.
 --
 --  A reconnect replaces the connection under a client that the

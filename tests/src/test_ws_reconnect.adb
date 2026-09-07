@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Reconnecting a client, by calling Connect again.
 --
 --  A Client_Type used to be single-use: the receiver was a one-shot

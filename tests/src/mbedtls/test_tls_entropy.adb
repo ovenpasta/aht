@@ -1,3 +1,6 @@
+--  Copyright (C) 2026 Aldo Nicolas Bruno
+--  SPDX-License-Identifier: Apache-2.0
+
 --  Where mbedTLS gets its entropy, mbedtls backend.
 --
 --  The library is built MBEDTLS_NO_PLATFORM_ENTROPY and its pool is
