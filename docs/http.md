@@ -7,19 +7,57 @@ SPDX-License-Identifier: Apache-2.0
 
 Packages under `AHT.HTTP`:
 
-- `AHT.HTTP` — root package: the common exceptions.
-- `AHT.HTTP.Methods` — the method enumeration.
-- `AHT.HTTP.Status` — status codes and classification.
-- `AHT.HTTP.Headers` — case-insensitive header map.
-- `AHT.HTTP.Request` — request record, buffered + streaming wire write.
-- `AHT.HTTP.Response` — response record, wire read.
-- `AHT.HTTP.IO` — line/body readers; chunked decoder with streaming +
-  buffered overloads.
-- `AHT.HTTP.Client` — the client: HTTP + HTTPS, sync + streaming +
-  async, with cancel.
+- `AHT.HTTP`: root package, the common exceptions.
+- `AHT.HTTP.Methods`: the method enumeration.
+- `AHT.HTTP.Status`: status codes and reason phrases.
+- `AHT.HTTP.Headers`: case-insensitive header map.
+- `AHT.HTTP.Request`: request record, buffered and streaming wire
+  write.
+- `AHT.HTTP.Response`: response record, buffered and streaming wire
+  read.
+- `AHT.HTTP.IO`: line and body readers; chunked decoder with
+  streaming and buffered overloads.
+- `AHT.HTTP.Client`: the client. HTTP and HTTPS; synchronous,
+  streaming and async surfaces, with cancel.
 
-Common exceptions (in `AHT.HTTP`): `HTTP_Error`, `Protocol_Error`,
-`Handshake_Error`.
+Common exceptions (in `AHT.HTTP`): `HTTP_Error`, `Protocol_Error`.
+
+## Usage
+
+A GET, then a POST with a body:
+
+```ada
+with Ada.Text_IO;
+with AHT.HTTP.Client;
+with AHT.HTTP.Methods;
+with AHT.HTTP.Request;
+with AHT.HTTP.Response;
+with AHT.URL;
+
+procedure Example is
+   C    : AHT.HTTP.Client.Client_Type;
+   Resp : AHT.HTTP.Response.Response_Type;
+begin
+   Resp := C.Get ("https://example.com/");
+   Ada.Text_IO.Put_Line (Resp.Status'Image & " " & Resp.Body_Text);
+
+   declare
+      Req : AHT.HTTP.Request.Request_Type;
+   begin
+      Req.Method := AHT.HTTP.Methods.POST;
+      Req.Target := AHT.URL.Parse ("https://example.com/submit");
+      Req.Headers.Set ("Content-Type", "application/json");
+      Req.Set_Body ("{""hello"":""world""}");
+      C.Send (Req, Resp);
+      Ada.Text_IO.Put_Line
+        (Resp.Status'Image & " " & Resp.Headers.Get ("Content-Type"));
+   end;
+end Example;
+```
+
+`Send` fills in `Host`, `User-Agent`, `Connection: close` and, for a
+non-empty body, `Content-Length`. A non-2xx status is returned in
+`Resp.Status`, not raised.
 
 ## `AHT.HTTP.Methods`
 
@@ -36,7 +74,7 @@ function Reason_Phrase (Code : Status_Code) return String;
 
 `Reason_Phrase` returns the standard reason for the common codes
 (100/101/200/201/202/204, 3xx, 4xx, 5xx) and `""` for codes without a
-defined phrase. The subtype predicate catches nonsensical values at
+defined phrase. The subtype predicate catches out-of-range values at
 runtime when contracts are enabled.
 
 ## `AHT.HTTP.Headers`
@@ -44,28 +82,24 @@ runtime when contracts are enabled.
 Case-insensitive multimap. Names are normalized to lowercase on
 storage; lookup is case-insensitive.
 
-### Type invariant
+`Type_Invariant => Invariant_Ok (Map.Entries)`: every stored name is
+non-empty and lowercase. The invariant is checked after every public
+call that may mutate the map.
 
-`Type_Invariant => Invariant_Ok (Map.Entries)` — every stored name is
-non-empty and already lowercase. The invariant is checked after every
-public call that may mutate the map.
-
-### Operations
-
-- `Set (Self, Name, Value)` — `Pre => Name'Length > 0`. Removes any
+- `Set (Self, Name, Value)`: `Pre => Name'Length > 0`. Removes any
   existing entries for `Name`, then stores the new one.
-  **Post** `Self.Contains (Name)`.
-- `Append (Self, Name, Value)` — `Pre => Name'Length > 0`. Preserves
-  existing entries. **Post** `Self.Contains (Name)`. Use for
-  repeatable headers (including `Set-Cookie`).
-- `Remove (Self, Name)` — **Post** `not Self.Contains (Name)`.
+  `Post => Self.Contains (Name)`.
+- `Append (Self, Name, Value)`: `Pre => Name'Length > 0`. Preserves
+  existing entries. `Post => Self.Contains (Name)`. For repeatable
+  headers, including `Set-Cookie`.
+- `Remove (Self, Name)`: `Post => not Self.Contains (Name)`.
 - `Contains (Self, Name) return Boolean`.
-- `Get (Self, Name) return String` — first value or `""`.
-- `Values (Self, Name) return Value_List` — every value in insertion
-  order. **Does not** combine with `", "`, because `Set-Cookie`
-  (RFC 6265 §3) is not comma-combinable. The caller decides.
-- `Count (Self) return Natural` — total entries (not unique names).
-- `Iterate (Self, Process)` — yields each stored entry; names arrive
+- `Get (Self, Name) return String`: first value, or `""`.
+- `Values (Self, Name) return Value_List`: every value in insertion
+  order. Values are not joined with `", "`, because `Set-Cookie`
+  (RFC 6265 §3) is not comma-combinable.
+- `Count (Self) return Natural`: total entries, not unique names.
+- `Iterate (Self, Process)`: yields each stored entry; names arrive
   lowercase.
 
 ## `AHT.HTTP.Request`
@@ -78,42 +112,45 @@ type Request_Type is tagged record
    Body_B  : AHT.Bytes.Buffer;
 end record;
 
+procedure Set_Body (Self : in out Request_Type; Text : String);
+
 procedure Write
   (Self : Request_Type;
    T    : in out AHT.Transport.Transport_Type'Class);
 ```
 
-`Write` emits the HTTP/1.1 wire form — request line
+`Set_Body` replaces the body with the bytes of `Text`, one octet per
+`Character` (no charset encoding); it is the inverse of
+`Response.Body_Text`.
+
+`Write` emits the HTTP/1.1 wire form: request line
 (`METHOD SP request-target SP HTTP/1.1 CRLF`), stored headers in
-insertion order, blank line, body. Header names are written in
-their stored lowercase form (RFC 7230 §3.2 allows it; case is
-insensitive on the wire).
+insertion order, blank line, body. Header names are written in their
+stored lowercase form (RFC 7230 §3.2; case is insensitive on the
+wire).
 
 If `Body_B` is non-empty and the caller did not set `Content-Length`,
-`Write` synthesises a `Content-Length` so the request is always
-framed. It does **not** invent `Host`, `User-Agent`, `Connection`,
-or `Authorization`: routing and policy headers stay the caller's job
-(the `Client` layer above is the one that merges them in).
+`Write` synthesises one so the request is always framed. It does not
+invent `Host`, `User-Agent`, `Connection` or `Authorization`; routing
+and policy headers are the caller's (or the `Client`'s) job.
 
-### Anti-smuggling framing checks
+### Framing checks
 
-`Write` (and `Write_Streaming` below) reject framing that RFC 7230
-§3.3.3 calls out as a request-smuggling hazard, each raising
-`Protocol_Error` before any wire byte is written:
+`Write` and `Write_Streaming` reject the framing that RFC 7230 §3.3.3
+identifies as a request-smuggling hazard, raising `Protocol_Error`
+before any wire byte is written:
 
-- **`Transfer-Encoding` from the caller is rejected.** The buffered
-  `Write` transcribes `Body_B` verbatim, so a TE-chunked header over
-  raw bytes is malformed wire; the chunked encoder is `Write_Streaming`'s
-  job and it owns that header. Use `Write_Streaming` (without a
-  `Content-Length`) for chunked upload.
-- **A duplicate `Content-Length` is rejected.** The header map allows
-  repeated names, and intermediaries can disagree on which value wins.
-- **A single caller `Content-Length` must match the body.** For
-  buffered `Write` it must equal `Body_B.Length`; a declared-vs-actual
-  mismatch (e.g. `Content-Length: 1` over a 4-byte body) would truncate
-  the upload or hang the peer.
+- A caller-supplied `Transfer-Encoding` is rejected. The buffered
+  `Write` transcribes `Body_B` verbatim, so a chunked header over raw
+  bytes would be malformed wire; `Write_Streaming` owns that header.
+- A duplicate `Content-Length` is rejected. The header map allows
+  repeated names, and intermediaries can disagree on which value
+  wins.
+- A single caller `Content-Length` must match the body. For the
+  buffered `Write` it must equal `Body_B.Length`; a mismatch would
+  truncate the upload or hang the peer.
 
-### Streaming upload — `Write_Streaming`
+### Streaming upload: `Write_Streaming`
 
 ```ada
 type Body_Source is limited interface;
@@ -122,7 +159,8 @@ procedure Read_Chunk
    Buf  : out AHT.Bytes.Byte_Array;
    Last : out Natural) is abstract;
 
-subtype Byte_Count is Interfaces.Integer_64 range 0 .. Interfaces.Integer_64'Last;
+subtype Byte_Count is
+  Interfaces.Integer_64 range 0 .. Interfaces.Integer_64'Last;
 procedure Set_Content_Length (Self : in out Request_Type; N : Byte_Count);
 
 procedure Write_Streaming
@@ -133,43 +171,43 @@ procedure Write_Streaming
 ```
 
 `Write_Streaming` pumps a request body from a pull-style `Source`
-straight to the wire, never buffering it — so a multi-GB upload runs in
-O(1) memory. The caller derives a concrete type from `Body_Source` and
+to the wire without buffering it, so a multi-GB upload runs in O(1)
+memory. The caller derives a concrete type from `Body_Source` and
 implements `Read_Chunk`, which fills the library-provided window
-`Buf (Buf'First .. Last)` with the next bytes and signals end-of-stream
-with `Last < Buf'First` (canonically `Last = 0`). Upload state (a file
-handle, a generator cursor) lives in that derived type, so no closure or
-`'Unrestricted_Access` is needed; the source is passed by reference and
-the whole upload completes before the call returns.
+`Buf (Buf'First .. Last)` with the next bytes and signals
+end-of-stream with `Last < Buf'First` (canonically `Last = 0`).
+Upload state (a file handle, a generator cursor) lives in the derived
+type; the source is passed by reference and the whole upload
+completes before the call returns.
 
-The head is built exactly like `Write` (same request line, same
-lowercase headers, same anti-smuggling checks). Framing is header-driven:
+The head is built as by `Write` (same request line, same lowercase
+headers, same framing checks). Body framing is header-driven:
 
-- **Fixed** — a single `Content-Length` (set it with `Set_Content_Length`,
-  which takes a 64-bit `Byte_Count` so multi-GB sizes are expressible)
-  streams exactly N raw bytes. A source that signals EOF early
+- Fixed: a single `Content-Length` (set it with
+  `Set_Content_Length`, whose 64-bit `Byte_Count` expresses multi-GB
+  sizes) streams exactly N raw bytes. A source that signals EOF early
   (under-run) or hands over more than N (over-run) raises
   `Protocol_Error`; the stream stops at exactly N.
-- **Chunked** — with no `Content-Length`, the encoder emits
+- Chunked: with no `Content-Length`, the encoder emits
   `Transfer-Encoding: chunked` and frames each window as
   `{hex-size}CRLF {bytes} CRLF`, closing with `0 CRLF CRLF`
-  (lowercase hex chunk size, no leading zeros — RFC 7230 §4.1). An empty
-  body is just the terminator.
+  (lowercase hex, no leading zeros; RFC 7230 §4.1). An empty body is
+  just the terminator.
 
-`Abort_Check`, when non-null, is polled between windows; a `True` result
-raises `AHT.Transport.Aborted_Error` mid-body. It is a cheap secondary
-fast-exit — the real bound on a stuck send is the transport's
-non-blocking write deadline / `Abort_Pending`. A `Timeout_Error` /
-`Aborted_Error` can fire after some body bytes have reached the peer, so
-a failed streaming upload is retry-unsafe for a non-idempotent request.
+`Abort_Check`, when non-null, is polled between windows; a `True`
+result raises `AHT.Transport.Aborted_Error` mid-body. It is a
+secondary fast exit; the bound on a stuck send is the transport's
+write deadline and `Abort_Pending`. A `Timeout_Error` or
+`Aborted_Error` can fire after some body bytes have reached the peer,
+so a failed streaming upload is retry-unsafe for a non-idempotent
+request.
 
-### Ready-made body sources — `AHT.HTTP.Request.Sources`
+### Ready-made body sources: `AHT.HTTP.Request.Sources`
 
-You rarely need to hand-roll a `Body_Source`. The child package
-`AHT.HTTP.Request.Sources` ships a `Stream_Source` over any Ada stream
-(`Ada.Streams.Root_Stream_Type'Class`) — which subsumes files (via
-`Ada.Streams.Stream_IO.Stream`), sockets, in-memory streams, and
-generators in one type:
+`AHT.HTTP.Request.Sources` ships a `Stream_Source` over any Ada
+stream (`Ada.Streams.Root_Stream_Type'Class`), which covers files
+(via `Ada.Streams.Stream_IO.Stream`), sockets, in-memory streams and
+generators:
 
 ```ada
 type Stream_Source is new Body_Source with private;
@@ -179,31 +217,26 @@ function Create
 ```
 
 ```ada
---  Stream a file straight to the wire, no buffering, no Read_Chunk.
+--  Stream a file to the wire with fixed framing.
 F : Ada.Streams.Stream_IO.File_Type;
 Ada.Streams.Stream_IO.Open (F, Ada.Streams.Stream_IO.In_File, Path);
 declare
    Src : Request.Sources.Stream_Source :=
            Request.Sources.Create (Ada.Streams.Stream_IO.Stream (F));
 begin
-   Req.Set_Content_Length (Byte_Count (Ada.Directories.Size (Path)));  --  fixed
+   Req.Set_Content_Length (Byte_Count (Ada.Directories.Size (Path)));
    Client.Send_Streaming_Body (C, Req, Resp, Src);
 end;
 Ada.Streams.Stream_IO.Close (F);
 ```
 
-- **Borrows, never owns.** `Stream_Source` holds an access to the stream;
-  it has no finalizer and never opens or closes anything. The caller owns
-  the file/socket lifetime. This is sound because the upload is
-  synchronous — the source and the stream it points at outlive the whole
-  `Send_Streaming_Body` / `Write_Streaming` call by construction.
-- **Framing stays header-driven.** A generic stream has no length, so for
-  fixed framing set the `Content-Length` yourself
-  (`Set_Content_Length (Byte_Count (Ada.Directories.Size (Path)))` for a
-  file); omit it for chunked. The source never touches framing.
-- **In-memory bodies** don't need a source at all — use `Set_Body`
-  (buffered). `Stream_Source` is for the streaming / from-disk /
-  from-socket case.
+- `Stream_Source` borrows the stream: it holds an access to it, has
+  no finalizer, and never opens or closes anything. The caller owns
+  the stream's lifetime, which outlives the synchronous upload call.
+- Framing stays header-driven. A generic stream has no length, so for
+  fixed framing set the `Content-Length` yourself; omit it for
+  chunked.
+- In-memory bodies need no source: use `Set_Body`.
 
 ## `AHT.HTTP.Response`
 
@@ -219,75 +252,100 @@ procedure Read
   (Self   : out Response_Type;
    T      : in out AHT.Transport.Transport_Type'Class;
    Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET);
+
+procedure Read_Streaming
+  (Self   : out Response_Type;
+   T      : in out AHT.Transport.Transport_Type'Class;
+   Sink   : not null access procedure (Chunk : AHT.Bytes.Byte_Array);
+   Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET);
+
+function Body_Text (Self : Response_Type) return String;
 ```
 
 `Read` parses a status line (`HTTP/1.x SP status SP [reason]`),
 header lines until a blank line, then picks body framing:
 
-0. `Method = HEAD`, or `Status` in 1xx / 204 / 205 / 304 → no body.
+0. `Method = HEAD`, or `Status` in 1xx / 204 / 205 / 304: no body.
    The message ends at the empty line; any `Content-Length` or
-   `Transfer-Encoding` the peer sent is ignored per RFC 7230 §3.3.3
-   (and RFC 9110 §15.3.6 for 205). This is load-bearing for:
-   - **HEAD** — the peer usually advertises the GET-equivalent
-     `Content-Length`; the codec can't infer the request method,
-     so the caller passes it. Reading the announced bytes would
-     block forever (no body is coming).
-   - **101 Switching Protocols** — bytes after CRLFCRLF belong to
-     the upgraded protocol, e.g. a WebSocket frame; reading them
-     as body would consume the first frame.
-   - 204 / 205 / 304 on `Connection: close` — the EOF fallback
-     would otherwise block until the peer closes even though the
-     message is already complete.
-1. `Transfer-Encoding: chunked` → `AHT.HTTP.IO.Read_Chunked_Body`.
-2. `Content-Length: N` → `Read_N` for exactly *N* bytes.
-3. otherwise → read until the peer closes (for
-   `Connection: close` responses).
+   `Transfer-Encoding` the peer sent is ignored (RFC 7230 §3.3.3, and
+   RFC 9110 §15.3.6 for 205). This covers:
+   - HEAD, where the peer usually advertises the GET-equivalent
+     `Content-Length`. The codec cannot infer the request method, so
+     the caller passes it.
+   - 101 Switching Protocols, where the bytes after CRLFCRLF belong
+     to the upgraded protocol (for example a WebSocket frame).
+   - 204 / 205 / 304 on `Connection: close`, where the EOF fallback
+     would otherwise block until the peer closes.
+1. `Transfer-Encoding: chunked`: `AHT.HTTP.IO.Read_Chunked_Body`.
+2. `Content-Length: N`: `Read_N` for exactly N bytes.
+3. Otherwise: read until the peer closes.
 
-Only `chunked` is understood — any other
-`Transfer-Encoding` (gzip, compress, chunked+gzip, …) raises
-`Protocol_Error` rather than hand back decoded bytes for a codec
-we don't have. A `Status` outside `100..599`, a missing colon on
-a header line, or a non-numeric `Content-Length` also raise
-`Protocol_Error`. The status line with an empty reason phrase
-(`HTTP/1.1 204 CRLF`) is legal and leaves `Reason` empty.
+Only `chunked` is understood; any other `Transfer-Encoding` (gzip,
+compress, chunked+gzip) raises `Protocol_Error`. A `Status` outside
+`100..599`, a missing colon on a header line, or a non-numeric
+`Content-Length` also raise `Protocol_Error`. A status line with an
+empty reason phrase (`HTTP/1.1 204 CRLF`) is legal and leaves
+`Reason` empty.
+
+`Read_Streaming` parses the status line and headers, applies the same
+no-body suppression, and delivers the body to `Sink` as it is decoded
+instead of accumulating it in `Body_B`, which stays empty. Delivery
+granularity (a hint, not a contract):
+
+- `Transfer-Encoding: chunked`: windows of up to 4 KiB. A wire chunk
+  larger than the window is delivered as several calls, so chunk
+  boundaries are not preserved; `Sink` is never called with an empty
+  slice, and the zero-size terminator is consumed but not delivered.
+- `Content-Length: N`: slices of up to 4 KiB, each fully populated
+  before delivery (one call when N is at most 4 KiB).
+- Neither header (`Connection: close`): one call per underlying
+  transport `Read` until peer EOF.
+
+Same `Protocol_Error` conditions as `Read`.
+
+`Body_Text` returns the body one `Character` per byte (raw octets, no
+charset decoding), for printing or comparing. It is empty when there
+is no body: after a HEAD, or after a streaming read that drained the
+body into a `Sink`.
 
 ## `AHT.HTTP.IO`
 
 Transport-level helpers over `AHT.Transport.Transport_Type'Class`.
-All four operations delegate to `Transport.Read` / `Transport.Write`
-and, crucially, do **not** track their own deadlines. Deadlines and
-cancel live on the transport (`Set_Read_Deadline` / `Abort_Pending`);
-because the deadline is compound (a wall-clock budget from the
-`Set_` call that is not refreshed per `Read` — see
-`docs/transport.md`), the byte-by-byte `Read_Line` and the looped
-`Read_N` below honour it for the whole logical operation, not for
-each underlying `Read`. A slow-drip peer that dribbles one byte per
-(deadline / N) seconds trips `Timeout_Error` instead of tying up the
-reader forever.
+All five operations delegate to `Transport.Read` / `Transport.Write`
+and track no deadlines of their own. Deadlines and cancel live on the
+transport (`Set_Read_Deadline` / `Abort_Pending`). A read deadline is
+a wall-clock budget measured from the `Set_` call, not refreshed per
+`Read` (see `docs/transport.md`), so the byte-by-byte `Read_Line` and
+the looped `Read_N` honour it for the whole logical operation. A peer
+that dribbles one byte per (deadline / N) seconds trips
+`Timeout_Error`.
 
-- `Write_All (T, Data)` — the transport's `Write` contract is
-  already all-or-raise, so this is a thin named entry point plus a
-  `Log.Trace` on the `"http.io"` subsystem. Empty slice is a no-op.
-- `Read_Line (T, Max_Length => 8_192) return String` — reads
-  byte-by-byte until CRLF, returns the line **without** the CRLF.
-  Byte-by-byte lets the caller transition from line-mode (status +
-  headers) to body-mode without a buffered-reader abstraction: the
-  transport is positioned exactly at the byte after CRLF with no
-  overshoot. Raises `Protocol_Error` on peer close before CRLF or
-  when `Max_Length` bytes have been consumed without finding one.
-- `Read_N (T, Data)` — fills every slot in `Data` by looping around
-  `Transport.Read`. Raises `Protocol_Error` if the peer closes
-  before `Data'Length` bytes have been received. Zero-length slice
-  is a no-op.
-- `Read_Chunked_Body (T) return Buffer` — RFC 7230 §4.1
-  decoder. Each iteration reads a chunk-size line (hex digits,
-  case-insensitive; `chunk-ext` after a `;` is ignored), reads the
-  chunk-data with `Read_N`, then consumes the mandatory bare CRLF.
-  The zero-size chunk terminates the body; a trailer section
-  follows (read and discarded — trailers are not surfaced)
-  until a bare CRLF ends the message. Raises `Protocol_Error` on
-  non-hex size, size overflow past `Natural'Last`, or chunk-data
-  not followed by bare CRLF.
+- `Write_All (T, Data)`: the transport's `Write` is already
+  all-or-raise, so this is a named entry point plus a `Log.Trace` on
+  the `"http.io"` subsystem. An empty slice is a no-op.
+- `Read_Line (T, Max_Length => 8_192) return String`: reads
+  byte-by-byte until CRLF and returns the line without the CRLF.
+  Byte-by-byte reading leaves the transport positioned exactly at the
+  byte after CRLF, so the caller moves from line mode (status and
+  headers) to body mode with no buffered-reader layer. Raises
+  `Protocol_Error` on peer close before CRLF or when `Max_Length`
+  bytes have been consumed without finding one.
+- `Read_N (T, Data)`: fills every slot in `Data` by looping around
+  `Transport.Read`. Raises `Protocol_Error` if the peer closes before
+  `Data'Length` bytes have arrived. A zero-length slice is a no-op.
+- `Read_Chunked_Body (T, Sink)`: streaming RFC 7230 §4.1 decoder.
+  Each iteration reads a chunk-size line (hex digits,
+  case-insensitive; a `chunk-ext` after `;` is ignored), reads the
+  chunk data in bounded windows delivered to `Sink` as non-empty
+  slices, then consumes the mandatory bare CRLF. Chunk boundaries are
+  not preserved: a large wire chunk arrives as several windows, so
+  the decoder's footprint is O(1) in the chunk size. The zero-size
+  chunk terminates the body; the trailer section that follows is read
+  and discarded (trailers are not surfaced) until a bare CRLF ends the
+  message. Raises `Protocol_Error` on a non-hex size, a size past
+  `Natural'Last`, or chunk data not followed by a bare CRLF.
+- `Read_Chunked_Body (T) return Buffer`: buffered overload; wraps the
+  streaming decoder with a sink that appends to one buffer.
 
 ## `AHT.HTTP.Client`
 
@@ -310,150 +368,110 @@ end record;
 type Phase_Bound is private;
 Inherit   : constant Phase_Bound;   --  use Timeout_Seconds
 Unbounded : constant Phase_Bound;   --  no bound at all
-function Seconds (S : Duration) return Phase_Bound;
+function Seconds (S : Duration) return Phase_Bound
+  with Pre => S >= 0.0;
 
 procedure Send (Self, Req, Resp);
 function  Get  (Self, URL) return Response_Type;
 ```
 
 `CA_PEM` holds trust anchors as PEM data rather than a path, for
-anchors compiled into the binary. Setting both it and `CA_Path` raises
-`TLS_Error` — but on the **request that consumes them**, not when the
-field is set, and not at all on a plain `http://` request. These are
-persistent TLS configuration on the client record rather than
-arguments to a call, so a plain request simply does not read them,
-exactly as it already ignores `CA_Path`.
+anchors compiled into the binary. Setting both it and `CA_Path`
+raises `TLS_Error` on the next `https://` request, before anything is
+dialled; there is no precedence rule, and the refusal stands under
+`Insecure`. A plain `http://` request does not read either field.
 
 ### Behaviour
 
-- **Synchronous, one request per call.** Each `Send` owns a fresh
+- Synchronous, one request per call. Each `Send` owns a fresh
   transport for the duration of the call, so multiple tasks can share
-  one `Client_Type` without extra synchronization. `Connection: close`
-  on every request — no keep-alive, no HTTP/2.
+  one `Client_Type` without extra synchronization. `Connection:
+  close` on every request; no keep-alive, no HTTP/2.
 
-- **Scheme dispatch** on `Req.Target.Scheme`:
-  - `http://` → `AHT.Transport.TCP`.
-  - `https://` → `AHT.Transport.TLS` (custom BIO over the TCP
-    transport). `Send` constructs a `TLS_Transport`, threading
-    `Client_Type.CA_Path` / `.CA_PEM` / `.Insecure` into the
-    handshake, then runs
-    the same wire round-trip polymorphically.
-  - `ws://` / `wss://` → raises `HTTP_Error`; route those through
+- Scheme dispatch on `Req.Target.Scheme`:
+  - `http://`: `AHT.Transport.TCP`.
+  - `https://`: `AHT.Transport.TLS`. Both TLS engines run over
+    memory BIOs (OpenSSL) or in-memory queues (mbedTLS) that the Ada
+    side feeds from the TCP transport; the engine never touches the
+    socket. `Send` threads `CA_Path` / `CA_PEM` / `Insecure` into the
+    handshake and then runs the same round trip polymorphically.
+  - `ws://` / `wss://`: raises `HTTP_Error`; use
     `AHT.Websocket.Client`.
 
-- **`Timeout_Seconds` is a per-phase budget, not one end-to-end
-  deadline.** A request walks five phases, and `Timeout_Seconds` (when
-  non-zero) bounds each independently — each phase gets the full value
-  as its own budget, so the wall clock a request may occupy is a
-  multiple of it, not equal to it. `Timeout_Seconds = 0` disables all
-  of them. The phases are the same for `http://` and `https://` (the
-  TLS handshake phase is simply absent for plain HTTP):
-  1. *DNS resolution* — **bounded** via `Connect`'s `Resolve_Timeout`,
-     which resolves through `AHT.DNS` rather than a blocking
-     `getaddrinfo` the caller cannot leave. The bound is on the
-     *caller*: on expiry `Timeout_Error` is raised and the lookup
-     itself carries on, because nothing can cancel it. A lookup that
-     answers with no usable address is `Transport_Error` instead —
-     a slow resolver and a bad name are different problems.
-     Multi-candidate fallback (every A/AAAA record) happens here, in
-     the TCP transport.
-  2. *TCP connect* — **bounded** as a single total budget shared across
-     every resolved candidate (not per-candidate), forwarded as
-     `Connect`'s `Connect_Timeout`. If the budget runs out before any
-     candidate connects, `Timeout_Error` is raised; non-timeout failures
-     (all candidates refused) still raise `Transport_Error`.
-  3. *TLS handshake* (`https://` only) — **bounded** via `Connect`'s
-     `Handshake_Deadline`, so a peer that completes the TCP connect but
-     stalls mid-handshake raises `Timeout_Error` instead of hanging. The
-     deadline is cleared once the handshake completes.
-  4. *request write* (`Send_Streaming_Body` only) — **bounded** by
-     `Set_Write_Deadline`, which bounds a peer that stops reading
-     mid-upload. The buffered overloads arm none: their body is
-     already in RAM and drains in one shot.
-  5. *response read* — **bounded** by `Set_Read_Deadline`, armed fresh
-     in `Wire_Round_Trip` as a compound deadline over the whole
-     response.
-
-  `Cancel_Handle` binds after `Connect` returns, so cancel takes effect
-  during the response read — not during DNS, connect, or handshake
-  (same for both schemes).
-
-- **Each phase can be bounded on its own.** One number spent five
-  times couples bounds that have nothing to do with each other: the
-  only way to allow a long download is to raise `Timeout_Seconds`, and
-  that hands the same patience to a peer stalling mid-handshake. The
-  five `Phase_Bound` fields split the knob, one per phase, each
-  defaulting to `Inherit` — so a client that sets none of them behaves
-  exactly as it did before the fields existed.
-
-  ```ada
-  C.Timeout_Seconds    := 0;                --  no bound on the body
-  C.Connect_Timeout    := Client.Seconds (5.0);
-  C.Handshake_Deadline := Client.Seconds (5.0);
-  ```
-
-  A field is one of three things: `Inherit` (take `Timeout_Seconds`),
-  `Unbounded` (no bound, whatever `Timeout_Seconds` says), or
-  `Seconds (S)`. The third state is why `Phase_Bound` is not just a
-  `Duration` — `Inherit` has to be the default, or adding the fields
-  would silently change what every existing client does.
-
-  `Seconds (0.0)` is a **zero** budget, expiring at once; it is *not*
-  a synonym for no bound, which is what `Timeout_Seconds => 0` means.
-  The two knobs disagree deliberately, because the failure modes are
-  not symmetric: reading `Seconds (0.0)` as "no bound" would hang,
-  while reading it as zero gives an immediate `Timeout_Error`. Spell
-  no bound as `Unbounded`.
-
-  Exhaustion of any of them raises `Timeout_Error`, exactly as
-  `Timeout_Seconds` does. The fields change which wait is bounded and
-  by how much, never what a breach looks like.
-
-- **Header merging.** `Send` builds a working copy of `Req` and fills
-  in three classes of headers, *only where not already present*, so
-  the order of precedence is `Req` > `Default_Headers` > auto:
+- Header merging. `Send` builds a working copy of `Req` and fills in
+  headers only where not already present, so precedence is `Req` >
+  `Default_Headers` > auto:
   1. Each entry of `Self.Default_Headers` whose name is absent from
-     `Req.Headers` is appended (preserving multi-valued defaults
-     like repeated `Accept`).
+     `Req.Headers` is appended (multi-valued defaults are added in
+     full or not at all).
   2. `Host` from the URL (`host[:port]`, omitting the default port).
   3. `User-Agent` from `Self.User_Agent`.
   4. `Connection: close`.
 
-- **Interim 1xx loop.** `Send` reads responses in a loop and only
-  exits when the status is not 1xx. `101 Switching Protocols` is
-  the one **terminal** 1xx — it returns as-is with the post-header
-  bytes still buffered on the transport for a WebSocket layer to
-  consume. `100 Continue`, `103 Early Hints`, and friends are read
-  and discarded.
+- Interim 1xx loop. `Send` reads responses until the status is not
+  1xx. `101 Switching Protocols` is the one terminal 1xx: it returns
+  as-is with the post-header bytes still buffered on the transport
+  for a WebSocket layer to consume. `100 Continue`, `103 Early Hints`
+  and the rest are read and discarded.
 
-- **HEAD bodies.** `Req.Method` is threaded into `Response.Read` so
-  HEAD responses skip body framing even when the peer sends a
-  Content-Length (which it commonly does, advertising the
-  GET-equivalent size).
+- HEAD bodies. `Req.Method` is passed to `Response.Read`, so HEAD
+  responses skip body framing even when the peer sends a
+  `Content-Length`.
 
-- **Deadline.** When the resolved read bound is not `Duration'Last`,
-  `Send` arms `Set_Read_Deadline` on the transport *after* the request
-  body is on the wire — so a slow or large upload can't burn the response budget —
-  as one wall-clock budget for the whole response (status line +
-  headers + body), not per-`Read`. (The streaming-upload path
-  additionally arms a write deadline; see
-  [Streaming upload](#streaming-upload--send_streaming_body).)
+- Body framing is `Response.Read`'s: chunked, then `Content-Length`,
+  then read-until-EOF.
 
-- **Body framing.** Inherited from `Response.Read` — chunked >
-  Content-Length > read-until-EOF for `Connection: close`.
+- Errors. A non-2xx status is not an exception; `Resp.Status`
+  carries it. Exceptions are for malformed wire or transport failure:
+  `HTTP_Error`, `Protocol_Error`, `Transport_Error`, `Timeout_Error`,
+  `Aborted_Error`, plus `AHT.Transport.TLS.TLS_Error` for `https://`
+  (for example an untrusted or invalid certificate chain). The
+  transport is closed on every exit path.
 
-- **Errors.** Non-2xx status is **not** an exception — `Resp.Status`
-  carries it. Exceptions are reserved for malformed wire or
-  transport failure: `HTTP_Error`, `Protocol_Error`,
-  `Transport_Error`, `Timeout_Error`, `Aborted_Error`, plus
-  `AHT.Transport.TLS.TLS_Error` for `https://` (e.g. an
-  untrusted/invalid certificate chain). The transport is closed in
-  every exit path (success or exception).
+- Retry safety. A `Timeout_Error` or `Aborted_Error` can be raised
+  with request bytes already on the wire, and the library cannot tell
+  "never sent" from "partially sent". Such a failure is retry-unsafe
+  for a non-idempotent request; the per-request transport is closed,
+  so the partially written connection is never reused.
 
-- **`Get (URL)`** — convenience: parses `URL`, builds a GET with no
-  body, calls `Send`. Raises `AHT.URL.Parse_Error` on malformed URL.
+- `Get (URL)`: parses `URL`, builds a GET with no body, calls
+  `Send`. Raises `AHT.URL.Parse_Error` on a malformed URL.
 
-### Streaming — `Send_Streaming`
+### Timeouts
+
+A request walks five phases: DNS resolution, TCP connect, TLS
+handshake (`https://` only), request write, response read. Each
+phase has its own budget; there is no end-to-end deadline, so the
+wall clock a request may occupy is a multiple of the budget, not
+equal to it.
+
+`Timeout_Seconds` is the coarse bound, applied to every phase whose
+field is left at `Inherit`. `0` means no bound.
+
+The five `Phase_Bound` fields override it per phase. Each is one of
+`Inherit` (take `Timeout_Seconds`), `Unbounded` (no bound, whatever
+`Timeout_Seconds` says) or `Seconds (S)`. `Seconds (0.0)` is a zero
+budget that expires at once; spell "no bound" as `Unbounded`.
+
+| Field | Bounds |
+|---|---|
+| `Resolve_Timeout` | the DNS lookup, through `AHT.DNS`. The bound is on the caller: on expiry `Timeout_Error` is raised and the lookup itself continues, since nothing can cancel it. A lookup that answers with no usable address is `Transport_Error`. Nothing to bound when the URL carries an IP literal. |
+| `Connect_Timeout` | the TCP connect, as one total budget across every address DNS resolved to, not per candidate. Exhaustion before any candidate connects is `Timeout_Error`; every candidate refused is `Transport_Error`. |
+| `Handshake_Deadline` | the TLS handshake alone, so only on `https://`; an `http://` request ignores it. Cleared once the handshake completes. |
+| `Write_Deadline` | the request write, only on the streaming-upload path (`Send_Streaming_Body`). The buffered overloads arm no write deadline and ignore it. |
+| `Read_Deadline` | the response read, armed once the request is fully on the wire, as one compound budget over status line, headers and body together. |
+
+Exhaustion of any of them raises `Timeout_Error`. A `Cancel_Handle`
+binds after connect, so cancel takes effect during the response read
+and not during DNS, connect or handshake.
+
+```ada
+C.Timeout_Seconds    := 0;                --  no bound on the body
+C.Connect_Timeout    := Client.Seconds (5.0);
+C.Handshake_Deadline := Client.Seconds (5.0);
+```
+
+### Streaming download: `Send_Streaming`
 
 ```ada
 procedure Send_Streaming
@@ -465,45 +483,29 @@ procedure Send_Streaming
   (Self, Req, Resp, Sink, Cancel : ...);  -- + Cancel_Handle
 ```
 
-Same semantics as `Send` for status line / headers / 1xx looping
-/ 101 carve-out / HEAD suppression / scheme dispatch, but body
-bytes are delivered to `Sink` as they arrive instead of being
-accumulated in `Resp.Body_B`. After the call, `Resp.Status`,
-`Resp.Reason`, and `Resp.Headers` are populated; `Resp.Body_B`
-is empty.
+Same semantics as `Send` for status line, headers, the 1xx loop, the
+101 carve-out, HEAD suppression and scheme dispatch, but body bytes
+go to `Sink` as they arrive instead of accumulating in
+`Resp.Body_B`. After the call, `Resp.Status`, `Resp.Reason` and
+`Resp.Headers` are populated; `Resp.Body_B` is empty. Header
+merging, deadlines and cancel apply as for `Send`.
 
-The buffered `Send`s and `Send_Streaming` share a single internal
-core (`Run_Request` takes a sink; the buffered overloads supply a
-sink that appends to `Resp.Body_B`), so every behaviour
-documented for `Send` — header merging, deadline, cancel — also
-applies here.
-
-Chunk granularity (treat as hints, not contract):
-
-- `Transfer-Encoding: chunked` → one `Sink` call per decoded
-  chunk; the zero-size terminator is consumed but not delivered.
-- `Content-Length: N` → `Sink` is called with up to 4 KiB chunks
-  (one call when `N` ≤ 4 KiB).
-- neither header (`Connection: close`) → `Sink` is called with
-  whatever the transport returns per `Read` (typically up to one
-  TCP segment).
+Delivery granularity is `Response.Read_Streaming`'s (see above):
+windows of up to 4 KiB for chunked and `Content-Length` bodies, one
+call per transport `Read` for `Connection: close` bodies. Treat it as
+a hint, not a contract.
 
 `Sink` may raise; the exception propagates out of `Send_Streaming`
 and the transport is closed on that path. `Sink` must not invoke
-`Send` recursively against the same `Client_Type` (the transport
-is in mid-call).
+`Send` recursively against the same `Client_Type` while the
+transport is mid-call. `Sink` is not called for 1xx responses, and
+not for 101 Switching Protocols (post-header bytes are left on the
+wire for the WebSocket layer).
 
-`Sink` is **not called for 1xx responses** (no body) and **not
-called for 101 Switching Protocols** (post-header bytes are left
-on the wire for the WebSocket layer).
+#### Download to an Ada stream
 
-#### Download straight to an Ada stream
-
-Two further `Send_Streaming` overloads write the response body to any
-Ada stream instead of pushing it through a `Sink` — the download mirror
-of the [`Stream_Source`](#ready-made-body-sources--ahthttprequestsources)
-upload, so "save this response to a file/socket" needs no hand-rolled
-callback:
+Two further `Send_Streaming` overloads write the response body to an
+Ada stream, the download mirror of `Stream_Source`:
 
 ```ada
 procedure Send_Streaming
@@ -516,24 +518,21 @@ procedure Send_Streaming
 ```
 
 ```ada
---  Download a body straight to a file, no callback, no buffering.
+--  Download a body straight to a file.
 F : Ada.Streams.Stream_IO.File_Type;
 Ada.Streams.Stream_IO.Create (F, Ada.Streams.Stream_IO.Out_File, Path);
 Client.Send_Streaming (C, Req, Resp, Target => Stream_IO.Stream (F));
 Ada.Streams.Stream_IO.Close (F);
 ```
 
-These resolve against the `Sink` overloads by the fourth parameter —
+These resolve against the `Sink` overloads by the fourth parameter:
 pass `Sink => ...` for the callback, `Target => ...` for the stream.
-Behaviour is otherwise identical to the `Sink` form: `Resp.Status` /
-`Resp.Reason` / `Resp.Headers` are populated, `Resp.Body_B` is empty
-(the bytes went to the stream), the same chunk granularity applies, and
-a stream `Write` that raises propagates out with the transport closed,
-exactly like a raising `Sink`. Like `Stream_Source`, `Target` is
-*borrowed* — the synchronous call outlives it, so the caller owns its
-open/close lifetime.
+Behaviour is otherwise that of the `Sink` form, and a stream `Write`
+that raises propagates out with the transport closed. `Target` is
+borrowed: the caller owns its open/close lifetime, which outlives
+the synchronous call.
 
-### Streaming upload — `Send_Streaming_Body`
+### Streaming upload: `Send_Streaming_Body`
 
 ```ada
 procedure Send_Streaming_Body
@@ -545,66 +544,40 @@ procedure Send_Streaming_Body
   (Self, Req, Resp, Source, Cancel : ...);  -- + Cancel_Handle
 ```
 
-The mirror of `Send_Streaming`: where that streams the *download*
-to a `Sink`, this streams the *upload* from a pull-style
-`Source`, so a multi-GB body never has to be materialised in RAM.
-The body is pulled via `Source.Read_Chunk` and framed on the wire
-by `Request.Write_Streaming` — see
-[`AHT.HTTP.Request` → Streaming upload](#streaming-upload--write_streaming)
-for the `Body_Source` interface, `Set_Content_Length`, and the
-fixed-vs-chunked framing rules. The **response is buffered** into
-`Resp.Body_B` exactly like the plain `Send` — only the upload
-streams.
+The upload mirror of `Send_Streaming`: the body is pulled from
+`Source.Read_Chunk` and framed on the wire by
+`Request.Write_Streaming` (see that section for `Body_Source`,
+`Set_Content_Length` and the fixed-vs-chunked rules). The response is
+buffered into `Resp.Body_B` as for `Send`; only the upload streams.
+Header merging, scheme dispatch, the 1xx loop and HEAD suppression
+are as for `Send`. Framing:
 
-Everything else matches `Send`: header merging, scheme dispatch,
-the 1xx loop, and HEAD suppression are identical (it threads the
-same `Run_Request` core, passing the `Source` instead of a
-buffered body). Framing is header-driven:
+- a single `Content-Length` on `Req` (set with
+  `Request.Set_Content_Length`): fixed framing of exactly that many
+  bytes; an under- or over-run raises `Protocol_Error`;
+- otherwise: `Transfer-Encoding: chunked`.
 
-- a single `Content-Length` on `Req` (set it with
-  `Request.Set_Content_Length`) → fixed framing of exactly that
-  many bytes; an under- or over-run raises `Protocol_Error`;
-- otherwise → `Transfer-Encoding: chunked`.
-
-The call is **synchronous** — it runs the whole upload and reads
-the response before returning — so `Source` need only outlive the
-call (there is no cross-task lifetime question). `Source.Read_Chunk`
-runs on the caller's task and **must not block indefinitely**: on the
-streaming-upload path `Write_Deadline` — or `Timeout_Seconds`, where
-it is left at `Inherit` — arms a write deadline (in
-addition to the usual read deadline), but it only bounds a stalled
-*transmit* — a peer that stops reading — because it bites only once
-control is inside the transport write. It does **not** interrupt a
-`Read_Chunk` that is itself blocked, so a source that can stall must
-enforce its own timeout. (Buffered `Send`/`Get`/`Send_Streaming` are
-unchanged: they arm no write deadline, since their body is already in
-RAM and drains in one shot.)
-
-The write deadline is what makes a stalled send bounded: the
-transport's non-blocking write loop re-parks on its selector and
-raises `Timeout_Error` at the deadline instead of hanging forever.
+The call is synchronous; it runs the whole upload and reads the
+response before returning, so `Source` need only outlive the call.
+`Source.Read_Chunk` runs on the caller's task and must not block
+indefinitely. This path arms a write deadline (`Write_Deadline`, or
+`Timeout_Seconds` where that is `Inherit`) that bounds a stalled
+transmit, a peer that stops reading, by re-parking the transport's
+non-blocking write loop on its selector and raising `Timeout_Error`
+at the deadline. It does not interrupt a `Read_Chunk` that is itself
+blocked; a source that can stall must enforce its own timeout.
 
 The cancellable overload takes a `Cancel_Handle` with the same
 semantics as the other cancellable surfaces. Cancel during an upload
-bites at two points: the in-flight write is broken via `Abort_Pending`
-(the parked non-blocking send wakes with `Aborted_Error`), and the
-pump polls the handle **between source windows** before each
-`Read_Chunk`. So a long upload or a peer that stalls the send is
-interruptible — but a `Read_Chunk` already in progress is not
-interrupted (cancel is observed before the next window, not during a
-blocked read).
+bites at two points: the in-flight write is broken via
+`Abort_Pending`, and the pump polls the handle between source
+windows, before each `Read_Chunk`. A `Read_Chunk` already in
+progress is not interrupted.
 
-Same retry-safety caveat as `Send`: a `Timeout_Error` /
-`Aborted_Error` can be raised mid-upload with some bytes already
-on the wire, so a failed streaming upload of a non-idempotent
-request is retry-unsafe.
+Same retry-safety caveat as `Send`. Streaming upload is not offered
+on the async surface; `Send_Async` stays buffered.
 
-Streaming upload is not offered on the **async** surface
-(`Send_Async` stays buffered).
-
-### Cancellation — `Cancel_Handle`
-
-The 4-argument `Send` takes a `Cancel_Handle` for cross-task abort:
+### Cancellation: `Cancel_Handle`
 
 ```ada
 type Cancel_Handle is limited private;
@@ -618,51 +591,39 @@ procedure Send
    Cancel : in out Cancel_Handle);
 ```
 
-Internally the handle wraps a protected object holding the
-currently-bound transport and a sticky `Cancelled` flag. `Send`
-binds the transport after `Connect` and unbinds before `Close`;
-`Cancel` from any task sets the flag and dispatches
-`Transport.Abort_Pending` on the bound transport, which is what
-unblocks a parked `Read` (the same mechanism `test_tcp` exercises
-at the transport layer).
+`Cancel` from any task aborts the `Send` running with this handle by
+dispatching `Transport.Abort_Pending` on the transport it is using,
+which unblocks a parked `Read`.
 
-Lifecycle:
-
-- **Cancel during the request** → `Send` raises
-  `AHT.Transport.Aborted_Error` from inside the response `Read`.
-  The transport is closed on the abort path.
-- **Cancel before Send** → handle is armed; the next `Send` raises
-  immediately *before* dialing. Without this, a pre-cancelled
-  handle would still cost a TCP connect.
-- **Cancel after Send returns** → handle's `Bound` is null;
-  `Cancel` is a quiet no-op (the flag still flips so
-  `Is_Cancelled` reports the call happened).
-- **Bind race** — if `Cancel` lands between `Connect` returning
-  and `Bind` running, the `Bind` body re-checks `Cancelled` under
-  the protected lock and fires `Abort_Pending` on the
-  freshly-bound transport. The very first `Read` then raises.
+- Cancel during the request: `Send` raises
+  `AHT.Transport.Aborted_Error` from inside the response read. The
+  transport is closed on the abort path.
+- Cancel before `Send`: the handle is armed; the next `Send` raises
+  immediately, before dialing.
+- Cancel after `Send` returns: a no-op, except that `Is_Cancelled`
+  reports the call happened.
+- Cancel between connect returning and the handle taking effect: the
+  first `Read` raises. There is no window in which a cancel is lost.
 
 Caveats:
 
-- **Single-use.** Once `Cancel` has been called, every subsequent
-  `Send` with this handle aborts immediately. Declare a fresh
-  handle per cancellable operation.
-- **No connect cancellation.** `Abort_Pending` is a Read-
-  side hook; `Cancel` can't interrupt a `Connect` in flight. A
-  hung connect is bounded only by a deadline — `Connect_Timeout`
-  and `Handshake_Deadline`, or `Timeout_Seconds` where those are
-  left at `Inherit` (see the per-phase breakdown above) — never by
-  `Cancel`, so it ends in `Timeout_Error` rather than on the
-  `Cancel`. A caller who sets `Timeout_Seconds` to 0 to allow an
-  unbounded body should set those two explicitly, or nothing
-  bounds the dial at all. A pending `Cancel` then takes effect on the first
-  Read once `Connect` returns.
-- **Don't share a handle across concurrent `Send`s.** The
-  protected `Bound` slot is overwritten by whichever Send binds
-  last; `Cancel` will only abort that one. Use one handle per
-  call.
+- Single-use. Once `Cancel` has been called, every subsequent `Send`
+  with this handle aborts immediately. Declare a fresh handle per
+  cancellable operation.
+- No connect cancellation. `Abort_Pending` is a read-side hook;
+  `Cancel` cannot interrupt a connect in flight, and for `https://`
+  that covers the TLS handshake too. A hung connect is bounded only
+  by `Connect_Timeout` and `Handshake_Deadline` (or
+  `Timeout_Seconds` where those are `Inherit`) and ends in
+  `Timeout_Error`. A caller who sets `Timeout_Seconds` to 0 to allow
+  an unbounded body should set those two explicitly, or nothing
+  bounds the dial. A `Cancel` arriving during connect takes effect on
+  the first `Read` once connect returns.
+- One handle per concurrent `Send`. A handle shared across two
+  concurrent `Send`s tracks whichever bound last; `Cancel` aborts
+  only that one.
 
-### Async — `Send_Async` / `Await`
+### Async: `Send_Async` / `Await`
 
 ```ada
 type Async_Handle is limited private;
@@ -676,44 +637,51 @@ function  Is_Done     (Self : Async_Handle) return Boolean;
 function  Is_Cancelled (Self : Async_Handle) return Boolean;
 ```
 
-`Async_Handle` wraps a worker task plus a `Cancel_State`. The
-worker auto-starts when the handle is elaborated and blocks at an
-internal `accept Start or terminate`. `Send_Async` snapshots
-`Self` and `Req` into the worker, kicks off the request, and
-returns immediately. The worker runs the same `Run_Request` core
-as the sync surface, stashes the response (or the exception via
-`Ada.Exceptions.Save_Occurrence`) in the shared `Cancel_State`,
-flips `Done_Flag`, and **terminates**. `Await` waits on the
-`Done_Flag` barrier and reads the stored result; multiple Awaits
-all read the same state. `Cancel` is the same Cancel_State
-mechanism as the sync handle.
+`Send_Async` snapshots `Self` and `Req` into a worker task owned by
+the handle, starts the request, and returns immediately. The worker
+runs the same buffered round trip as `Send` (header merging, 1xx
+loop, HEAD suppression, scheme dispatch), stores the response or the
+exception in the handle, and terminates. `Await` blocks until the
+worker is done and returns the response or re-raises the worker's
+exception with its original identity. `Cancel` has the same
+semantics as `Cancel_Handle.Cancel`.
 
-Lifecycle:
+- One `Send_Async` per handle. A second call on a started handle
+  raises `HTTP_Error`. Declare a fresh handle per request.
+- `Await` before `Send_Async` raises `HTTP_Error` rather than
+  blocking on a request that was never started.
+- `Await` is replayable. Subsequent calls on a done handle re-read
+  the stored response (or re-raise the stored exception) without
+  blocking.
+- Snapshot at start. `Self` and `Req` are copied into the worker;
+  mutating them in the caller after `Send_Async` has no effect on the
+  in-flight request.
+- Cancel before, during or after follows the `Cancel_Handle` rules:
+  pre-cancel arms the next start; cancel during the request aborts
+  the transport; cancel after `Await` only flips `Is_Cancelled`.
+- Drop without `Await`. The worker terminates as soon as it has
+  stored its result, so a handle going out of scope waits only for
+  the request itself. A hung connect or read still blocks the scope
+  exit; `Cancel` then `Await` to abandon a request without blocking
+  on it.
 
-- **One Send per handle.** A second `Send_Async` on a started
-  handle raises `HTTP_Error`. Declare a fresh handle per request.
-- **`Await` before `Send_Async` raises.** A fresh handle's worker
-  is parked at its `Start` rendezvous and `Wait_Until_Done` would
-  block forever, so `Await` checks `Started` first and raises
-  `HTTP_Error` rather than deadlocking.
-- **`Await` is replayable.** Subsequent Awaits on a Done handle
-  re-read the cached response (or re-raise the cached
-  exception); no second rendezvous, no block.
-- **Snapshot at Start.** `Self` and `Req` are copied into the
-  worker by the entry call; mutating them in the caller after
-  `Send_Async` has no effect on the in-flight request.
-- **Cancel before, during, or after.** Same Cancel_State rules:
-  pre-cancel before `Send_Async` arms the next Send; cancel
-  during `Run_Request` aborts the bound transport; cancel after
-  `Await` (the worker is past Done) is a sticky no-op that just
-  flips `Is_Cancelled`.
-- **Drop without `Await`.** The worker terminates as soon as it
-  finishes `Run_Request` and stashes the result, so the
-  enclosing master only waits for `Run_Request` itself — no
-  trailing rendezvous. A hung connect or read still blocks the
-  scope exit, so `Cancel` + `Await` if you might want to abandon
-  before the request finishes.
+Streaming async is not offered. For streaming plus async, spawn a
+task that calls `Send_Streaming`.
 
-Streaming async (`Send_Streaming_Async`) is not offered. If
-you want streaming + async, spawn your own task that calls
-`Send_Streaming` directly.
+## Implementation notes
+
+The buffered, streaming, cancellable and async surfaces share one
+internal core (`Run_Request`), which owns the transport for the call:
+resolve, connect, bind the cancel state, run the wire round trip,
+unbind, close. The buffered overloads supply a sink that appends to
+`Resp.Body_B`. The write and read deadlines are armed inside the
+round trip: the write deadline before the streaming upload, the read
+deadline once the request is on the wire.
+
+`Cancel_Handle` and `Async_Handle` both wrap a protected
+`Cancel_State` holding the currently bound transport and a sticky
+`Cancelled` flag. `Bind` re-checks the flag under the lock and fires
+`Abort_Pending` on the freshly bound transport if a `Cancel` landed
+between connect returning and the bind, which is what closes the
+bind race. The async worker stores its result in the same protected
+state and flips a done flag; `Await` waits on that barrier.
