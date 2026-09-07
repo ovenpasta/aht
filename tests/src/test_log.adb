@@ -18,10 +18,9 @@ procedure Test_Log is
       Failures := Failures + 1;
    end Fail;
 
-   --  Capture sink: append each record to a module-level vector
-   --  protected by a binary semaphore so the concurrent case can
-   --  race safely without depending on Synchronized_Sink being
-   --  already proven correct.
+   --  Capture sink: append each record to a protected array, so the
+   --  concurrent case can race safely without depending on
+   --  Synchronized_Sink being correct.
 
    Max_Records : constant := 256;
 
@@ -69,11 +68,10 @@ procedure Test_Log is
         (AHT.Log.Level'Image (Lvl) & "|" & Subsystem & "|" & Message);
    end Capture_Sink;
 
-   --  A helper sink that *is not* thread-safe: it touches a plain
-   --  global counter and sleeps between read and write to amplify
-   --  any race. Used only to prove Synchronized_Sink serializes
-   --  access (non-interleaved output is a looser check; counter-
-   --  correctness is a stronger one).
+   --  A helper sink that is NOT thread-safe: it touches a plain global
+   --  counter and sleeps between read and write to amplify any race.
+   --  Used only to prove Synchronized_Sink serializes access; an exact
+   --  counter is a stronger check than non-interleaved output.
 
    Race_Counter : Natural := 0;
 
@@ -93,7 +91,7 @@ procedure Test_Log is
    package Frame_Log is new AHT.Log.Tag ("ws.frames");
 
 begin
-   --  Case 1: silent by default — no sink installed.
+   --  Case 1: silent by default, no sink installed.
    declare
    begin
       Capture.Reset;
@@ -132,7 +130,7 @@ begin
       end if;
    end;
 
-   --  Case 3: global level filter — default Warning drops Info/Debug.
+   --  Case 3: global level filter; default Warning drops Info/Debug.
    declare
    begin
       Capture.Reset;
@@ -160,16 +158,16 @@ begin
       Capture.Reset;
       AHT.Log.Set_Sink (Capture_Sink'Unrestricted_Access);
       AHT.Log.Set_Default_Level (AHT.Log.Error);
-      --  tcp: turn *up* to Debug against a strict default
+      --  tcp: turn UP to Debug against a strict default
       AHT.Log.Set_Subsystem_Level ("tcp", AHT.Log.Debug);
-      --  ws.frames: turn *down* to Error+1-equivalent — only Errors pass
+      --  ws.frames: turn DOWN so that only Errors pass
       AHT.Log.Set_Subsystem_Level ("ws.frames", AHT.Log.Error);
 
-      TCP_Log.Debug ("debug-tcp-kept");       -- kept: tcp override is Debug
-      TCP_Log.Info ("info-tcp-kept");         -- kept
-      Frame_Log.Info ("info-frame-dropped");  -- dropped: frame override Error
-      Frame_Log.Error ("error-frame-kept");   -- kept
-      AHT.Log.Emit (AHT.Log.Warning, "other", "dropped"); -- default Error
+      TCP_Log.Debug ("debug-tcp-kept");       --  kept: tcp override Debug
+      TCP_Log.Info ("info-tcp-kept");         --  kept
+      Frame_Log.Info ("info-frame-dropped");  --  dropped: override Error
+      Frame_Log.Error ("error-frame-kept");   --  kept
+      AHT.Log.Emit (AHT.Log.Warning, "other", "dropped"); --  default Error
 
       if Capture.Count /= 3 then
          Fail ("override: expected 3 kept, got"
@@ -230,8 +228,8 @@ begin
    end;
 
    --  Case 6: Synchronized_Sink single-wrap contract. A second wrap
-   --  with a different Inner must raise Program_Error rather than
-   --  silently repointing the first wrap at the new callback.
+   --  with a different Inner must raise Program_Error, not repoint the
+   --  first wrap at the new callback.
    --  Idempotent re-wrap (same Inner) is allowed and returns the
    --  same trampoline. Passing null clears the wrap.
    declare

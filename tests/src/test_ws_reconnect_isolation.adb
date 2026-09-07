@@ -1,58 +1,38 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  What must NOT cross a generation boundary, and what must.
---
---  A reconnect replaces the connection under a client that the
---  application is still holding. Everything tied to the old
---  connection has to end with it — a caller parked in Receive, the
---  messages that connection queued and nobody read — while everything
---  the application configured on the client has to survive, because it
---  never belonged to the connection in the first place.
---
---  Getting this wrong is not loud. A blocked Receive that is handed
---  the NEXT connection's message looks like a working Receive; it is
---  only wrong in that the caller asked the old connection a question
---  and the new one answered. So each case here pins the boundary
---  rather than the happy path.
+--  What must not cross a generation boundary, and what must. A
+--  reconnect replaces the connection under a client the application
+--  still holds: a parked Receive and the unread inbox end with the
+--  old connection, callbacks configured on the client survive. Echo
+--  fixture on 8765; case 4 uses a deaf peer defined in this file.
 --
 --  Cases:
---    1. A Receive blocked across a forced Reconnect raises
---       Closed_Error, and never returns a message belonging to the
---       session that replaced the one it was waiting on.
---    2. Messages queued but unread on the old connection are gone.
---       The inbox belonged to the session, so the new generation
---       starts empty rather than inheriting a backlog whose ordering
---       relative to the new connection's traffic would be undefined.
---    3. Callbacks are installed on the CLIENT, so one installation
---       serves every generation — and no callback for an old
---       generation arrives once the new session is open.
---    4. A caller-initiated Reconnect fires no On_Error. The teardown
---       it performs aborts the receiver's transport I/O, and reporting
---       that to the application would mean telling it its connection
---       failed every time it deliberately replaced one.
+--    1. a Receive blocked across a forced Reconnect raises Closed_Error
+--    2. messages queued but unread on the old connection are gone
+--    3. one callback installation serves every generation, and no
+--       old-generation callback arrives after the new session opens
+--    4. a caller-initiated Reconnect fires no On_Error
 --
---  How these were validated, and what it took:
+--  Covers:
+--    - case 1: the parked Receive never returns a message belonging
+--      to the replacing session; traffic is sent on it to check that
+--    - case 2: the backlog is waited for by count, and the new
+--      connection is usable, so the empty inbox is "nothing stale"
+--    - case 3: every callback firing is tagged with the generation
+--      current when it arrived
+--    - case 4: the peer never answers Close, so the teardown must
+--      abort the receiver's I/O; the reconnect is confirmed to happen
 --
---    * Case 4 needs a peer that will not answer a Close frame. See
---      the note there — against an echo peer it passed with the
---      suppression backed out, which is to say it checked nothing.
---    * Case 1 only fails when BOTH wake sites are backed out. Waking
---      a parked borrower is done by the receiver's own reclamation
---      and again by the caller's Teardown_Pin.Finalize, deliberately
---      and idempotently, so removing either one alone changes no
---      observable behaviour. With both gone the case reports the
---      parked Receive timing out instead of ending with its
---      connection — and the drain stalls behind the borrower it can
---      no longer wake, which is the deadlock the redundancy exists to
---      prevent.
---    * Cases 2 and 3 are NOT backout-validated. Both properties come
---      from where the state is declared — the inbox inside the
---      session, the callbacks on the client — so backing them out
---      means moving a declaration rather than removing a guard, and
---      the result does not compile as a smaller change. They are
---      still worth asserting: a later refactor that hoists the inbox
---      for convenience compiles fine and fails here.
+--  Does not cover:
+--    - cases 2 and 3 are not backout-validated: both come from where
+--      the state is declared; a refactor hoisting the inbox fails here
+--
+--  Validated by:
+--    case 1 fails only with both wake sites backed out (receiver
+--    reclamation and Teardown_Pin.Finalize): the parked Receive times
+--    out. Case 4 fails with the suppression backed out only against
+--    the deaf peer; an echo peer answers Close and nothing is aborted.
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -85,13 +65,10 @@ procedure Test_WS_Reconnect_Isolation is
    function To_String (V : AHT.Bytes.Buffer) return String is
      (AHT.Bytes.To_String (V));
 
-   ---------------------------------------------------------------
    --  Case 1 plumbing
-   ---------------------------------------------------------------
 
    --  What the parked reader saw. It runs on its own task, so it
-   --  reports through a protected object rather than touching
-   --  Failures.
+   --  reports through a protected object.
    protected Parked is
       procedure Note (Outcome : String; Detail : String);
       function  Done return Boolean;
@@ -127,9 +104,7 @@ procedure Test_WS_Reconnect_Isolation is
 
    function Parked_Done return Boolean is (Parked.Done);
 
-   ---------------------------------------------------------------
    --  Case 2 plumbing
-   ---------------------------------------------------------------
 
    Backlog_Size : constant := 3;
 
@@ -159,15 +134,13 @@ procedure Test_WS_Reconnect_Isolation is
    function Backlog_Arrived return Boolean is
      (Arrived.Count >= Backlog_Size);
 
-   ---------------------------------------------------------------
    --  Case 3 plumbing
-   ---------------------------------------------------------------
 
    --  Every message the callback saw, tagged with the generation that
-   --  was current when it arrived. The tag is the point: "the callback
-   --  fired twice" would also be true if both firings belonged to the
-   --  same connection, and an old-generation message delivered after
-   --  the new session opened is exactly the failure this has to name.
+   --  was current when it arrived. "The callback fired twice" would
+   --  also be true if both firings belonged to the same connection,
+   --  and an old-generation message delivered after the new session
+   --  opened is the failure this has to name.
    protected Seen is
       procedure Note (Payload : String; Gen : Natural);
       function  Count return Natural;
@@ -187,9 +160,7 @@ procedure Test_WS_Reconnect_Isolation is
       function Report return String is (To_String (Text));
    end Seen;
 
-   ---------------------------------------------------------------
    --  Case 4 plumbing
-   ---------------------------------------------------------------
 
    protected Errors is
       procedure Note (Message : String);
@@ -211,9 +182,7 @@ procedure Test_WS_Reconnect_Isolation is
    end Errors;
 
 begin
-   ---------------------------------------------------------------
    --  Case 1: a parked Receive belongs to the connection it parked on.
-   ---------------------------------------------------------------
    declare
       C : AHT.Websocket.Client.Client_Type;
    begin
@@ -232,8 +201,8 @@ begin
 
       declare
          --  Bounded, so a regression that leaves this parked forever
-         --  still lets the test report rather than hang. The bound is
-         --  far longer than the reconnect it is supposed to outlive.
+         --  still reports. The bound is far longer than the reconnect
+         --  it must outlive.
          task Reader;
          task body Reader is
             Msg : AHT.Websocket.Client.Message_Type;
@@ -263,10 +232,10 @@ begin
                      & Ada.Exceptions.Exception_Message (E));
          end;
 
-         --  Traffic on the NEW connection. If the parked reader is
+         --  Traffic on the new connection. If the parked reader is
          --  still able to observe an inbox, this is what it would
-         --  wrongly pick up — so sending it is what turns "did not
-         --  crash" into a real check.
+         --  wrongly pick up, so sending it turns "did not crash" into
+         --  a real check.
          begin
             AHT.Websocket.Client.Send_Text (C, "new-generation");
          exception
@@ -295,16 +264,13 @@ begin
       AHT.Websocket.Client.Close (C);
    end;
 
-   ---------------------------------------------------------------
    --  Case 2: an unread backlog does not outlive its connection.
-   ---------------------------------------------------------------
    declare
       C   : AHT.Websocket.Client.Client_Type;
       Msg : AHT.Websocket.Client.Message_Type;
    begin
       --  Delivery is Both by default, so the callback counts arrivals
-      --  while the inbox keeps them. That is what makes the wait
-      --  below exact instead of a guess.
+      --  while the inbox keeps them; the wait below is exact.
       AHT.Websocket.Client.Set_On_Message
         (C, Count_Backlog'Unrestricted_Access);
       AHT.Websocket.Client.Connect (C, Echo);
@@ -314,14 +280,11 @@ begin
          AHT.Websocket.Client.Send_Text (C, "backlog" & Integer'Image (I));
       end loop;
 
-      --  Wait for ALL of them, rather than sleeping and hoping.
-      --
-      --  A fixed delay was not good enough: it establishes only that
-      --  at least one arrived, and taking that one would then leave
-      --  nothing unread — so the "new connection's inbox is empty"
-      --  check below would pass with no backlog to discard, proving
-      --  nothing. The case needs a backlog that outlives the message
-      --  it consumes.
+      --  Wait for all of them. A fixed delay establishes only that at
+      --  least one arrived, and taking that one would leave nothing
+      --  unread, so the "new connection's inbox is empty" check below
+      --  would pass with no backlog to discard. The case needs a
+      --  backlog that outlives the message it consumes.
       if not Await (Backlog_Arrived'Unrestricted_Access, 10.0) then
          Fail ("backlog: only" & Natural'Image (Arrived.Count) & " of"
                & Natural'Image (Backlog_Size)
@@ -359,8 +322,8 @@ begin
                   & Ada.Exceptions.Exception_Message (E));
       end;
 
-      --  And the new connection is genuinely usable, so the empty
-      --  inbox above is "nothing stale" rather than "nothing at all".
+      --  And the new connection is usable, so the empty inbox above
+      --  is "nothing stale", not "nothing at all".
       AHT.Websocket.Client.Send_Text (C, "fresh");
       begin
          AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
@@ -377,9 +340,7 @@ begin
       AHT.Websocket.Client.Close (C);
    end;
 
-   ---------------------------------------------------------------
    --  Case 3: callbacks belong to the client, not the connection.
-   ---------------------------------------------------------------
    declare
       Client_Ref : aliased AHT.Websocket.Client.Client_Type;
 
@@ -427,22 +388,12 @@ begin
       AHT.Websocket.Client.Close (Client_Ref);
    end;
 
-   ---------------------------------------------------------------
-   --  Case 4: a teardown the caller asked for is not a failure.
-   ---------------------------------------------------------------
-   --
-   --  The peer matters here, and an ordinary echo peer will not do.
-   --  It answers the Close frame, so the receiver reads the reply and
-   --  exits on its own; nothing is ever aborted, the suppression is
-   --  never reached, and the case would pass whether or not it
-   --  existed. That is not a hypothetical — this case was written
-   --  against the echo peer first and did not notice the suppression
-   --  being backed out.
-   --
-   --  This peer drains but never answers, so the handshake cannot
-   --  complete and the teardown has to fall back to aborting the
-   --  receiver's transport I/O. That abort is the mechanism working,
-   --  and it is the one the application must not be told about.
+   --  Case 4: a teardown the caller asked for is not a failure. An
+   --  echo peer will not do: it answers the Close frame, the receiver
+   --  exits on its own, and the suppression is never reached. This
+   --  peer drains but never answers, so the teardown has to abort the
+   --  receiver's transport I/O, and that abort is what the
+   --  application must not be told about.
    declare
       C : AHT.Websocket.Client.Client_Type;
 
@@ -483,7 +434,7 @@ begin
       end if;
 
       --  The reconnect really happened, so the silence above is "no
-      --  error reported" rather than "nothing was torn down".
+      --  error reported", not "nothing was torn down".
       if AHT.Websocket.Client.Generation (C) /= 2 then
          Fail ("no-error: Generation ="
                & Natural'Image (AHT.Websocket.Client.Generation (C))

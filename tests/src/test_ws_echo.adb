@@ -1,26 +1,21 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  End-to-end WebSocket exercise against the Python `websockets`
---  echo fixture on 127.0.0.1:8765 (commit 2 of the WS client work
---  — handshake + frame I/O + clean close handshake).
+--  End-to-end WebSocket exercise against the Python `websockets` echo
+--  fixture on 127.0.0.1:8765: handshake, frame I/O and the clean
+--  close handshake.
 --
---  Five cases:
---    1. Text round-trip — Connect, Send_Text "hello, AHT!",
---       Receive, assert Kind = Text_Message and the bytes match.
---       Then Close cleanly and assert Is_Open flips to False.
---    2. Binary round-trip — Send_Binary (16 byte payload), Receive
---       a Binary_Message with identical bytes.
---    3. Receive timeout — Connect, do not send anything, Receive
---       with Timeout = 0.2s → Transport.Timeout_Error within a
---       tight window; the connection is still usable afterwards.
---    4. Receive after Close raises Closed_Error — Close the
---       connection, then call Receive; the receiver task has
---       Mark_Closed'd the Inbox so the entry barrier opens and
---       raises.
---    5. Multi-message ordering — Send three text messages in
---       sequence, Receive three messages, assert payloads come
---       back in send order (websockets preserves ordering).
+--  Cases:
+--    1. text round-trip, then Close; Is_Open flips to False
+--    2. binary round-trip, 16-byte payload
+--    3. Receive with Timeout = 0.2 s raises Timeout_Error; the
+--       connection is still usable
+--    4. Receive after Close raises Closed_Error
+--    5. three messages come back in send order
+--    6. a client is reusable after Close; Generation reads 2
+--    7. callbacks fire from the receiver task
+--    8. large binary round-trip (~1 MB)
+--    9. large text round-trip (>12 MB)
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;
@@ -97,7 +92,7 @@ begin
       end if;
    end;
 
-   --  Case 2: binary round-trip — payload is the 16 bytes
+   --  Case 2: binary round-trip; the payload is the 16 bytes
    --  0x00..0x0F so a byte-by-byte comparison catches any
    --  masking / framing slip.
    declare
@@ -162,7 +157,7 @@ begin
                & "s (Timeout was 0.2)");
       end if;
 
-      --  Connection still usable — round-trip a message to confirm.
+      --  Connection still usable: round-trip a message to confirm.
       AHT.Websocket.Client.Send_Text (C, "still alive");
       AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
       if To_String (Msg.Payload) /= "still alive" then
@@ -216,17 +211,10 @@ begin
       AHT.Websocket.Client.Close (C);
    end;
 
-   --  Case 6: a client is reusable after Close.
-   --
-   --  This case used to assert the opposite, and pinned the
-   --  single-use lifecycle: the receiver was a one-shot task, so a
-   --  second Connect had to be refused upfront rather than allowed to
-   --  crash inside it. That restriction is what the per-generation
-   --  session work removed — the receiver persists and the connection
-   --  state is heap-owned per attempt — so the assertion is inverted
-   --  rather than deleted. Generation is what makes "it really
-   --  reconnected" observable: it counts successful connections, so a
-   --  second one must read 2 and not 1.
+   --  Case 6: a client is reusable after Close. The receiver persists
+   --  across connections and the connection state is heap-owned per
+   --  attempt. Generation counts successful connections, so a second
+   --  Connect must read 2 and not 1.
    declare
       C : AHT.Websocket.Client.Client_Type;
       Msg : AHT.Websocket.Client.Message_Type;
@@ -253,7 +241,7 @@ begin
                & " (expected 2)");
       end if;
 
-      --  And it is a working connection, not merely an accepted call.
+      --  And it is a working connection, not just an accepted call.
       AHT.Websocket.Client.Send_Text (C, "second time");
       AHT.Websocket.Client.Receive (C, Msg, Timeout => 5.0);
       if To_String (Msg.Payload) /= "second time" then
@@ -267,7 +255,7 @@ begin
    --  Case 7: callbacks fire from the receiver task. The On_Message
    --  callback writes into a protected sink so the main task can
    --  observe how many messages it saw without racing. The
-   --  On_Close callback bumps a separate counter on the §1.4
+   --  On_Close callback bumps a separate counter on the section 1.4
    --  close echo.
    declare
       protected Sink is
@@ -348,14 +336,12 @@ begin
       end if;
    end;
 
-   --  Case 8: large binary round-trip — the §9 throughput guard.
-   --  A single ~1 MB frame is the worst case for the receiver: the
-   --  old accumulator drained each consumed frame with a per-byte
-   --  Delete_First (O(N²)) and recopied the whole unconsumed buffer
-   --  on every read, so a megabyte echo would not come back within
-   --  the timeout. With the index-cursor Recv_Buffer the path is
-   --  linear. The payload is a deterministic byte ramp so the
-   --  full-length comparison catches any framing / block-move slip.
+   --  Case 8: large binary round-trip, the Autobahn 9.x throughput
+   --  guard. A single ~1 MB frame: an accumulator that recopied the
+   --  unconsumed buffer on every read (quadratic) would not echo it
+   --  within the timeout; the index-cursor Recv_Buffer is linear. The
+   --  payload is a byte ramp so the full-length comparison catches a
+   --  framing or block-move slip.
    declare
       C    : AHT.Websocket.Client.Client_Type;
       Msg  : AHT.Websocket.Client.Message_Type;
@@ -401,17 +387,12 @@ begin
       AHT.Websocket.Client.Close (C);
    end;
 
-   --  Case 9: large text round-trip (>12 MB) — the §9 *send*-path
-   --  guard. Send_Text builds the wire frame through
-   --  AHT.Bytes.From_String -> Frames.Encode -> TCP Write; before those
-   --  three were reworked to keep their working buffers off the fixed
-   --  thread stack, a multi-MB send raised Storage_Error (the RFC 6455
-   --  §9 8M/16M Autobahn cases). The source string is heap-allocated so
-   --  the *test* doesn't overflow its own stack, and it's an ASCII ramp
-   --  (valid UTF-8, so the fixture accepts it as a text frame). The
-   --  echoed copy is compared byte-for-byte without ever materialising
-   --  a multi-MB String on the stack. Needs the fixture's raised
-   --  max_size (server_ws.py) to be accepted.
+   --  Case 9: large text round-trip (>12 MB), the send-path guard for
+   --  the Autobahn 9.x 8M/16M cases: a multi-MB send through stack
+   --  buffers raises Storage_Error. The source is heap-allocated, an
+   --  ASCII ramp (valid UTF-8), and the echo is compared byte-for-byte
+   --  without a multi-MB String on the stack. Needs the fixture's
+   --  raised max_size (server_ws.py).
    declare
       type String_Access is access String;
       procedure Free is new Ada.Unchecked_Deallocation

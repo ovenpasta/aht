@@ -1,25 +1,23 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Smoke test for the mbedTLS bind/link chain (the mbedtls source of
---  the backend-neutral test_tls_version main). By calling
---  AHT.Mbedtls.Version.Full_Version_String we exercise:
---    * the Linker_Options pragmas in AHT.Mbedtls finding
---      libmbedtls / libmbedx509 / libmbedcrypto in
---      third_party/mbedtls-3.6.7/library/;
---    * the curated Import of mbedtls_version_get_string_full;
---    * the char_array <-> Ada String round-trip.
+--  Smoke test for the mbedTLS bind/link chain, the mbedtls source of the
+--  backend-neutral test_tls_version main. Calling
+--  AHT.Mbedtls.Version.Full_Version_String exercises the Linker_Options
+--  pragmas in AHT.Mbedtls, the curated Import of
+--  mbedtls_version_get_string_full, and the char_array round-trip.
 --
---  If this passes, the rest of the binding surface (ssl_*,
---  ctr_drbg_*, entropy_*, x509_*) is wired correctly.
+--  Cases:
+--    - Version_String, Full_Version_String and Major/Minor/Patch match
+--      the literals below
 --
---  It is also the tripwire for a disagreement between aht.gpr's
---  Mbedtls_Tree and VERSION in scripts/fetch_mbedtls.sh. Those name
---  one tree twice and nothing reconciles them, so the script can build
---  one version while the project compiles and links another. The
---  literals below are the linked library's own answer, which is why
---  they are spelled out rather than derived: a hardcoded expectation
---  is the only kind that can disagree with the binary.
+--  Covers:
+--    - a disagreement between aht.gpr's Mbedtls_Tree and VERSION in
+--      scripts/fetch_mbedtls.sh, which name one tree twice with nothing
+--      reconciling them; the literals are spelled out, not derived from
+--      the build, so they can disagree with the linked library's answer
+--    - if this passes, the rest of the binding surface (ssl_*,
+--      ctr_drbg_*, entropy_*, x509_*) is wired
 
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;

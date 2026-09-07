@@ -1,33 +1,26 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Exercises AHT.HTTP.Client.Send_Streaming end-to-end.
+--  Exercises AHT.HTTP.Client.Send_Streaming end-to-end against the
+--  Python fixture (/chunked, /hello, /chunked-big) and two in-process
+--  servers, one silent and one fast.
 --
 --  Cases:
---    1. Chunked body streaming — GET /chunked, sink receives the
---       body as ordered slices, assembled bytes match the
---       fixture's "AHT rocks!\n", and Resp.Body_B is empty after.
---    2. Content-Length streaming — GET /hello, sink delivers the
---       fixed-length body in one or more chunks, total bytes match
---       "hello, world\n", Resp.Body_B is empty.
---    2b. Large single chunk — GET /chunked-big (>12 MB ramp) through
---       the sink: no slice exceeds the 4 KB window, the sink is
---       called many times for one wire chunk, and the ramp
---       reassembles byte-for-byte (windowed-delivery contract).
---    2c. Download to an Ada stream — GET /chunked with the
---       Send_Streaming (Target => ...) overload: the body lands in an
---       in-test Root_Stream_Type byte-for-byte identical to what the
---       Sink overload collects for the same route, and Resp.Body_B
---       stays empty (the symmetric counterpart of the Stream_Source
---       upload).
---    3. Cancel during streaming — silent in-process server holds
---       the connection; sibling task fires Cancel; Send_Streaming
---       raises Aborted_Error and sink was never invoked.
---    4. Sink exception propagates — fast in-process server sends a
---       body; sink raises on the first call; the exception comes
---       out of Send_Streaming and the transport is closed cleanly
---       (a second Send_Streaming on a fresh handle still succeeds,
---       proving the runtime isn't poisoned by the prior failure).
+--    1. GET /chunked: the sink receives ordered slices assembling to
+--       "AHT rocks!\n"; Resp.Body_B is empty after.
+--    2. GET /hello: the Content-Length body arrives through the sink;
+--       Resp.Body_B is empty.
+--    2b. GET /chunked-big (>12 MB ramp): no slice exceeds the 4 KB
+--       window, the sink is called many times for one wire chunk, the
+--       ramp reassembles byte-for-byte.
+--    2c. GET /chunked with the Target overload: the body lands in an
+--       in-test Root_Stream_Type identical to what the Sink overload
+--       collects; Resp.Body_B stays empty.
+--    3. Cancel during streaming against the silent server:
+--       Send_Streaming raises Aborted_Error; the sink was never invoked.
+--    4. Sink raises on the first call: the exception comes out of
+--       Send_Streaming; a second Send_Streaming on a fresh handle still
+--       succeeds.
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;
@@ -422,16 +415,12 @@ begin
       end if;
    end;
 
-   --  Case 2b: large single chunk (>12 MB) via /chunked-big. This is
-   --  the streaming-path counterpart to test_http_chunked's buffered
-   --  /chunked-big case: it drives the SAME windowed chunk reader but
-   --  through the sink, so it observes the windowing the buffered path
-   --  collapses away. Locks in the documented contract that one wire
-   --  chunk is delivered as several bounded slices (not one callback):
-   --  every slice is <= the 4096 window, the sink is called many times
-   --  for a single chunk, and the reassembled ramp is byte-correct.
-   --  Verified with O(1) state — never materialised as a String — so
-   --  the *test* stack doesn't overflow either.
+   --  Case 2b: large single chunk (>12 MB) via /chunked-big, the
+   --  streaming counterpart of test_http_chunked's buffered case. One
+   --  wire chunk must arrive as several bounded slices: every slice is
+   --  <= the 4096 window, the sink is called many times, and the ramp
+   --  is byte-correct. Verified with O(1) state, never materialised as
+   --  a String, so the test's own stack does not overflow.
    declare
       C        : AHT.HTTP.Client.Client_Type;
       Req      : AHT.HTTP.Request.Request_Type;
@@ -493,14 +482,12 @@ begin
       end if;
    end;
 
-   --  Case 2c: download straight to an Ada stream (the symmetric
-   --  counterpart of the Stream_Source upload). Run /chunked twice over
-   --  the same Req: once through the Sink overload to capture the
+   --  Case 2c: download straight to an Ada stream. Run /chunked twice
+   --  over the same Req: once through the Sink overload for the
    --  reference bytes, once through the Target overload into an in-test
-   --  stream. The two byte streams must be identical, and the
-   --  stream-target call must leave Resp.Body_B empty (bytes went to the
-   --  stream, not the buffer). Also proves the Sink/Target overloads
-   --  resolve unambiguously on the fourth parameter.
+   --  stream. The two byte streams must be identical, Resp.Body_B must
+   --  stay empty, and the two overloads must resolve on the fourth
+   --  parameter.
    declare
       C        : AHT.HTTP.Client.Client_Type;
       Req      : AHT.HTTP.Request.Request_Type;
@@ -664,14 +651,14 @@ begin
             Fail ("sink-raise: Send_Streaming returned without "
                   & "raising");
          exception
-            when Sink_Exception => null;  -- expected
+            when Sink_Exception => null;  --  expected
             when E : others =>
                Fail ("sink-raise: wrong exception "
                      & Ada.Exceptions.Exception_Name (E));
          end;
 
          Server.Wait_Done (Run_Err);
-         --  ECONNRESET / EPIPE on the server's last write is fine —
+         --  ECONNRESET / EPIPE on the server's last write is fine:
          --  the client tore the transport down on the exception
          --  path. Don't fail on Run_Err here.
       end if;

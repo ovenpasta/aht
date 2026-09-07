@@ -2,60 +2,45 @@
 #  Copyright (C) 2026 Aldo Nicolas Bruno
 #  SPDX-License-Identifier: Apache-2.0
 #
-# AHT test orchestrator: builds the library + test binaries, brings up
-# the Python fixtures, runs every test main listed in tests/tests.gpr,
-# and tears the fixtures down on exit.
+# AHT test orchestrator: builds the library and the test binaries,
+# starts the Python fixtures, runs every main listed in
+# tests/tests.gpr under a per-test timeout, and tears the fixtures
+# down on exit.
 #
-# Fixtures, by port:
-#   8764  HTTP
-#   8765  WebSocket echo
-#   8766  HTTPS
-#   8767  stall — accepts, then silence (handshake-timeout test)
-#   8768  wss echo
-#   8769  deaf TLS — handshakes, never reads (write-poison test)
-#   8771  abrupt close — no close_notify (truncation policy)
-#   8773  corrupted record (integrity failure)
-#   8774  invalid handshake record / 8775 dribbled header
-#   8776  mid-session corruption under concurrency
-#   8777  WebSocket peer that misbehaves (overruns, floods, goes deaf)
-#   8770  go-httpbin, optional — only when a Go toolchain can build it
-#         (see tests/httpbin/get_httpbin.sh); test_httpbin SKIPs otherwise.
+# Inputs: BUILD_MODE (debug|release), AHT_TLS_BACKEND
+# (openssl|mbedtls), AHT_OS (posix|windows), AHT_CROSS_TARGET,
+# AHT_TRACEBACK, AHT_TEST_LAUNCHER, TEST_TIMEOUT (seconds, 300),
+# WINEDEBUG. Output: one line per test; fixture output goes to a
+# temporary log shown only when a fixture fails to come up. Exit 0
+# when every test passes, 1 when any fails or times out, 2 on a
+# setup error.
 #
-# Self-contained tests (test_url, test_url_encoding, test_headers,
-# test_log, test_tcp, test_http_io, test_http_wire, test_http_client,
-# test_ws_frames) don't touch any fixture but cost nothing to leave
-# them running, so the script doesn't bother partitioning.
+# Fixtures, by port: 8764 HTTP, 8765 WebSocket echo, 8766 HTTPS,
+# 8767 stall, 8768 wss echo, 8769 deaf TLS, 8771 abrupt close, 8773
+# corrupted record, 8774/8775 invalid or dribbled handshake, 8776
+# concurrent corruption, 8777 hostile WebSocket peer, 8770 go-httpbin
+# (optional; test_httpbin SKIPs without it).
 
 set -eu
 
 cd "$(dirname "$0")/.."
 
-# Build profile (debug|release). Exported so the gpr `external("BUILD_MODE")`
-# picks it up for both `alr build` and the tests build, and so the per-mode
-# Exec_Dir (tests/bin/$BUILD_MODE) resolves to the binaries we just built.
+# Exported so the gpr external and the per-mode Exec_Dir see it.
 BUILD_MODE=${BUILD_MODE:-debug}
 export BUILD_MODE
 
-# TLS backend (openssl|mbedtls). Exported so the gpr
-# `external("AHT_TLS_BACKEND")` AND the Alire pre-build action
-# (scripts/fetch_mbedtls.sh gates on it) both see the same choice.
-# Keep the default in lockstep with aht.gpr's.
+# Exported so the gpr external and the Alire pre-build action
+# (scripts/fetch_mbedtls.sh) see the same choice. Keep the default in
+# lockstep with aht.gpr.
 AHT_TLS_BACKEND=${AHT_TLS_BACKEND:-openssl}
 export AHT_TLS_BACKEND
 
-# Target OS family (posix|windows). Exported for the same two readers
-# as above; keep the default in lockstep with aht.gpr's AHT_OS.
-#
-# AHT_OS=windows cross-builds with a mingw-w64 toolchain and runs the
-# resulting .exe under wine, against these same Python fixtures on
-# these same ports. The fixtures are native either way -- only the
-# testee crosses over, which is the point: the client is what is being
-# ported, and pointing it at an unchanged server is what makes a
-# difference attributable to the port.
-#
-# This is not a substitute for running on Windows. wine implements the
-# API AHT calls, not the one Windows has; it is the fast loop, and
-# docs/tls.md says what still has to be checked on the real thing.
+# Exported for the same two readers; keep the default in lockstep
+# with aht.gpr. AHT_OS=windows cross-builds with mingw-w64 and runs
+# the .exe under wine against the same native fixtures, so a
+# difference is attributable to the port. Not a substitute for
+# Windows: wine implements the API AHT calls, not the one Windows
+# has; docs/tls.md says what has to be checked on the real thing.
 AHT_OS=${AHT_OS:-posix}
 export AHT_OS
 
@@ -67,16 +52,13 @@ case "$AHT_OS" in
         ;;
     windows)
         # One triplet drives gprbuild --target, the cross C toolchain
-        # in scripts/fetch_mbedtls.sh, and the directory names all
-        # three meet in. Keep the default in lockstep with aht.gpr and
-        # that script; the script checks it against the compiler's own
-        # -dumpmachine, so a mismatch is reported rather than built.
+        # in scripts/fetch_mbedtls.sh and the directory names. Keep
+        # the default in lockstep with aht.gpr and that script, which
+        # checks it against the compiler's -dumpmachine.
         AHT_CROSS_TARGET=${AHT_CROSS_TARGET:-x86_64-w64-mingw32}
         export AHT_CROSS_TARGET
-        # A stored traceback faults on every raise on 32-bit x86; see
-        # Traceback_Kind in aht.gpr. Chosen from the triplet because
-        # the symptom is an access violation in unrelated tests, which
-        # points nowhere near a binder switch.
+        # A stored traceback faults on raise on 32-bit x86; see
+        # Traceback_Kind in aht.gpr.
         case "$AHT_CROSS_TARGET" in
             i?86-*) AHT_TRACEBACK=${AHT_TRACEBACK:-none} ;;
             *)      AHT_TRACEBACK=${AHT_TRACEBACK:-stored} ;;
@@ -104,7 +86,7 @@ case "$AHT_OS" in
 esac
 
 VENV=tests/.venv
-LOG=$(mktemp -t aht-server.XXXXXX.log)
+LOG=$(mktemp "${TMPDIR:-/tmp}/aht-server.XXXXXX")
 HTTP_PID=
 WS_PID=
 TLS_PID=
@@ -178,19 +160,15 @@ if [ "$AHT_OS" = "posix" ]; then
     alr exec -- gprbuild -P tests/tests.gpr
 else
     # Alire drives the native toolchain, so the cross build goes
-    # straight to gprbuild -- which means the pre-build action Alire
-    # would have run has to be invoked by hand. Same script, same
-    # gating on AHT_TLS_BACKEND; it picks the per-target mbedTLS tree
-    # from AHT_OS, exported above.
+    # straight to gprbuild and runs the pre-build action by hand; it
+    # picks the per-target mbedTLS tree from AHT_OS.
     sh scripts/fetch_mbedtls.sh
     gprbuild --target="$AHT_CROSS_TARGET" -P aht.gpr
     echo "==> building tests"
     gprbuild --target="$AHT_CROSS_TARGET" -P tests/tests.gpr
 
-    # 32-bit x86 is the shipping shape, and the one target where XP
-    # loadability is a live question. Checked against the built images
-    # rather than the sources: what matters is which entry points the
-    # linker ended up naming.
+    # XP loadability applies to 32-bit x86 only; checked against the
+    # built images, since what matters is what the linker named.
     case "$AHT_CROSS_TARGET" in
         i?86-*)
             echo "==> checking XP-loadable imports"
@@ -204,9 +182,7 @@ echo "==> preparing venv (tests/.venv)"
 if [ ! -d "$VENV" ]; then
     python3 -m venv "$VENV"
 fi
-# -q so a fully-cached install doesn't spam the log. Always run so
-# a fresh requirements.txt entry gets picked up without the
-# developer having to delete the venv.
+# Always run, so a new requirements.txt entry is picked up.
 "$VENV"/bin/pip install -q -r tests/server/requirements.txt
 PY="$VENV"/bin/python3
 
@@ -237,9 +213,8 @@ TLSCONC_PID=$!
 "$PY" tests/server/server_ws_hostile.py >>"$LOG" 2>&1 &
 WSHOSTILE_PID=$!
 
-# Wait for every fixture's READY line (printed once it is listening).
-# 5 s should be plenty; bail out loudly if any never appears so a
-# crashed fixture doesn't masquerade as test failures.
+# Wait up to 5 s for every fixture's READY line, printed once it is
+# listening, so a crashed fixture does not masquerade as test failures.
 for _ in $(seq 1 50); do
     HAS_HTTP=$(grep -c    '^READY http '    "$LOG" 2>/dev/null || true)
     HAS_WS=$(grep -c      '^READY ws '      "$LOG" 2>/dev/null || true)
@@ -262,15 +237,9 @@ for _ in $(seq 1 50); do
     fi
     sleep 0.1
 done
-# Re-read for the verdict. `|| true` and NOT `|| echo 0`: grep -c
-# already prints 0 when nothing matched, it just exits non-zero, so
-# adding an echo produced a two-line "0\n0". Every numeric test below
-# then failed with "integer expected" -- and because they sit inside
-# an `if` condition, set -e does not see it, so the runner sailed past
-# its own fixture check and ran the suite against whatever happened to
-# be listening on those ports. A stale fixture from an earlier run
-# would have been used silently. The polling loop above always had
-# this right; only the verdict did not.
+# Re-read for the verdict. `|| true`, not `|| echo 0`: grep -c prints
+# 0 itself and only exits non-zero, so an echo would make the value
+# two lines.
 HAS_HTTP=$(grep -c    '^READY http '    "$LOG" 2>/dev/null || true)
 HAS_WS=$(grep -c      '^READY ws '      "$LOG" 2>/dev/null || true)
 HAS_TLS=$(grep -c     '^READY tls '     "$LOG" 2>/dev/null || true)
@@ -298,12 +267,10 @@ then
     exit 2
 fi
 
-# Optional fixture: go-httpbin (mccutchen/go-httpbin), a real
-# third-party HTTP/1.1 server. Enabled only when a Go toolchain can
-# produce the binary (the helper installs it from the module cache and
-# works offline once cached); otherwise the test_httpbin main SKIPs
-# because AHT_HTTPBIN_URL stays unset. Never fatal — third-party interop
-# is a bonus, not a gate on machines without Go.
+# Optional: go-httpbin (mccutchen/go-httpbin), a third-party HTTP/1.1
+# server, only when a Go toolchain can produce the binary (the helper
+# works offline once cached). Otherwise AHT_HTTPBIN_URL stays unset
+# and test_httpbin SKIPs; never fatal.
 echo "==> ensuring go-httpbin fixture (optional)"
 if HTTPBIN_BIN=$(sh tests/httpbin/get_httpbin.sh 2>>"$LOG"); then
     "$HTTPBIN_BIN" -host 127.0.0.1 -port 8770 >>"$LOG" 2>&1 &
@@ -328,10 +295,8 @@ else
 fi
 
 echo "==> running tests"
-# Source the list of mains from tests.gpr so a rename or removal in
-# the project file is automatically reflected here — discovering by
-# `tests/bin/*` would silently run stale binaries left behind by
-# the previous build and mask the change.
+# The list of mains comes from tests.gpr; `tests/bin/*` would run
+# stale binaries left behind by a previous build.
 NAMES=$(grep -oE '"test_[a-z0-9_]+\.adb"' tests/tests.gpr \
         | tr -d '"' | sed 's/\.adb$//')
 if [ -z "$NAMES" ]; then
@@ -339,19 +304,12 @@ if [ -z "$NAMES" ]; then
     exit 2
 fi
 
-# Per-test wall-clock cap. Without one, a test that deadlocks stalls
-# the run and hides every test after it — and a deadlock is exactly
-# what several of these tests exist to catch, so the failure mode and
-# the detector would cancel out. A test may also be unable to unwind
-# itself: Ada waits for dependent tasks at scope exit, so a test that
-# has already reported a stuck task still cannot exit. This is the
-# backstop for that.
-#
-# Enforced by tests/run_one.py rather than timeout(1): coreutils is
-# absent on the macOS runner, so there the cap would not exist at all,
-# and GNU timeout without -k only sends SIGTERM. The wrapper escalates
-# to SIGKILL and signals the child's whole process group. Python is
-# already required here — every fixture is one.
+# Per-test wall-clock cap: a deadlocked test would hide every test
+# after it, and Ada waits for dependent tasks at scope exit, so a
+# test that has reported a stuck task still cannot exit. Enforced by
+# tests/run_one.py: coreutils timeout is absent on the macOS runner
+# and without -k only sends SIGTERM; the wrapper escalates to SIGKILL
+# on the whole process group.
 TEST_TIMEOUT=${TEST_TIMEOUT:-300}
 CAP="$PY tests/run_one.py $TEST_TIMEOUT"
 

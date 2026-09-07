@@ -41,7 +41,7 @@ begin
       Check_Eq (H.Get ("content-type"), "application/json", "set replaces");
       Check (H.Count = 1, "count after set replace");
 
-      --  Append adds new values — Set-Cookie must NOT be comma-combined.
+      --  Append adds new values; Set-Cookie must NOT be comma-combined.
       H.Append ("Set-Cookie", "a=1");
       H.Append ("set-cookie", "b=2");
       Check (H.Count = 3, "count after 2 appends");

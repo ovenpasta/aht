@@ -1,17 +1,12 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Example 1 — the simplest possible request.
---
---  `AHT.HTTP.Client.Get` is a one-line convenience wrapper: give it a
---  URL string, it parses the URL, builds a GET with no body, runs the
---  round trip, and hands back the full response. A fresh `Client_Type`
---  needs no configuration for plain HTTP. `Resp.Body_Text` renders the
---  body bytes as a String to print.
+--  Example 1: the simplest request. Client.Get parses the URL, builds
+--  a GET with no body, runs the round trip and returns the response;
+--  a fresh Client_Type needs no configuration for plain HTTP.
 --
 --  Run:  ./examples/bin/<mode>/ex_01_get [URL]
---  Default URL is the bundled fixture's /hello route; pass any http://
---  or https:// URL to point it elsewhere.
+--  URL defaults to the fixture's /hello on :8764.
 
 with Ada.Command_Line; use Ada.Command_Line;
 with Ada.Exceptions;

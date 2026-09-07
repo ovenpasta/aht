@@ -1,66 +1,35 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  The handover record's own protocol, driven directly.
+--  The handover record's own protocol, driven directly on the
+--  production type: AHT.Websocket.Handoffs is what
+--  Lifecycle_Controller records handovers in. Fixture-free. Every
+--  wait is for an observed fact (a counter the protected type
+--  maintains, or a task's 'Terminated), with a bound as backstop.
 --
---  This replaces test_ws_abort's calibrated sweep, which tried to
---  reach the same window by timing an abort against a handshake. That
---  never worked: the window is a few instructions wide, the sweep had
---  to bracket a duration that varies several-fold under load, and it
---  failed in both directions -- some runs tore every sample, others
---  none. Three attempts at re-tuning the span moved which direction it
---  failed in and nothing else.
+--  Cases:
+--    1. a record survives the abort of its maker
+--    2. a caller aborted before the call records nothing
+--    3. the record is monotone: a lower generation cannot overwrite
+--       a higher one
+--    4. calls released together are all recorded
 --
---  Driving the primitive directly removes the timing entirely. These
---  are the production types, not a replica: AHT.Websocket.Handoffs is
---  what Lifecycle_Controller records handovers in.
+--  Covers:
+--    - one call is the whole record: a caller aborted after
+--      Record_Taken returns cannot leave it half made
+--    - property 2 stops "always true" from passing
+--    - state moved from the protected object to package level: caught
+--      by property 2 seeing one Handoff's record leak into another's
 --
---  No timing-based COORDINATION and no timing-based PREMISE: every
---  wait is for an observed fact -- a counter the protected type
---  maintains, or a task's 'Terminated -- and no property is
---  established by having let enough time pass. Timing is still
---  present, as the liveness backstop: the polls sleep between
---  attempts and give up after a bound, so a broken build reports
---  instead of hanging. That bound is never the thing being waited
---  for.
---
---  Fixture-free: no socket, no server, nothing to be running.
---
---  Properties:
---
---    1. One call is the whole record. After Record_Taken returns
---       there is nothing left for the caller to do, so a caller
---       aborted at any later point cannot leave the record half made.
---       This is what the client depends on -- the connecting task
---       hands a session over and may be aborted immediately after,
---       and its cleanup must still see that the handover happened.
---
---       Note what this does NOT show: that an abort arriving DURING
---       the call cannot lose the record. See the note just above
---       Property 2 -- that window could not be reached from a test.
---
---    2. A caller that is aborted and never reaches the call records
---       nothing. The complement of 1, and what stops "always true"
---       from passing as a correct implementation.
---
---    3. The record is monotone. An attempt's cleanup can run long
---       after later attempts have published, so an earlier
---       generation's answer must not be overwritten by a higher one.
---
---    4. Calls released together are all recorded. The movers take
---       their generations, park on a gate, and are let go at once, so
---       the calls genuinely overlap rather than happening to run one
---       after another.
---
---       Be clear about what this can and cannot show. A lost update
---       is not constructible here: Record_Taken is a protected
---       procedure, so mutual exclusion is a language guarantee and
---       there is no version of the type that races with itself.
---       What the property does guard is the state staying INSIDE the
---       protected object and per-instance -- moving it to package
---       level was tried, and is caught, though by Property 2 seeing
---       one Handoff's record leak into another's rather than by
---       anything here.
+--  Does not cover:
+--    - an abort arriving DURING the call, or between the protected
+--      action ending and the next statement: not reachable by a test
+--    - the record's placement inside the protected action, and
+--      Publish inside the Start rendezvous, rest on abort deferral
+--    - a caller-side record completed after the call returns: caught
+--      only by the test not making a second call, a changed protocol
+--    - a lost update in property 4: Record_Taken is a protected
+--      procedure, so mutual exclusion is a language guarantee
 
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
@@ -96,14 +65,12 @@ procedure Test_WS_Handoff is
    end Await;
 
 begin
-   ---------------------------------------------------------------
    --  Property 1: a record survives the abort of its maker.
-   ---------------------------------------------------------------
    declare
       Rec : aliased H.Handoff;
 
-      --  Gated, so the recording happens when this test says so
-      --  rather than at task activation.
+      --  Gated, so the recording happens when this test says so, not
+      --  at task activation.
       task Maker is
          entry Go;
       end Maker;
@@ -162,46 +129,17 @@ begin
       end if;
    end;
 
-   --  There is no property here for the abort BOUNDARY, and that is
-   --  a finding rather than an omission.
-   --
-   --  The dangerous shape is a record completed by the caller after
-   --  the call returns, where a pending abort lands between the two.
-   --  Reaching that window from a test needs the abort to arrive in
-   --  the couple of instructions between the protected action ending
-   --  and the next statement. It was attempted -- an asynchronous
-   --  select whose trigger fires while the victim is in the abortable
-   --  part, over 200 rounds, counting how many were conclusive and
-   --  how many had the abort arrive in time to cut the follow-up.
-   --  Conclusive rounds were plentiful, around thirty per run. Rounds
-   --  with the abort inside the window: zero, every run.
-   --
-   --  So that probe could not distinguish a correct implementation
-   --  from a caller-side one, and it was removed rather than left to
-   --  look like coverage. What caught the backed-out version was the
-   --  test simply not making the second call -- which detects a
-   --  changed protocol, not a lost race.
-   --
-   --  The placement of the record inside the protected action, and of
-   --  the Publish call inside the Start rendezvous, therefore rests
-   --  on the structural argument: abort is deferred inside a
-   --  protected action, so there is no interval. Same standing as the
-   --  Send_Guard flag shape, which was likewise falsified out of tree
-   --  rather than pinned by the suite.
+   --  No property for the abort boundary: an abort landing between
+   --  the protected action ending and the next statement cannot be
+   --  reached by a test, so a caller-side record is caught only by
+   --  the test not making a second call. See the header.
 
-   ---------------------------------------------------------------
-   --  Property 2: a caller that never reaches the call records
-   --  nothing.
-   ---------------------------------------------------------------
+   --  Property 2: a caller that never reaches the call records nothing.
    declare
       Rec : aliased H.Handoff;
 
       --  A barrier nothing opens. The idler parks on it and is
-      --  aborted there, so it never reaches the call below -- which
-      --  is the state this property is about. Expressed as a barrier
-      --  rather than an un-accepted task entry so there is no
-      --  entry sitting in the source that is deliberately never
-      --  called.
+      --  aborted there, so it never reaches the call below.
       protected Never is
          entry Wait;
       private
@@ -248,9 +186,7 @@ begin
       end if;
    end;
 
-   ---------------------------------------------------------------
    --  Property 3: monotone.
-   ---------------------------------------------------------------
    declare
       Rec : aliased H.Handoff;
    begin
@@ -280,17 +216,13 @@ begin
       end if;
    end;
 
-   ---------------------------------------------------------------
    --  Property 4: concurrent recorders all land.
-   ---------------------------------------------------------------
    declare
       Movers : constant := 16;
       Rec    : aliased H.Handoff;
 
-      --  Each mover pulls its own generation instead of being told
-      --  it through an entry. That removes the only synchronisation
-      --  this property does not need -- the point is concurrent
-      --  recording, not ordered starting.
+      --  Each mover pulls its own generation: the property is about
+      --  concurrent recording, not ordered starting.
       protected Dispenser is
          procedure Next (G : out Natural);
       private
@@ -310,10 +242,8 @@ begin
       end Dispenser;
 
       --  A release gate, so the movers are all ready and then all
-      --  run. Without it each task could take its number and record
-      --  it before the next has even activated, and the property
-      --  would be "sixteen calls happened" rather than "sixteen calls
-      --  contended".
+      --  run; without it each could record before the next activated,
+      --  and the calls would not contend.
       protected Gate is
          entry Wait;
          procedure Open;
@@ -371,8 +301,7 @@ begin
       All_Ready_Ref : constant access function return Boolean :=
         All_Ready'Unrestricted_Access;
    begin
-      --  Waited for as a fact, not slept for: every mover has taken
-      --  its number and is parked on the gate.
+      --  Every mover has taken its number and is parked on the gate.
       if not Await (10.0, All_Ready_Ref) then
          Fail ("concurrent: only" & Natural'Image (Gate.Ready) & " of"
                & Natural'Image (Movers)

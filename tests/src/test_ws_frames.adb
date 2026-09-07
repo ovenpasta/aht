@@ -1,12 +1,12 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  RFC 6455 frame codec — encode/decode round-trips plus the
+--  RFC 6455 frame codec: encode/decode round-trips plus the
 --  validation cases the Decode contract calls out. No sockets; the
 --  codec works entirely over Byte_Array / Buffer.
 --
---  Test vectors come from RFC 6455 §5.7 where applicable so
---  byte-exact comparisons stay honest.
+--  Test vectors come from RFC 6455 section 5.7 where applicable, so
+--  comparisons are byte-exact.
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -88,8 +88,8 @@ procedure Test_WS_Frames is
 
 begin
 
-   --  Case 1: encode unmasked text "Hello" — RFC 6455 §5.7 first
-   --  example. Expected wire: 81 05 48 65 6C 6C 6F.
+   --  Case 1: encode unmasked text "Hello", RFC 6455 section 5.7
+   --  first example. Expected wire: 81 05 48 65 6C 6C 6F.
    declare
       Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Text, Masked => False,
@@ -107,8 +107,8 @@ begin
       end if;
    end;
 
-   --  Case 2: encode masked text "Hello" with mask 37 FA 21 3D —
-   --  RFC 6455 §5.7 second example. Expected wire:
+   --  Case 2: encode masked text "Hello" with mask 37 FA 21 3D, RFC
+   --  6455 section 5.7 second example. Expected wire:
    --  81 85 37 FA 21 3D 7F 9F 4D 51 58.
    declare
       Hdr : constant AHT.Websocket.Frames.Frame_Header :=
@@ -130,7 +130,8 @@ begin
       end if;
    end;
 
-   --  Case 3: decode unmasked "Hello" (RFC 6455 §5.7 first vector).
+   --  Case 3: decode unmasked "Hello" (RFC 6455 section 5.7 first
+   --  vector).
    declare
       Wire : constant AHT.Bytes.Byte_Array :=
         [16#81#, 16#05#, 16#48#, 16#65#, 16#6C#, 16#6C#, 16#6F#];
@@ -153,8 +154,8 @@ begin
       end if;
    end;
 
-   --  Case 4: decode masked "Hello" (RFC 6455 §5.7 second vector)
-   --  — verifies unmasking applies the right xor.
+   --  Case 4: decode masked "Hello" (RFC 6455 section 5.7 second
+   --  vector); verifies unmasking applies the right xor.
    declare
       Wire : constant AHT.Bytes.Byte_Array :=
         [16#81#, 16#85#,
@@ -177,8 +178,8 @@ begin
       end if;
    end;
 
-   --  Case 5: round-trip a 200-byte binary masked frame —
-   --  exercises the 2-byte extended-length path (126 .. 65535).
+   --  Case 5: round-trip a 200-byte binary masked frame; exercises
+   --  the 2-byte extended-length path (126 .. 65535).
    declare
       Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Binary, Masked => True,
@@ -226,7 +227,7 @@ begin
       end loop;
    end;
 
-   --  Case 6: round-trip a 70_000-byte binary masked frame —
+   --  Case 6: round-trip a 70_000-byte binary masked frame;
    --  exercises the 8-byte extended-length path (> 65535).
    declare
       N : constant Natural := 70_000;
@@ -285,7 +286,7 @@ begin
       end if;
    end;
 
-   --  Case 8: decode two frames back-to-back — fragmented text
+   --  Case 8: decode two frames back-to-back: fragmented text
    --  "Hel" + "lo" (unmasked, server style). First call returns
    --  Last at byte 5; caller resumes from byte 6 for the second.
    declare
@@ -359,7 +360,7 @@ begin
       end if;
    end;
 
-   --  Case 10: opcode 0x3 is reserved/unassigned → Protocol_Error.
+   --  Case 10: opcode 0x3 is reserved/unassigned: Protocol_Error.
    declare
       Wire : constant AHT.Bytes.Byte_Array := [16#83#, 16#00#];
       Hdr  : AHT.Websocket.Frames.Frame_Header;
@@ -375,7 +376,7 @@ begin
                & Ada.Exceptions.Exception_Name (E));
    end;
 
-   --  Case 11: control frame (Close) with FIN=0 → Protocol_Error.
+   --  Case 11: control frame (Close) with FIN=0: Protocol_Error.
    declare
       Wire : constant AHT.Bytes.Byte_Array := [16#08#, 16#00#];
       Hdr  : AHT.Websocket.Frames.Frame_Header;
@@ -391,12 +392,12 @@ begin
                & Ada.Exceptions.Exception_Name (E));
    end;
 
-   --  Case 12: control frame with announced length 126 →
-   --  Protocol_Error (and the 126 itself is non-minimal too; the
+   --  Case 12: control frame with announced length 126:
+   --  Protocol_Error (the 126 is also non-minimal; the
    --  control-length-overflow check catches it).
    declare
       Wire : constant AHT.Bytes.Byte_Array :=
-        [16#89#, 16#7E#, 16#00#, 16#7E#];  -- ping ext-len=126
+        [16#89#, 16#7E#, 16#00#, 16#7E#];  --  ping ext-len=126
       Hdr  : AHT.Websocket.Frames.Frame_Header;
       Pay  : AHT.Bytes.Buffer;
       Last : Natural;
@@ -410,11 +411,11 @@ begin
                & Ada.Exceptions.Exception_Name (E));
    end;
 
-   --  Case 13: non-minimal length — 16-bit ext used for value 100,
+   --  Case 13: non-minimal length: 16-bit ext used for value 100,
    --  which fits in the 7-bit field. Must raise.
    declare
       Wire : constant AHT.Bytes.Byte_Array :=
-        [16#82#, 16#7E#, 16#00#, 16#64#];  -- ext-len 0x0064 = 100
+        [16#82#, 16#7E#, 16#00#, 16#64#];  --  ext-len 0x0064 = 100
       Hdr  : AHT.Websocket.Frames.Frame_Header;
       Pay  : AHT.Bytes.Buffer;
       Last : Natural;
@@ -428,7 +429,7 @@ begin
                & Ada.Exceptions.Exception_Name (E));
    end;
 
-   --  Case 14: RSV1 set without negotiated extension → Protocol_Error.
+   --  Case 14: RSV1 set without negotiated extension: Protocol_Error.
    declare
       Wire : constant AHT.Bytes.Byte_Array := [16#C1#, 16#00#];
       --  C1 = FIN|RSV1|Text, length 0
@@ -445,8 +446,8 @@ begin
                & Ada.Exceptions.Exception_Name (E));
    end;
 
-   --  Case 15: outbound (Encode) control-frame validation —
-   --  Encode with FIN=False on a Close opcode raises.
+   --  Case 15: outbound (Encode) control-frame validation: Encode
+   --  with FIN=False on a Close opcode raises.
    declare
       Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => False, Op => AHT.Websocket.Close_Op,
@@ -478,7 +479,7 @@ begin
          others => <>);
       Empty : constant AHT.Bytes.Byte_Array (1 .. 0) := [];
       With_Code : constant AHT.Bytes.Byte_Array :=
-        [16#03#, 16#E8#,  -- 1000 = Normal Closure
+        [16#03#, 16#E8#,  --  1000 = Normal Closure
          Character'Pos ('b'), Character'Pos ('y'),
          Character'Pos ('e')];
    begin
@@ -501,8 +502,8 @@ begin
                & Ada.Exceptions.Exception_Name (E));
    end;
 
-   --  Case 17: Encode Close with a 1-byte payload → Protocol_Error
-   --  (RFC §5.5.1 — must be 0 or >= 2 bytes).
+   --  Case 17: Encode Close with a 1-byte payload: Protocol_Error
+   --  (RFC section 5.5.1: 0 or >= 2 bytes).
    declare
       Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Close_Op,
@@ -524,8 +525,8 @@ begin
                & Ada.Exceptions.Exception_Name (E));
    end;
 
-   --  Case 18: Encode Close with synthetic code 1005 →
-   --  Protocol_Error (must never appear on the wire).
+   --  Case 18: Encode Close with synthetic code 1005: Protocol_Error
+   --  (it must never appear on the wire).
    declare
       Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Close_Op,
@@ -533,7 +534,7 @@ begin
          Mask_Key => [16#00#, 16#00#, 16#00#, 16#00#],
          others => <>);
       Payload : constant AHT.Bytes.Byte_Array :=
-        [16#03#, 16#ED#];  -- 1005
+        [16#03#, 16#ED#];  --  1005
    begin
       declare
          Unused : constant AHT.Bytes.Byte_Array :=
@@ -548,7 +549,7 @@ begin
                & Ada.Exceptions.Exception_Name (E));
    end;
 
-   --  Case 19: Encode Close with out-of-range code 999 →
+   --  Case 19: Encode Close with out-of-range code 999:
    --  Protocol_Error.
    declare
       Hdr : constant AHT.Websocket.Frames.Frame_Header :=
@@ -557,7 +558,7 @@ begin
          Mask_Key => [16#00#, 16#00#, 16#00#, 16#00#],
          others => <>);
       Payload : constant AHT.Bytes.Byte_Array :=
-        [16#03#, 16#E7#];  -- 999
+        [16#03#, 16#E7#];  --  999
    begin
       declare
          Unused : constant AHT.Bytes.Byte_Array :=
@@ -573,11 +574,10 @@ begin
    end;
 
    --  Case 20: Decode a server Close (unmasked) with normal code
-   --  1000 → succeeds. Verifies the inbound validator accepts a
-   --  good close.
+   --  1000 succeeds: the inbound validator accepts a good close.
    declare
       Wire : constant AHT.Bytes.Byte_Array :=
-        [16#88#, 16#02#, 16#03#, 16#E8#];  -- FIN|Close, len 2, 1000
+        [16#88#, 16#02#, 16#03#, 16#E8#];  --  FIN|Close, len 2, 1000
       Hdr  : AHT.Websocket.Frames.Frame_Header;
       Pay  : AHT.Bytes.Buffer;
       Last : Natural;
@@ -591,11 +591,11 @@ begin
       end if;
    end;
 
-   --  Case 21: Decode a server Close with a 1-byte payload →
+   --  Case 21: Decode a server Close with a 1-byte payload:
    --  Protocol_Error.
    declare
       Wire : constant AHT.Bytes.Byte_Array :=
-        [16#88#, 16#01#, 16#03#];  -- FIN|Close, len 1
+        [16#88#, 16#01#, 16#03#];  --  FIN|Close, len 1
       Hdr  : AHT.Websocket.Frames.Frame_Header;
       Pay  : AHT.Bytes.Buffer;
       Last : Natural;
@@ -609,11 +609,11 @@ begin
                & Ada.Exceptions.Exception_Name (E));
    end;
 
-   --  Case 22: Decode a server Close with out-of-range code 999 →
+   --  Case 22: Decode a server Close with out-of-range code 999:
    --  Protocol_Error.
    declare
       Wire : constant AHT.Bytes.Byte_Array :=
-        [16#88#, 16#02#, 16#03#, 16#E7#];  -- 999
+        [16#88#, 16#02#, 16#03#, 16#E7#];  --  999
       Hdr  : AHT.Websocket.Frames.Frame_Header;
       Pay  : AHT.Bytes.Buffer;
       Last : Natural;
@@ -627,15 +627,13 @@ begin
                & Ada.Exceptions.Exception_Name (E));
    end;
 
-   --  Case 23: Decode accepts a Close with code 1006 — the
-   --  synthetic codes are valid as inbound observations
-   --  (Any_Close_Code), even though the spec says peers SHOULD
-   --  NOT send them. Decode trusts the wire and surfaces them;
-   --  the WebSocket Client layer decides what to do with such
-   --  an oddity.
+   --  Case 23: Decode accepts a Close with code 1006. The synthetic
+   --  codes are valid as inbound observations (Any_Close_Code) even
+   --  though peers SHOULD NOT send them; Decode surfaces them and the
+   --  Client layer decides what to do.
    declare
       Wire : constant AHT.Bytes.Byte_Array :=
-        [16#88#, 16#02#, 16#03#, 16#EE#];  -- 1006
+        [16#88#, 16#02#, 16#03#, 16#EE#];  --  1006
       Hdr  : AHT.Websocket.Frames.Frame_Header;
       Pay  : AHT.Bytes.Buffer;
       Last : Natural;
@@ -650,9 +648,10 @@ begin
       end if;
    end;
 
-   --  Case 24: Encode Close with reserved code 1004 → Protocol_Error.
-   --  1004 has no defined meaning and MUST NOT be sent (RFC §7.4.1), so
-   --  Valid_Close_Code excludes it just like the synthetic 1005/1006/1015.
+   --  Case 24: Encode Close with reserved code 1004: Protocol_Error.
+   --  1004 has no defined meaning and MUST NOT be sent (RFC section
+   --  7.4.1), so Valid_Close_Code excludes it like the synthetic
+   --  1005/1006/1015.
    declare
       Hdr : constant AHT.Websocket.Frames.Frame_Header :=
         (FIN    => True, Op => AHT.Websocket.Close_Op,
@@ -660,7 +659,7 @@ begin
          Mask_Key => [16#00#, 16#00#, 16#00#, 16#00#],
          others => <>);
       Payload : constant AHT.Bytes.Byte_Array :=
-        [16#03#, 16#EC#];  -- 1004
+        [16#03#, 16#EC#];  --  1004
    begin
       declare
          Unused : constant AHT.Bytes.Byte_Array :=
@@ -675,8 +674,9 @@ begin
                & Ada.Exceptions.Exception_Name (E));
    end;
 
-   --  Case 25: Classify_Inbound_Close on an empty payload → Accept_Close.
-   --  A bodiless Close is the normal "no status" signal (RFC §5.5.1).
+   --  Case 25: Classify_Inbound_Close on an empty payload gives
+   --  Accept_Close. A bodiless Close is the normal "no status" signal
+   --  (RFC section 5.5.1).
    declare
       Empty : constant AHT.Bytes.Buffer := To_Buf ([]);
    begin
@@ -687,10 +687,10 @@ begin
       end if;
    end;
 
-   --  Case 26: code 1000 + ASCII reason "bye" → Accept_Close.
+   --  Case 26: code 1000 + ASCII reason "bye" gives Accept_Close.
    declare
       Pay : constant AHT.Bytes.Buffer :=
-        To_Buf ([16#03#, 16#E8#,  -- 1000
+        To_Buf ([16#03#, 16#E8#,  --  1000
                  Character'Pos ('b'), Character'Pos ('y'),
                  Character'Pos ('e')]);
    begin
@@ -702,14 +702,14 @@ begin
    end;
 
    --  Case 27: each reserved-on-wire code 1004/1005/1006/1015 a peer
-   --  MUST NOT send (RFC §7.4.1) → Reserved_Code.
+   --  MUST NOT send (RFC section 7.4.1) gives Reserved_Code.
    declare
       type Code_Pair is array (1 .. 2) of AHT.Bytes.Octet;
       Reserved : constant array (1 .. 4) of Code_Pair :=
-        [[16#03#, 16#EC#],   -- 1004
-         [16#03#, 16#ED#],   -- 1005
-         [16#03#, 16#EE#],   -- 1006
-         [16#03#, 16#F7#]];  -- 1015
+        [[16#03#, 16#EC#],   --  1004
+         [16#03#, 16#ED#],   --  1005
+         [16#03#, 16#EE#],   --  1006
+         [16#03#, 16#F7#]];  --  1015
    begin
       for P of Reserved loop
          declare
@@ -727,10 +727,10 @@ begin
    end;
 
    --  Case 28: acceptable code 1000 + ill-formed UTF-8 reason (a lone
-   --  continuation byte 0x80) → Bad_Reason (RFC §8.1).
+   --  continuation byte 0x80) gives Bad_Reason (RFC section 8.1).
    declare
       Pay : constant AHT.Bytes.Buffer :=
-        To_Buf ([16#03#, 16#E8#, 16#80#]);  -- 1000 + 0x80
+        To_Buf ([16#03#, 16#E8#, 16#80#]);  --  1000 + 0x80
    begin
       if AHT.Websocket.Frames.Classify_Inbound_Close (Pay)
         /= Bad_Reason
@@ -739,12 +739,12 @@ begin
       end if;
    end;
 
-   --  Case 29: code 1000 + valid multi-byte reason "é" (C3 A9) →
-   --  Accept_Close. Positive control that the reason check is not
-   --  over-eager on legitimate non-ASCII text.
+   --  Case 29: code 1000 + valid multi-byte reason U+00E9 (C3 A9)
+   --  gives Accept_Close. Positive control: the reason check accepts
+   --  legitimate non-ASCII text.
    declare
       Pay : constant AHT.Bytes.Buffer :=
-        To_Buf ([16#03#, 16#E8#, 16#C3#, 16#A9#]);  -- 1000 + U+00E9
+        To_Buf ([16#03#, 16#E8#, 16#C3#, 16#A9#]);  --  1000 + U+00E9
    begin
       if AHT.Websocket.Frames.Classify_Inbound_Close (Pay)
         /= Accept_Close
@@ -753,14 +753,11 @@ begin
       end if;
    end;
 
-   --  Case 30: the allowance is enforced from the header alone.
-   --
-   --  This is the case that distinguishes a decoder-level ceiling from
-   --  a check applied to the frame Decode returns. The wire here is
-   --  ten bytes declaring a gigabyte and nothing else: with a ceiling
-   --  in the decoder it is refused immediately, while the default path
-   --  can only say "incomplete" and wait for a gigabyte a hostile peer
-   --  need never send.
+   --  Case 30: the allowance is enforced from the header alone. The
+   --  wire is ten bytes declaring a gigabyte and nothing else: a
+   --  ceiling in the decoder refuses it immediately, while a check on
+   --  the frame Decode returns could only say "incomplete" and wait
+   --  for a gigabyte a hostile peer need never send.
    declare
       Wire : constant AHT.Bytes.Byte_Array :=
         Ext64 (16#82#, 1024 * 1024 * 1024);   --  FIN=1 Binary, 1 GiB
@@ -822,11 +819,10 @@ begin
    end;
 
    --  Case 32: a length above Natural'Last reports the failure the
-   --  caller's policy implies. With a finite ceiling it is a size
-   --  failure; with none it stays the protocol error it has always
-   --  been. Getting this backwards is easy: the allowance comparison
-   --  is true in both cases, so only testing the representability
-   --  first keeps the default path unchanged.
+   --  caller's policy implies: a size failure with a finite ceiling,
+   --  a protocol error with none. The allowance comparison is true in
+   --  both cases, so representability has to be tested first for the
+   --  default path to stay a protocol error.
    declare
       Too_Big : constant Unsigned_64 := Unsigned_64 (Natural'Last) + 1;
       Wire : constant AHT.Bytes.Byte_Array := Ext64 (16#82#, Too_Big);
@@ -857,10 +853,10 @@ begin
       end;
    end;
 
-   --  Case 33: sequencing outranks size. This frame violates both —
-   --  a Text where a Continuation was required, declaring far more
-   --  than the allowance — and the protocol violation is the one
-   --  worth reporting, since it maps to a different close code.
+   --  Case 33: sequencing outranks size. This frame violates both (a
+   --  Text where a Continuation was required, declaring far more than
+   --  the allowance) and the protocol violation is the one reported,
+   --  since it maps to a different close code.
    declare
       Wire : constant AHT.Bytes.Byte_Array :=
         Ext64 (16#81#, 1024 * 1024 * 1024);   --  FIN=1 Text, 1 GiB

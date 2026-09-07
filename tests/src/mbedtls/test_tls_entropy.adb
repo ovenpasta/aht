@@ -1,27 +1,22 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Where mbedTLS gets its entropy, mbedtls backend.
+--  Where mbedTLS gets its entropy, mbedtls backend. The library is built
+--  MBEDTLS_NO_PLATFORM_ENTROPY and its pool is fed by
+--  AHT.Mbedtls.Entropy.Poll, registered from aht_mbedtls_entropy_new. A
+--  verified TLS connect against the HTTPS fixture (8766) must move
+--  AHT.Random's counters. The openssl source asserts the opposite.
 --
---  The library is built MBEDTLS_NO_PLATFORM_ENTROPY and its pool is
---  fed by AHT.Mbedtls.Entropy.Poll, registered from
---  aht_mbedtls_entropy_new. That the wiring works at all is already
---  implied by every other TLS test passing -- with no platform source
---  and no working callback, mbedtls_ctr_drbg_seed fails and no
---  handshake happens. What that argument cannot show is *which* source
---  delivered, and "the DRBG got seeded somehow" is a weaker claim than
---  the one the build rests on.
+--  Cases:
+--    - Draws and Bytes_Requested both increase across the connect
 --
---  So this observes the counters directly: a TLS connect must move
---  AHT.Random's accounting. Nothing in the mbedtls transport calls
---  AHT.Random itself, and a raw TLS_Transport draws no masks and no
---  handshake nonce, so any movement here came through the entropy
---  callback and nowhere else.
---
---  The openssl source of this test asserts the opposite on the same
---  operation -- that engine has its own RNG and must not reach
---  AHT.Random at all. The two together are what make either one
---  meaningful: the same connect, opposite expectations, both green.
+--  Covers:
+--    - which source delivered: nothing in the mbedtls transport calls
+--      AHT.Random itself and a raw TLS_Transport draws no masks and no
+--      nonce, so any movement came through the entropy callback
+--  Does not cover:
+--    - that the pool is fed at all; every other TLS test shows that,
+--      since without a source mbedtls_ctr_drbg_seed fails
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -44,8 +39,8 @@ procedure Test_TLS_Entropy is
       Failures := Failures + 1;
    end Fail;
 
-   --  Snapshot rather than absolute values: the counters are
-   --  process-global and this test does not own them.
+   --  Snapshots, since the counters are process-global and this test
+   --  does not own them.
    Draws_Before : constant Natural := AHT.Random.Draws;
    Bytes_Before : constant Natural := AHT.Random.Bytes_Requested;
 

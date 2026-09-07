@@ -1,22 +1,19 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Coordinator coverage, mbedtls backend.
+--  Coordinator coverage, mbedtls backend. The shared white-box
+--  TLS_Sync_Cases run here: the mbedtls engine arbitrates its single
+--  socket read through the same AHT.TLS_Sync coordinator.
 --
---  The KeyUpdate half of this main is openssl-only. This backend is
---  built with MBEDTLS_SSL_PROTO_TLS1_3 compiled out -- see
---  scripts/fetch_mbedtls.sh for why -- so it negotiates TLS 1.2, which
---  has no post-handshake KeyUpdate to drive.
+--  Cases:
+--    A. TLS_Sync_Cases
 --
---  The skip below is unconditional and takes that on trust rather than
---  measuring it. Nothing here asks the session what it negotiated, so
---  if the protocol ceiling ever moves this main will keep printing
---  TLS 1.2 and keep skipping coverage that had become reachable.
---
---  The coordinator half applies to BOTH backends, though —
---  since the mbedtls engine became a buffered, non-blocking engine it
---  arbitrates its single socket read through the very same
---  AHT.TLS_Sync coordinator — so the shared white-box cases run here.
+--  Does not cover:
+--    - KeyUpdate: this backend is built with MBEDTLS_SSL_PROTO_TLS1_3
+--      compiled out (scripts/fetch_mbedtls.sh) and negotiates TLS 1.2
+--    - the skip is unconditional; nothing asks the session what it
+--      negotiated, so if the protocol ceiling moves this main keeps
+--      skipping coverage that had become reachable
 
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;

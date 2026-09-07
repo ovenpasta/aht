@@ -1,49 +1,27 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Sends racing a forced teardown.
---
---  A Reconnect displaces a live connection while application tasks
---  are still using it. Every one of those tasks is somewhere in a
---  Send_* — queued on the write latch, inside the transport, or not
---  yet started — and each of those positions unwinds differently.
---
---  What makes this test worth having is not that it survives. It is
---  the exception sets, which are deliberately narrow and per
---  scenario.
---
---  Against a STABLE peer, with a teardown the caller asked for, only
---  two outcomes are legitimate:
---
---    Closed_Error   the send was refused because admission had
---                   already stopped — it never reached the wire.
---    Aborted_Error  the send was in flight and its transport I/O was
---                   cancelled by the teardown.
---
---  Transport_Error and TLS_Error are REJECTED here. Accepting them
---  would be the easy thing and the wrong thing: against a peer that
---  is not misbehaving, a transport-level failure means the connection
---  broke for a reason nobody asked for — premature closure, a
---  poisoned session — and folding it into "teardown races are messy"
---  is exactly how that would stop being noticed. Those two are
---  admissible only where a test deliberately introduces peer, socket
---  or TLS failure, and this one does not.
---
---  Never acceptable anywhere: Program_Error, Storage_Error, or a
---  hang. The first two mean the client reached a state it does not
---  model; the third is what every bound in the design exists to
---  prevent, and is why each task here is bounded and the whole case
---  is joined before it reports.
+--  Sends racing a forced teardown. A Reconnect displaces a live
+--  connection while application tasks are still in a Send_* (queued
+--  on the write latch, inside the transport, or not yet started), and
+--  each position unwinds differently. Echo fixture on 8765, and an
+--  in-file deaf peer that accepts the handshake and stops reading.
 --
 --  Cases:
---    1. Several senders against a live connection, then Reconnect.
---       The senders keep going across the boundary, so some are
---       refused by the new admission state and some are cancelled
---       mid-write.
---    2. The same against a peer that has stopped reading, so senders
---       are parked in the transport rather than passing through it
---       when the teardown arrives. This is the shape where a bound
---       that does not exist shows up as a hang.
+--    1. several senders against a live connection, then Reconnect
+--    2. the same against a peer that has stopped reading, so senders
+--       are parked in the transport when the teardown arrives
+--
+--  Covers:
+--    - only Closed_Error (refused, never reached the wire) and
+--      Aborted_Error (in flight, transport I/O cancelled) are accepted
+--    - Transport_Error and TLS_Error are findings: no case here
+--      introduces peer, socket or TLS failure
+--    - Program_Error, Storage_Error and a hang are never acceptable;
+--      every task is bounded and joined before the case reports
+--    - at least one sender was Refused or Cancelled, so the teardown
+--      reached a sender and the exception sets were exercised
+--    - a missing bound shows up in case 2 as a hang
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -58,9 +36,8 @@ procedure Test_WS_Reconnect_Concurrency is
 
    Echo : constant String := "ws://127.0.0.1:8765/";
 
-   --  Accepts the handshake, then stops reading. A sender backs up in
-   --  the transport after a few KB rather than passing straight
-   --  through it.
+   --  Accepts the handshake, then stops reading, so a sender backs up
+   --  in the transport after a few KB.
    Deaf : constant String := "ws://127.0.0.1:8777/deaf";
 
    Senders : constant := 4;
@@ -73,15 +50,10 @@ procedure Test_WS_Reconnect_Concurrency is
       Failures := Failures + 1;
    end Fail;
 
-   --  Records how each sender ended, by category rather than as one
-   --  tally.
-   --
-   --  The categories are what make the case non-vacuous. "No bad
-   --  exceptions" is also true of a run in which the teardown never
-   --  reached a single sender -- they would all have stopped on the
-   --  flag, having raced nothing -- so Raced is checked separately.
-   --  Refused and Cancelled are the two legitimate ways a teardown
-   --  ends a send, and at least one of them has to have happened.
+   --  Records how each sender ended, by category. "No bad exceptions"
+   --  is also true of a run in which the teardown never reached a
+   --  sender, so Raced is checked separately: at least one Refused or
+   --  Cancelled has to have happened.
    protected Outcomes is
       procedure Note_Refused;     --  Closed_Error: admission had shut
       procedure Note_Cancelled;   --  Aborted_Error: in flight, killed
@@ -142,16 +114,11 @@ procedure Test_WS_Reconnect_Concurrency is
          & (if Bad = 0 then "" else " bad=[" & To_String (Text) & "]"));
    end Outcomes;
 
-   --  Set once the scenario is over, so senders that are still
-   --  succeeding on the REPLACEMENT connection stop instead of
-   --  running until the fixture loses patience. Without it the deaf
-   --  case never ends: the senders park in the new session exactly as
-   --  they parked in the old one, and nothing in the scenario is
-   --  waiting to cancel them.
-   --  Reset per scenario. Shared state between the two would let the
-   --  first one's Request end the second one's senders before they
-   --  had sent anything, and the deaf case would then pass without
-   --  ever parking a writer.
+   --  Set once the scenario is over, so senders still succeeding on
+   --  the replacement connection stop. Without it the deaf case never
+   --  ends: the senders park in the new session and nothing waits to
+   --  cancel them. Reset per scenario, or the first one's Request
+   --  would end the second one's senders before they had sent.
    protected Stop is
       procedure Request;
       procedure Reset;
@@ -174,19 +141,18 @@ procedure Test_WS_Reconnect_Concurrency is
 
    --  One scenario. The client is connected here and torn down while
    --  the senders run; the senders are joined before anything is
-   --  asserted, so a hang is a timeout rather than a false pass.
+   --  asserted, so a hang is a timeout, not a false pass.
    procedure Run (What : String; URL : String) is
       C : AHT.Websocket.Client.Client_Type;
 
       --  Big enough that a deaf peer's receive buffer fills and the
-      --  writer parks, rather than the whole message slipping into
-      --  the socket before the teardown arrives.
+      --  writer parks before the teardown arrives.
       Payload : constant String (1 .. 32 * 1024) := [others => 'x'];
 
       task type Sender;
       task body Sender is
          --  A task body cannot return, so the outcome is recorded by
-         --  leaving the loop rather than by leaving the task.
+         --  leaving the loop.
          Ended : Boolean := False;
       begin
          --  Keeps sending across the teardown boundary, so whichever
@@ -232,8 +198,7 @@ procedure Test_WS_Reconnect_Concurrency is
 
       --  Let the senders get into the connection before it is pulled
       --  out from under them. Without this they would all still be
-      --  starting up and every one would take the "refused" path,
-      --  which tests only half of what this is for.
+      --  starting up and every one would take the "refused" path.
       delay 0.3;
 
       begin
@@ -252,12 +217,12 @@ procedure Test_WS_Reconnect_Concurrency is
                   & Ada.Exceptions.Exception_Message (E));
       end;
 
-      --  A sender parked in the REPLACEMENT connection cannot see the
+      --  A sender parked in the replacement connection cannot see the
       --  flag until its write returns, and against a deaf peer that
-      --  write has no deadline of its own. Close is what reaches it:
-      --  it aborts the new session's transport exactly as the
-      --  Reconnect aborted the old one. Setting the flag first means
-      --  a sender freed by this does not simply park again.
+      --  write has no deadline of its own. Close reaches it: it aborts
+      --  the new session's transport as the Reconnect aborted the old
+      --  one. Setting the flag first means a sender freed by this does
+      --  not park again.
       Stop.Request;
       begin
          AHT.Websocket.Client.Close (C, Timeout => 1.0);

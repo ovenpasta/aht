@@ -3,16 +3,13 @@
 
 with "../aht.gpr";
 
---  User-facing example programs, ordered easy -> hard. Each main is a
---  self-contained demonstration of one capability of the AHT client;
---  see examples/run_examples.sh to build + run the whole ladder against
---  the bundled Python fixtures.
+--  Example programs, ordered easy -> hard, one capability each;
+--  examples/run_examples.sh builds and runs the ladder against the
+--  Python fixtures.
 project Examples is
 
    for Source_Dirs use ("src");
-   --  Per-variant (mode + TLS backend) output dirs, mirroring aht.gpr:
-   --  no build combination may clobber another, or the next build in
-   --  the other combination is silently stale.
+   --  Per-variant output dirs, mirroring aht.gpr.
    for Object_Dir use "obj/" & Aht.Variant;
    for Exec_Dir   use "bin/" & Aht.Variant;
 

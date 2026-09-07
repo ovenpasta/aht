@@ -11,93 +11,45 @@ library project Aht is
    type Build_Mode_Kind is ("debug", "release");
    Build_Mode : Build_Mode_Kind := external ("BUILD_MODE", "debug");
 
-   --  TLS backend selection. Set via the AHT_TLS_BACKEND environment
-   --  variable (or -XAHT_TLS_BACKEND=...): the env-var route is the
-   --  supported one, because it also reaches the Alire pre-build action
-   --  (scripts/fetch_mbedtls.sh gates itself on it — keep that script's
-   --  default in lockstep with this one). Prefixed name on purpose:
-   --  gprbuild externals share one namespace across the whole build
-   --  closure, and an unqualified TLS_BACKEND could collide with
-   --  another crate's.
+   --  TLS backend, from the AHT_TLS_BACKEND environment variable; the
+   --  env-var route also reaches the Alire pre-build action
+   --  (scripts/fetch_mbedtls.sh, whose default must match this one).
+   --  Prefixed because gprbuild externals share one namespace across
+   --  the build closure.
    type TLS_Backend_Kind is ("openssl", "mbedtls");
    TLS_Backend : TLS_Backend_Kind := external ("AHT_TLS_BACKEND", "openssl");
 
-   --  TARGET OS family -- not the host, and the difference is the
-   --  whole point: the Windows body is built from a Linux host with a
-   --  mingw toolchain, so a variable named for the host would be
-   --  wrong in exactly the case it exists to serve.
-   --
-   --  Selects the one unit that cannot be written portably,
-   --  AHT.Random.Source, which reads the system CSPRNG
-   --  (/dev/urandom on POSIX, BCryptGenRandom on Windows).
-   --
-   --  An explicit external rather than target sniffing, because GPR
-   --  cannot pattern-match Project'Target and a wrong guess here is
-   --  the kind that fails at link time on someone else's machine.
-   --  Defaults to posix, which is what this library is tested on.
+   --  Target OS family, not the host: the Windows body is cross-built
+   --  from Linux with mingw. Selects the body of AHT.Random.Source
+   --  (/dev/urandom on POSIX, BCryptGenRandom on Windows), the
+   --  body-less AHT.Mbedtls.Link for the mbedtls backend, and the
+   --  triplet-suffixed paths below. An explicit external because GPR
+   --  cannot pattern-match Project'Target. Windows is not supported.
    type OS_Kind is ("posix", "windows");
    OS : OS_Kind := external ("AHT_OS", "posix");
 
-   --  AHT_OS chooses sources: the body of AHT.Random.Source, and --
-   --  for the mbedtls backend -- the body-less AHT.Mbedtls.Link that
-   --  carries the OS-dependent part of the link line.
-   --
-   --  It also reaches the paths further down, where the non-default OS
-   --  brings in the target triplet: the object and library dirs, and
-   --  the vendored mbedTLS tree, whose configuration differs per target
-   --  as well. Windows is not a supported configuration.
-
-   --  The cross toolchain's target triplet, used only when OS is
-   --  windows. It names the object, library and vendored-mbedTLS
-   --  directories, and tests/run_tests.sh passes the same string to
-   --  gprbuild --target, so one value drives the Ada half, the C half
-   --  and the paths they meet in.
-   --
-   --  It is in those paths because "windows" alone is not a target.
-   --  An i686 and an x86-64 mingw build are as incompatible as a Linux
-   --  one, and sharing a directory between them means each silently
-   --  overwrites the other's objects. Keep the default in lockstep
-   --  with scripts/fetch_mbedtls.sh, which validates it against the
-   --  compiler's own -dumpmachine.
+   --  Cross toolchain triplet, used only when OS is windows. It names
+   --  the object, library and vendored-mbedTLS directories, and
+   --  tests/run_tests.sh passes the same string to gprbuild --target.
+   --  In the paths because an i686 and an x86-64 mingw build cannot
+   --  share objects. Keep the default in lockstep with
+   --  scripts/fetch_mbedtls.sh, which checks it against -dumpmachine.
    Cross_Target := external ("AHT_CROSS_TARGET", "x86_64-w64-mingw32");
 
    --  Whether every exception occurrence carries a traceback (-Es).
-   --
-   --  Storing one makes every raise call __gnat_backtrace, which on
-   --  32-bit x86 walks the frame-pointer chain and dereferences what a
-   --  frame omitting ebp left in the slot. Measured on
-   --  i686-w64-mingw32.static: a refused connect faults inside
-   --  tracebak.c reading address 16#3030315B#, the bytes "[100" of
-   --  GNAT.Sockets' own "[10061] Connection refused". -E faults the
-   --  same way, so it is the capture, not the symbolisation. At -O2
-   --  AHT's own frames drop ebp too: 12 tests fail in debug, 24 in
-   --  release.
-   --
-   --  Left on where it works -- POSIX and x86-64 mingw both store
-   --  tracebacks and pass. tests/run_tests.sh picks "none" from the
-   --  triplet.
+   --  On i686 mingw __gnat_backtrace walks the frame-pointer chain and
+   --  faults on a raise from a frame without ebp (-E faults the same
+   --  way: it is the capture, not the symbolisation), so tracebacks
+   --  are off there; POSIX and x86-64 mingw store them.
+   --  tests/run_tests.sh picks "none" from the triplet.
    type Traceback_Kind is ("stored", "none");
    Traceback : Traceback_Kind := external ("AHT_TRACEBACK", "stored");
 
-   --  The oldest Windows the C sources may be compiled against.
-   --
-   --  mingw gates its declarations on _WIN32_WINNT, so this decides
-   --  which entry points the C half is even able to name. XP is the
-   --  target, and a version above it turns an unloadable image into a
-   --  compile error instead: reaching for a condition variable or
-   --  InitOnceExecuteOnce stops compiling rather than linking to a
-   --  symbol XP does not export.
-   --
-   --  It reaches beyond this project's own sources. mbedTLS 3.6's
-   --  x509_crt.c takes the platform inet_pton when this is 0x0600 or
-   --  higher and its own software one below, so the same value decides
-   --  whether an image that verifies an IP SAN can load on XP;
-   --  scripts/fetch_mbedtls.sh passes it for that reason.
-   --
-   --  Applied to both Windows triplets, not only i686. The x86-64
-   --  build is the fast loop for the port, and it is only a fast loop
-   --  while a difference between the two is attributable to the
-   --  target rather than to the macros they were built with.
+   --  The oldest Windows the C sources may be compiled against. mingw
+   --  gates its declarations on _WIN32_WINNT, so a reach for a
+   --  Vista-only entry point is a compile error. scripts/fetch_mbedtls.sh
+   --  passes the same value to the mbedTLS build. Applied to both
+   --  Windows triplets.
    Win32_Winnt := external ("AHT_WIN32_WINNT", "0x0501");
 
    Win32_Defines := ();
@@ -114,13 +66,11 @@ library project Aht is
    --  AHT_OPENSSL_DIR=$(brew --prefix openssl@3)
    Openssl_Dir := external ("AHT_OPENSSL_DIR", "/usr");
 
-   --  Exactly one backend's sources compile: the shared spec
-   --  src/aht-transport-tls.ads has one body per backend directory,
-   --  alongside that backend's bindings and C glue.
-   --  The mbedtls backend has a second split inside it: AHT.Mbedtls.Link
-   --  carries the OS-dependent part of the link line, because the
-   --  vendored library is not configured the same way for every target
-   --  (see src/tls/mbedtls/os/*/aht-mbedtls-link.ads).
+   --  Exactly one backend's sources compile: src/aht-transport-tls.ads
+   --  has one body per backend directory, with that backend's bindings
+   --  and C glue. The mbedtls backend also splits AHT.Mbedtls.Link per
+   --  OS (src/tls/mbedtls/os/*/aht-mbedtls-link.ads), since the
+   --  vendored library's link line differs per target.
    Tls_Dirs := ();
    case TLS_Backend is
       when "mbedtls" =>
@@ -136,9 +86,7 @@ library project Aht is
          Tls_Dirs := ("src/tls/openssl", "csrc/openssl");
    end case;
 
-   --  Same one-body-per-directory shape as the TLS split above: the
-   --  shared spec src/aht-random-source.ads has one body per OS
-   --  directory, and exactly one of them compiles.
+   --  One body of src/aht-random-source.ads per OS directory.
    Os_Dirs := ();
    case OS is
       when "posix" =>
@@ -147,31 +95,16 @@ library project Aht is
          Os_Dirs := ("src/os/windows");
    end case;
 
-   --  csrc/dns is not part of either split: the shim is one file with
-   --  both platforms inside it, because the two halves differ only in
-   --  which thread API they name and splitting them would duplicate
-   --  the refcount handoff, which is the only part worth reviewing.
+   --  csrc/dns is one file for both platforms: the halves differ only
+   --  in which thread API they name, and the refcount handoff is
+   --  shared.
    for Source_Dirs use ("src", "csrc/dns") & Tls_Dirs & Os_Dirs;
 
-   --  Output dirs are per-mode AND per-backend so no combination ever
-   --  clobbers another (a release build used to overwrite the debug
-   --  .o/.ali/libaht.a in a shared dir, forcing a full rebuild on the
-   --  next debug run; backend switches would do the same). Consumers
-   --  reach the library through this project, so the suffixed
-   --  Library_Dir resolves automatically.
-   --  The OS is part of the variant, but only when it is not the
-   --  default, so existing POSIX paths keep their names and the test
-   --  harness -- which derives its own from BUILD_MODE and
-   --  AHT_TLS_BACKEND -- is unaffected.
-   --
-   --  It has to be in there somehow. AHT_OS changes which body
-   --  compiles, so a native and a cross build produce artifacts that
-   --  are not interchangeable, and sharing one object directory means
-   --  each silently overwrites the other. The earlier justification
-   --  for leaving it out -- that such builds cannot share a machine
-   --  anyway -- was simply wrong: a mingw toolchain alongside the
-   --  native one is exactly how the Windows body was verified, on
-   --  this machine, before it was committed.
+   --  One object and library directory per mode, backend and target,
+   --  so builds of different combinations coexist. The OS is in the
+   --  variant only when it is not the default, so POSIX paths keep
+   --  their names and the test harness derives its own from
+   --  BUILD_MODE and AHT_TLS_BACKEND alone.
    Variant := Build_Mode & "-" & TLS_Backend;
    case OS is
       when "posix" =>
@@ -182,24 +115,12 @@ library project Aht is
    for Object_Dir  use "obj/" & Variant;
    for Library_Dir use "lib/" & Variant;
 
-   --  Absolute paths: gprbuild runs the compilers from the object dir, so
-   --  a project-relative path would not resolve. Aht'Project_Dir is the
-   --  absolute project directory and ends with a directory separator.
-   --
-   --  One tree per target, because mbedTLS builds in-tree and its
-   --  configuration differs between them (threading is on for posix,
-   --  absent for windows). Keyed on the triplet for the same reason
-   --  Variant is; posix keeps the unsuffixed path so existing
-   --  checkouts are undisturbed. scripts/fetch_mbedtls.sh composes
-   --  this same name from AHT_OS and AHT_CROSS_TARGET, with the same
-   --  defaults; they have to agree, or the build compiles against one
-   --  tree's headers and links another tree's archives.
-   --
-   --  The version here and VERSION in that script are one fact stated
-   --  twice, and nothing in the build makes them agree. What catches a
-   --  disagreement is test_tls_version, which asserts the linked
-   --  library's own version string: point this at a tree the script no
-   --  longer builds and that test reports the version it actually got.
+   --  Absolute paths: gprbuild runs the compilers from the object dir.
+   --  One tree per target, keyed on the triplet like Variant;
+   --  scripts/fetch_mbedtls.sh composes the same name with the same
+   --  defaults. The version here and VERSION in that script are one
+   --  fact stated twice; test_tls_version, which asserts the linked
+   --  library's version string, catches a disagreement.
    Mbedtls_Tree := "third_party/mbedtls-3.6.7";
    case OS is
       when "posix" =>
@@ -228,22 +149,11 @@ library project Aht is
 
       case TLS_Backend is
          when "mbedtls" =>
-            --  The C glue (csrc/mbedtls/aht_mbedtls_glue.c) needs the
-            --  mbedTLS headers, and it must agree with the archive
-            --  about the configuration macros — MBEDTLS_THREADING_C
-            --  adds a mutex member to several context structs, so a
-            --  glue translation unit that disagrees computes a
-            --  different sizeof, under-allocates in *_new, and
-            --  mbedtls_*_init then writes past the block (heap
-            --  corruption).
-            --
-            --  Which is why there are no mbedTLS -D flags here. Those
-            --  macros live in the tree's own include/mbedtls/config.h,
-            --  edited by scripts/fetch_mbedtls.sh before it builds;
-            --  this -I points at that same header, so the glue and the
-            --  archive read identical bytes and cannot drift.
-            --  Restating them here would reintroduce exactly the
-            --  two-places problem the header edit removes.
+            --  No mbedTLS -D flags: the macros live in the tree's own
+            --  mbedtls_config.h, edited by scripts/fetch_mbedtls.sh,
+            --  and this -I points at it so the glue and the archive
+            --  agree on MBEDTLS_THREADING_C and the struct sizes it
+            --  changes.
             for Default_Switches ("C") use
               ("-O2", "-I" & Mbedtls_Inc_Dir) & Win32_Defines;
          when "openssl" =>
@@ -262,12 +172,10 @@ library project Aht is
    end Binder;
 
    package Linker is
-      --  The backend libraries themselves are pulled in by `pragma
-      --  Linker_Options` in the backend's root binding package
-      --  (aht-mbedtls.ads / aht-openssl.ads), so they only join the
-      --  link when a binary's closure actually uses TLS. Keeping the
-      --  search path here lets link-time errors surface at the project
-      --  level rather than from inside the binding unit.
+      --  The backend libraries are pulled in by `pragma Linker_Options`
+      --  in the backend's root binding package, so they join the link
+      --  only when a closure uses TLS; the search path stays here so
+      --  link errors surface at the project level.
       case TLS_Backend is
          when "mbedtls" =>
             for Linker_Options use ("-L" & Mbedtls_Lib_Dir);

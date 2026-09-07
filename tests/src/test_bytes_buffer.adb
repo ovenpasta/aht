@@ -79,7 +79,7 @@ begin
 
    --  Self-assignment must preserve contents. Index by a runtime value
    --  (Argument_Count is 0 here, so I = J = 1) so GNAT cannot prove the
-   --  two sides denote the same object and elide the assignment — this
+   --  two sides denote the same object and elide the assignment; this
    --  exercises the real Finalize-then-Adjust path on one object.
    declare
       Arr : array (1 .. 1) of Buffer;
@@ -145,7 +145,7 @@ begin
    --  Bounds: a read past the logical length must fail, not read a stale
    --  capacity byte. The Pre fires in debug (Assertion_Error); the body
    --  check fires in release (Constraint_Error, where -gnata is off and
-   --  the Pre is compiled out) — accept either. Reserve grows capacity
+   --  the Pre is compiled out); accept either. Reserve grows capacity
    --  beyond Len so slots Len+1 .. capacity physically exist, proving the
    --  guard checks length, not just the backing array's bounds.
    declare
@@ -179,8 +179,7 @@ begin
 
    --  Slice bounds: a NON-EMPTY span past Length must fail (Pre in debug,
    --  body check in release); an EMPTY span (High < Low) past Length reads
-   --  nothing, so it stays a harmless no-op returning empty (documented
-   --  behavior preserved).
+   --  nothing, so it is a harmless no-op returning empty.
    declare
       B : constant Buffer := To_Buffer ("abc");  --  Len = 3
    begin

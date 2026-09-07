@@ -4,10 +4,7 @@
 # AHT test-server dependencies.
 #
 # tests/server/server.py uses only the Python standard library
-# (http.server) for the plain HTTP fixture. tests/server/server_ws.py
-# needs the `websockets` library; pin a version known to support
-# the asyncio.serve() context-manager pattern this fixture uses.
-#
-# When wss:// support lands we'll keep this single requirements file
-# and add a Python-side TLS helper alongside the existing fixtures.
+# (http.server) for the plain HTTP fixture. The WebSocket fixtures
+# need the `websockets` library; the pin is the first version with
+# the asyncio.serve() context-manager pattern they use.
 websockets>=12.0

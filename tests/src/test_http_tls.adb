@@ -1,19 +1,21 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  HTTP client over https://. Exercises the scheme dispatch added in
---  split C2: AHT.HTTP.Client.Send now routes https:// through
---  AHT.Transport.TLS, threading Client_Type.CA_Path / .Insecure into
---  the handshake. The wire mechanics (header merge, body framing, 1xx
---  loop) are already covered by the plain-HTTP tests; this test's job
---  is to prove the TLS branch connects, verifies, and round-trips a
---  real response.
+--  HTTP client over https://: Send routes through AHT.Transport.TLS
+--  with Client_Type.CA_Path / CA_PEM / Insecure threaded into the
+--  handshake. Fixture: tests/server/server_tls.py on 127.0.0.1:8766
+--  with its self-signed cert. URLs name "localhost" so SNI matches the
+--  cert's DNS:localhost SAN; run from the repo root for the CA path.
 --
---  Talks to tests/server/server_tls.py on 127.0.0.1:8766, the same
---  fixture and self-signed cert that test_tls.adb uses. URLs name
---  "localhost" (not the IP) so SNI matches the cert's DNS:localhost
---  SAN under verification. Run from the repo root (run_tests.sh
---  chdir's there) so the relative CA path resolves.
+--  Cases:
+--    1. CA_Path set: the chain verifies and /hello round-trips.
+--    2. Insecure, no CA: the self-signed cert is accepted.
+--    3. Verify required, no CA: TLS_Error propagates through the client.
+--    4. CA_PEM set: the same anchor as PEM data on the client record.
+--    5. CA_Path and CA_PEM both set: refused by the request using them.
+--
+--  Does not cover:
+--    - header merge, body framing, the 1xx loop; the plain-HTTP tests do.
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -69,7 +71,7 @@ begin
       end;
    end;
 
-   --  Case 2: Insecure bypasses verification — no CA supplied, the
+   --  Case 2: Insecure bypasses verification: no CA supplied, the
    --  self-signed cert is accepted and /hello still round-trips.
    declare
       C    : AHT.HTTP.Client.Client_Type;
@@ -95,7 +97,7 @@ begin
 
    --  Case 3: verify required, no CA configured. The self-signed cert
    --  chains to no trusted root, so the handshake must be rejected with
-   --  TLS_Error propagated up through the client rather than connecting.
+   --  TLS_Error propagated up through the client.
    declare
       C    : AHT.HTTP.Client.Client_Type;
       Resp : AHT.HTTP.Response.Response_Type;
@@ -113,12 +115,9 @@ begin
    end;
 
 
-   --  Case 4: the same anchor as PEM data on the client record.
-   --
-   --  Client_Type.CA_PEM is one forwarding line into the TLS connect,
-   --  and a broken one would leave every other test in this suite
-   --  green -- CA_Path would still work and nothing else reads the
-   --  field. This is the only thing that would notice.
+   --  Case 4: the same anchor as PEM data on the client record. CA_PEM
+   --  is one forwarding line into the TLS connect and nothing else
+   --  reads the field; only this case notices a break in it.
    declare
       C    : AHT.HTTP.Client.Client_Type;
       Resp : AHT.HTTP.Response.Response_Type;
@@ -167,9 +166,8 @@ begin
          end;
 
          --  Case 5: both fields set on the record. Refused when the
-         --  HTTPS request consumes them -- they are persistent
-         --  configuration, so the error belongs to the request that
-         --  uses them, not to setting them.
+         --  HTTPS request consumes them: they are persistent
+         --  configuration, so the error belongs to the request.
          C.CA_Path :=
            Ada.Strings.Unbounded.To_Unbounded_String (CA_File);
          begin

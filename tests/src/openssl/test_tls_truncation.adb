@@ -3,7 +3,7 @@
 
 --  Truncation policy, openssl backend: an abrupt TCP close without
 --  close_notify (tests/server/server_tls_abrupt.py, 127.0.0.1:8771)
---  must surface as TLS_Error, never as a clean EOF — AHT supports
+--  must surface as TLS_Error, never as a clean EOF: AHT supports
 --  EOF-framed HTTP bodies, so a silent truncation would be a data-
 --  integrity hole. The mbedtls source of this test asserts that
 --  backend's (documented) opposite behavior.

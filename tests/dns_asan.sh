@@ -2,23 +2,16 @@
 #  Copyright (C) 2026 Aldo Nicolas Bruno
 #  SPDX-License-Identifier: Apache-2.0
 # ASan/UBSan check for the reference-counted handoff in
-# csrc/dns/aht_dns.c.
+# csrc/dns/aht_dns.c. Drives the window where a worker finishes after
+# its caller has gone, 50 times in each ordering, so a double free or
+# a write into a freed job is reported; test_dns observes neither.
 #
-# Not part of run_tests.sh. It needs a sanitizer build of one
-# translation unit, which is a different toolchain configuration from
-# the library's, and wiring that into aht.gpr would add a build
-# dimension to Aht.Variant for a check that is worth running when the
-# shim changes rather than on every run.
+# Not part of run_tests.sh: it needs a sanitizer build of one
+# translation unit, a different toolchain configuration from the
+# library's.
 #
-# What it is for: test_dns proves the caller is bounded and that the
-# abandoned worker completes, but neither of those observes the free.
-# The interesting window is a worker finishing AFTER its caller has
-# gone, where the last reference down must be the one that frees, and
-# exactly once. This drives that window repeatedly under ASan, which
-# is what turns a double free or a write into a freed job from silent
-# corruption into a failure.
-#
-#   sh tests/dns_asan.sh
+# Usage: sh tests/dns_asan.sh   (CC overrides the compiler)
+# Exit status is the driver's: 0 on 100 clean handoffs.
 
 set -e
 

@@ -1,25 +1,17 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  AHT.Websocket.Budgets — the close handshake's budget arithmetic.
+--  AHT.Websocket.Budgets: the close handshake's budget arithmetic,
+--  self-contained. Neither expression's failure modes are reachable
+--  from a socket test without flaking (a fraction of a second on a
+--  small timeout; a sentinel that misbehaves later, in another unit),
+--  and as arithmetic they are exhaustively checkable here.
 --
---  Self-contained: no sockets, no client, no fixtures. That is the
---  point. Both of these expressions were wrong once, and neither
---  mistake was reachable from a socket test at a resolution that
---  would not be flaky — one was a fraction of a second on a small
---  timeout, the other a sentinel that only misbehaved later, at
---  conversion time, in a different unit. As arithmetic they are
---  exhaustively checkable, so they are checked here rather than
---  argued about.
---
---  What each table pins:
---
---    Remaining     — the sentinel survives; an exhausted budget
---                    returns zero rather than going negative; an
---                    overspent one is not credit.
---    Close_Frame   — the grace is for a budget of exactly zero and
---                    nothing else, so a positive budget cannot be
---                    topped back up after the latch has eaten it.
+--  Cases:
+--    - Remaining: the sentinel survives, an exhausted budget floors at
+--      zero, an overspent one is not credit
+--    - Close_Frame: the grace is for a budget of exactly zero, so a
+--      positive budget cannot be topped up after the latch ate it
 
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
@@ -69,8 +61,8 @@ begin
    Check ("remaining/zero-overspent", B.Remaining (0.0, 1.0), 0.0);
 
    --  Close_Frame_Budget: zero is the one budget that gets a grace,
-   --  because a zero deadline means "fail before parking" rather than
-   --  "try once".
+   --  because a zero deadline means "fail before parking", not "try
+   --  once".
    Check ("close-frame/zero-gets-grace",
           B.Close_Frame_Budget (0.0, 0.0), B.Close_Frame_Grace);
 

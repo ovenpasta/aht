@@ -1,14 +1,11 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  End-to-end exercise of the chunked-transfer decoder. The /chunked
---  route emits three deliberately uneven chunks ("AHT ", "rocks",
---  "!\n") with hex-length lines and a zero-size terminator; the
---  decoder in AHT.HTTP.IO has unit tests for the framing rules, but
---  this is the first time it runs against a real HTTP server rather
---  than a hand-built mock script. If reassembly is wrong (off-by-one
---  in chunk-size parsing, mishandled CRLFs between chunks) the body
---  string won't match.
+--  End-to-end exercise of the chunked-transfer decoder against the
+--  Python fixture. /chunked emits three uneven chunks ("AHT ",
+--  "rocks", "!\n") with hex-length lines and a zero-size terminator; a
+--  wrong reassembly (chunk-size off-by-one, mishandled CRLFs) fails the
+--  body comparison. AHT.HTTP.IO's unit tests cover the framing rules.
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -67,9 +64,9 @@ begin
 
    --  Large single-chunk body (>12 MB): the chunk-size line names a
    --  size far bigger than the thread stack, so the decoder must read
-   --  the chunk in bounded windows rather than into one Size-sized
-   --  array. The body is a 0..255 ramp, compared element-wise — never
-   --  materialised as a String, which would overflow the *test* stack.
+   --  the chunk in bounded windows. The body is a 0..255 ramp compared
+   --  element-wise, never materialised as a String, which would
+   --  overflow the test's own stack.
    declare
       C2    : AHT.HTTP.Client.Client_Type;
       Resp2 : AHT.HTTP.Response.Response_Type;

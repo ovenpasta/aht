@@ -8,14 +8,12 @@ on 127.0.0.1:8766. The cert/key are produced by
 scripts/generate_cert.sh (self-signed, SANs for localhost +
 127.0.0.1). Two Ada tests share this fixture:
 
-    tests/src/test_tls.adb      — transport level, speaks raw HTTP over
+    tests/src/test_tls.adb      - transport level, speaks raw HTTP over
                                   the TLS socket to exercise the
                                   handshake / verify / read / write path
-    tests/src/test_http_tls.adb — the HTTP client over https:// (lands
-                                  with split C2)
+    tests/src/test_http_tls.adb - the HTTP client over https://
 
-Prints `READY tls 127.0.0.1:8766` to stdout once listening so
-tests/run_tests.sh can wait for it instead of racing.
+Prints `READY tls 127.0.0.1:8766` once listening.
 """
 
 from __future__ import annotations
@@ -40,11 +38,9 @@ class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
     def shutdown_request(self, request):
-        # Send TLS close_notify before the TCP close. http.server's
-        # default teardown does a bare socket shutdown, which the AHT
-        # OpenSSL backend (correctly) treats as truncation; unwrap()
-        # runs the SSL shutdown handshake so clients see a clean EOF.
-        # Bounded and best-effort: the client may already be gone.
+        # unwrap() sends close_notify before the TCP close; the default
+        # bare shutdown reads as truncation on the OpenSSL backend.
+        # Bounded and best-effort, the client may already be gone.
         try:
             request.settimeout(2.0)
             request = request.unwrap()

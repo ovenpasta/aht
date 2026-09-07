@@ -1,37 +1,26 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Mid-session corruption under concurrency (backend-neutral).
+--  Mid-session corruption with one reader task and one writer task on
+--  one session, backend-neutral. Against
+--  tests/server/server_tls_concurrent.py (127.0.0.1:8776): a banner, a
+--  wait for writer traffic, an overlap marker, a record whose MAC cannot
+--  verify, then draining while holding the connection open.
 --
---  test_tls_corrupt proves a corrupted record fails closed on a single
---  task. This proves it does so in the production topology — one
---  reader task and one writer task on ONE session — which is the case
---  that crosses the engines' coordinator, and so the one where the two
---  backends could plausibly diverge.
+--  Cases:
+--    - the reader raises TLS_Error
+--    - the read stream contains the overlap marker, which the fixture
+--      emits only after receiving writer traffic
+--    - the writer does not hang and observes the poisoned session by a
+--      session-death exception; a timeout or Constraint_Error does not
+--      count
+--    - Is_Connected becomes False
+--    - operations started after poisoning fail
 --
---  Against tests/server/server_tls_concurrent.py (127.0.0.1:8776),
---  which sends a banner, waits for a payload from our WRITER, emits
---  an overlap marker, injects a record whose MAC cannot verify, and
---  then keeps draining (so backpressure never stalls the writer)
---  while holding the connection open:
---
---    * the reader must raise TLS_Error;
---    * the read stream must contain the overlap marker, which the
---      fixture emits only after receiving writer traffic — so the
---      concurrency is asserted rather than assumed from a sleep, and
---      a run where the writer never got going cannot pass;
---    * the writer must not hang, and must eventually observe the
---      poisoned session — by a session-death exception specifically,
---      since a timeout or a Constraint_Error would say nothing about
---      poisoning;
---    * Is_Connected must become False;
---    * operations STARTED after poisoning must fail.
---
---  Deliberately NOT required: that any particular write fails. A write
---  already in flight may linearize before the fatal latch and succeed;
---  demanding otherwise would make this test race-dependent. Every
---  operation and the task join are bounded, so a failure to notice the
---  poisoning shows up as a test failure, never as a hung suite.
+--  Does not cover:
+--    - that any particular write fails; one in flight may linearize
+--      before the fatal latch and succeed
+--  Every operation and the task join are bounded.
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -67,8 +56,7 @@ procedure Test_TLS_Concurrent_Corrupt is
    T : AHT.Transport.TLS.TLS_Transport;
 
    --  What became of the writer task. It runs concurrently with the
-   --  main task, so it reports through a protected object rather than
-   --  touching Failures.
+   --  main task, so it reports through a protected object.
    protected Writer_Result is
       procedure Note_Poisoned (Name, Message : String);
       procedure Note_Unexpected (Name, Message : String);
@@ -150,14 +138,14 @@ begin
          when E : AHT.Transport.Transport_Error
                 | AHT.Transport.TLS.TLS_Error =>
             --  Expected outcome: some write after the fatal latch is
-            --  refused. WHICH one is racy and deliberately unchecked.
+            --  refused. Which one is racy and is not checked.
             Writer_Result.Note_Poisoned
               (Ada.Exceptions.Exception_Name (E),
                Ada.Exceptions.Exception_Message (E));
          when E : others =>
-            --  Anything else — a timeout, an abort, Constraint_Error,
-            --  a fixture mishap — is NOT evidence that the session was
-            --  poisoned, and must not be allowed to satisfy the test.
+            --  Anything else (a timeout, an abort, Constraint_Error,
+            --  a fixture mishap) is not evidence that the session was
+            --  poisoned, and must not satisfy the test.
             Writer_Result.Note_Unexpected
               (Ada.Exceptions.Exception_Name (E),
                Ada.Exceptions.Exception_Message (E));
@@ -195,8 +183,8 @@ begin
       Fail ("reader never saw TLS_Error");
    end if;
 
-   --  Overlap is asserted, not assumed: the marker exists only
-   --  because the fixture received writer traffic before corrupting.
+   --  Overlap: the marker exists only because the fixture received
+   --  writer traffic before corrupting.
    if Ada.Strings.Fixed.Index (To_String (Received), Overlap_Marker) = 0
    then
       Fail ("marker " & Overlap_Marker & " absent from the read stream"
@@ -223,7 +211,7 @@ begin
       Fail ("Is_Connected True after a concurrent integrity failure");
    end if;
 
-   --  Operations STARTED after poisoning must fail — the in-flight
+   --  Operations STARTED after poisoning must fail; the in-flight
    --  allowance above does not extend to fresh calls.
    begin
       T.Write (AHT.Bytes.From_String ("must not reach the wire"));

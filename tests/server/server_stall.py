@@ -3,27 +3,16 @@
 #  SPDX-License-Identifier: Apache-2.0
 """AHT stall fixture for the handshake- and upgrade-timeout tests.
 
-Listens on 127.0.0.1:8767 and accepts TCP connections but never speaks
-a single byte — no TLS ServerHello, no HTTP response, nothing. Which
-wait that stalls depends on how the client dials it, and both are used:
+Listens on 127.0.0.1:8767, accepts TCP connections and never sends a
+byte. Over TLS (`https://`, `wss://`) the client blocks after its
+ClientHello, so `Handshake_Deadline` must raise `Timeout_Error`; this
+is the only fixture that exercises that path. In the clear (`ws://`)
+the connect succeeds and the HTTP upgrade hangs, which
+test_ws_connect_bounds uses for `Upgrade_Deadline`. Accepted sockets
+are parked open and unread, so the peer sees silence and not a reset
+(a reset would surface as Transport_Error).
 
-  * Over TLS (`https://`, `wss://`) a client that has sent its
-    ClientHello blocks waiting for the server's response, so a bounded
-    `Handshake_Deadline` must trip `Timeout_Error` instead of hanging
-    forever. This is the only way to exercise the handshake-deadline
-    path: the real HTTPS fixture (server_tls.py) completes its
-    handshake in milliseconds, so it can never time out.
-  * In the clear (`ws://`) there is no handshake to stall, so the
-    connect succeeds and the HTTP upgrade is what hangs — which is
-    what test_ws_connect_bounds needs for `Upgrade_Deadline`.
-
-Accepted sockets are parked (kept open, never read, never closed) so
-the peer sees a live but silent connection rather than a reset — a
-reset would surface as Transport_Error, not the Timeout_Error we want
-to assert.
-
-Prints `READY stall 127.0.0.1:8767` to stdout once listening so
-tests/run_tests.sh can wait for it instead of racing.
+Prints `READY stall 127.0.0.1:8767` once listening.
 """
 
 from __future__ import annotations
@@ -47,9 +36,8 @@ def main() -> int:
     try:
         while True:
             conn, _ = srv.accept()
-            # Deliberately do nothing: never recv, never send, never
-            # close. Holding the reference keeps the connection alive
-            # and silent for the client's handshake read to block on.
+            # Never recv, send or close; the held reference keeps the
+            # connection alive and silent.
             parked.append(conn)
     except KeyboardInterrupt:
         pass

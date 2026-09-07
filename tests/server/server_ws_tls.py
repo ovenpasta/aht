@@ -3,18 +3,12 @@
 #  SPDX-License-Identifier: Apache-2.0
 """AHT secure-WebSocket test fixture.
 
-TLS-wraps the same echo endpoint as server_ws.py and listens on
-wss://127.0.0.1:8768/. The `websockets` library handles the RFC 6455
-handshake and frame layer; passing an `ssl.SSLContext` makes it run
-the WS protocol over a TLS connection, so the Ada client exercises
-the full wss:// path (TLS handshake → upgrade → masked frame I/O →
-close handshake) against a faithful peer.
+The echo endpoint of server_ws.py over TLS, on wss://127.0.0.1:8768/,
+so the Ada client exercises the full wss:// path (TLS handshake,
+upgrade, masked frame I/O, close handshake) against an independent
+peer. Uses the self-signed cert/key from scripts/generate_cert.sh.
 
-Reuses the self-signed cert/key from scripts/generate_cert.sh (SANs
-for localhost + 127.0.0.1), same as server_tls.py.
-
-Prints `READY wss 127.0.0.1:8768` to stdout once listening so
-tests/run_tests.sh can sync on that line instead of racing.
+Prints `READY wss 127.0.0.1:8768` once listening.
 """
 
 from __future__ import annotations
@@ -43,12 +37,9 @@ async def echo(websocket):
 def select_subprotocol(connection, subprotocols):
     """Negotiate "chat" when the client offers it, else no subprotocol.
 
-    The asyncio server's *default* selector rejects a client that offers
-    no subprotocol with HTTP 400 once the server advertises any (it
-    raises NegotiationError). test_ws_tls connects without offering one,
-    so the default would break it. This tolerant selector picks "chat"
-    when offered (for the ex_08 example) and otherwise continues without
-    a subprotocol — never aborting the handshake.
+    The library's default selector answers HTTP 400 to a client that
+    offers none once the server advertises any; test_ws_tls offers
+    none, ex_08 offers "chat".
     """
     del connection  # unused; signature is (connection, subprotocols)
     if "chat" in subprotocols:
@@ -69,15 +60,14 @@ async def main() -> int:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(certfile=CERT, keyfile=KEY)
 
-    # Negotiate a subprotocol so the Ada client's negotiation path (and
-    # the ex_08 example) has something to select, while staying tolerant
-    # of clients that offer none (see select_subprotocol above).
+    # Advertise a subprotocol so the client's negotiation path has
+    # something to select; select_subprotocol tolerates clients that
+    # offer none.
     async with websockets.serve(
         echo, HOST, PORT, ssl=ctx, select_subprotocol=select_subprotocol
     ):
         print(f"READY wss {HOST}:{PORT}", flush=True)
-        # Sleep forever — the orchestrator signals shutdown by
-        # killing us, which raises CancelledError out of this wait.
+        # Sleep until the runner kills the process.
         await asyncio.Future()
     return 0
 

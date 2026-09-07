@@ -3,10 +3,9 @@
 #  SPDX-License-Identifier: Apache-2.0
 """Abrupt-close TLS fixture for the truncation-policy test.
 
-Listens on 127.0.0.1:8771. For every connection: TLS handshake, send a
-short banner, then close the TCP socket WITHOUT the SSL shutdown
-handshake — no close_notify ever goes out (the fd is detached and
-closed raw, so the ssl module cannot add one). Clients see exactly
+Listens on 127.0.0.1:8771. Per connection: TLS handshake, a short
+banner, then the TCP socket is closed without the SSL shutdown. The fd
+is detached and closed raw, so no close_notify goes out. Clients see
 what a truncation attack looks like:
 
     OpenSSL backend  -> TLS_Error (strict-EOF policy)
@@ -53,8 +52,8 @@ def main() -> int:
         try:
             tls = ctx.wrap_socket(conn, server_side=True)
             tls.sendall(BANNER)
-            # Abrupt close: detach the fd from the SSL object and close
-            # it raw — nothing can send a close_notify on the way out.
+            # Detach the fd from the SSL object and close it raw, so no
+            # close_notify goes out.
             os.close(tls.detach())
         except (OSError, ssl.SSLError):
             try:

@@ -1,21 +1,22 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Coordinator + TLS 1.3 KeyUpdate coverage, openssl backend.
+--  Coordinator and TLS 1.3 KeyUpdate coverage, openssl backend. Half A
+--  runs the shared white-box coordinator cases (TLS_Sync_Cases). Halves
+--  B and C drive `openssl s_server` and send 'K' (KeyUpdate with
+--  request) on its stdin while exchanging data, so the engine processes
+--  KeyUpdate inside Read and answers on the following Write.
 --
---  A. The shared white-box coordinator cases (TLS_Sync_Cases, run by
---     both backends' copies of this main).
+--  Cases:
+--    A. TLS_Sync_Cases, run by both backends' copies of this main
+--    B. sequential rounds: read across a KeyUpdate, write back rekeyed
+--    C. the same session with a writer task concurrent with the reads
 --
---  B. End-to-end KeyUpdate: drives `openssl s_server` and triggers
---     'K' (key update with request) from its stdin while exchanging
---     data, so the engine processes KeyUpdate records inside Read and
---     generates its own update on the following Write.
---
---  Half B needs an OpenSSL 3 CLI at ${AHT_OPENSSL_DIR:-/usr}/bin/
---  openssl — a bare `openssl` on PATH is NOT trusted (LibreSSL ships
---  under that name); without it half B SKIPs with a notice (CI
---  installs the CLI, so it always runs there). The mbedtls source of
---  this test main is a plain SKIP (TLS 1.2 has no KeyUpdate).
+--  Does not cover:
+--    - B and C without an OpenSSL 3 CLI at
+--      ${AHT_OPENSSL_DIR:-/usr}/bin/openssl: they SKIP with a notice. A
+--      bare `openssl` on PATH is not trusted (LibreSSL). CI has the CLI.
+--    - the mbedtls source of this main, which SKIPs B and C
 
 with Ada.Command_Line;
 with Ada.Directories;
@@ -72,9 +73,7 @@ procedure Test_TLS_Keyupdate is
       function Failed return Boolean is (Has);
    end Sender_Status;
 
-   ------------------------------------------------------------------
-   --  Half B — s_server KeyUpdate end-to-end
-   ------------------------------------------------------------------
+   --  Half B: s_server KeyUpdate end-to-end
 
    function Openssl_Bin return String is
       Dir : constant String :=
@@ -146,7 +145,7 @@ procedure Test_TLS_Keyupdate is
       Cleanup_Args;
 
       --  Connect with retry: s_server needs a moment to listen (a
-      --  failed Connect leaves the transport retryable by design).
+      --  failed Connect leaves the transport retryable).
       declare
          Connected : Boolean := False;
       begin
@@ -186,7 +185,7 @@ procedure Test_TLS_Keyupdate is
             Acc   : Unbounded_String;
          begin
             Send (Fd, Token);
-            --  Read across the KeyUpdate until the token arrives —
+            --  Read across the KeyUpdate until the token arrives;
             --  the rekey itself must be invisible here.
             loop
                T.Read (Buf, Last);
@@ -210,31 +209,25 @@ procedure Test_TLS_Keyupdate is
          end;
       end loop;
 
-      --  Half C: the SAME session, now with a writer task running
-      --  CONCURRENTLY with the main task's reads while the server
-      --  rekeys. This is the path the engine documentation calls out —
-      --  a writer that needs input (SSL_write -> WANT_READ across a
-      --  post-handshake message) while the reader owns the feeder
-      --  claim, so it must park on the coordinator latch and be woken
-      --  by the reader's feed. Sequential rounds above cannot reach it.
-      --  Re-arm both budgets: Set_*_Deadline measures from the CALL
-      --  (a compound budget), so half B's rounds have already eaten
-      --  the 15 s read allowance. The write deadline matters just as
-      --  much here: a writer that hits WANT_READ parks until input
-      --  arrives, and with no deadline that wait is unbounded by
-      --  design — if the reader stops (a failed round), an unbounded
-      --  writer would hang the test rather than fail it.
+      --  Half C: the same session, a writer task concurrent with the
+      --  main task's reads while the server rekeys. A writer needing
+      --  input (SSL_write -> WANT_READ across a post-handshake message)
+      --  while the reader owns the feeder claim must park on the
+      --  coordinator latch and be woken by the reader's feed; sequential
+      --  rounds cannot reach it. Both deadlines are re-armed: they
+      --  measure from the call, half B ate the 15 s read allowance, and
+      --  a writer at WANT_READ with no deadline would hang, not fail.
       T.Set_Read_Deadline (20.0);
       T.Set_Write_Deadline (20.0);
 
       declare
          Rounds  : constant := 6;
-         --  Small, paced writes on purpose: s_server echoes everything
-         --  the client sends to ITS stdout, which is a pipe nobody
-         --  drains here, so a flood would stall the server (and time
-         --  our writer out) long before it proved anything. What this
-         --  phase needs is overlap — a writer inside Write while the
-         --  reader is parked — not throughput.
+         --  Small, paced writes: s_server echoes everything the
+         --  client sends to ITS stdout, which is a pipe nobody drains
+         --  here, so a flood would stall the server (and time our
+         --  writer out) long before it proved anything. What this
+         --  phase needs is overlap (a writer inside Write while the
+         --  reader is parked), not throughput.
          Chunk   : constant AHT.Bytes.Byte_Array (1 .. 64) :=
            [others => 16#5A#];
          Done    : Boolean := False with Volatile;

@@ -1,26 +1,14 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Example 8 — a secure socket (wss://) with subprotocol negotiation.
---
---  Two things layered on the basic socket of ex_06:
---    * wss:// — the WebSocket runs over TLS. Here we pass Insecure =>
---      True so the bundled self-signed fixture cert is accepted without a
---      CA; in production you would instead set CA_Path to your trust
---      anchor and leave Insecure False (the secure default).
---    * subprotocols — at handshake time the client offers a list of
---      application protocols in Sec-WebSocket-Protocol; the server picks
---      at most one. Selected_Subprotocol reports the server's choice
---      ("" if it declined). The fixture is configured to offer "chat",
---      so offering "chat" here gets it echoed back as the selection.
---
---  Using the offer/header form of Connect means supplying Extra_Headers;
---  an empty Headers.Map is fine (the client fills in the required
---  handshake headers itself).
+--  Example 8: wss:// with subprotocol negotiation against the TLS
+--  echo fixture on :8768. Insecure => True accepts the self-signed
+--  fixture cert (production sets CA_Path instead). Connect's offer
+--  form takes a subprotocol list and Extra_Headers (an empty map is
+--  fine); Selected_Subprotocol reports the server's pick, "" if none.
 --
 --  Run:  ./examples/bin/<mode>/ex_08_wss_subprotocol [URL]
---  URL defaults to the bundled wss echo fixture on :8768. Needs the
---  cert from scripts/generate_cert.sh (run_examples.sh generates it).
+--  Needs the cert from scripts/generate_cert.sh.
 
 with Ada.Command_Line; use Ada.Command_Line;
 with Ada.Exceptions;
@@ -68,7 +56,7 @@ exception
                 & "try: bash examples/run_examples.sh)");
       --  Tear down the receiver task if the socket opened before the
       --  failure (Timeout 0.0 = abort now); otherwise scope exit blocks
-      --  on the still-running receiver. See ex_06 for the full rationale.
+      --  on the still-running receiver.
       if AHT.Websocket.Client.Is_Open (C) then
          begin
             AHT.Websocket.Client.Close (C, Timeout => 0.0);

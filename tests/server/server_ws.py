@@ -3,14 +3,11 @@
 #  SPDX-License-Identifier: Apache-2.0
 """AHT WebSocket test fixture.
 
-Serves a single echo endpoint at ws://127.0.0.1:8765/ using the
-`websockets` library. The library handles the RFC 6455 handshake
-and frame layer on the server side, so the Ada client gets a
-faithful peer to talk to without us having to hand-roll a WS
-implementation in Python too.
+Serves one echo endpoint at ws://127.0.0.1:8765/ using the
+`websockets` library, so the Ada client talks to an independent RFC
+6455 peer.
 
-Prints `READY ws 127.0.0.1:8765\\n` to stdout once it's listening
-so tests/run_tests.sh can sync on that line.
+Prints `READY ws 127.0.0.1:8765` once listening.
 """
 
 from __future__ import annotations
@@ -25,26 +22,21 @@ PORT = 8765
 
 
 async def echo(websocket):
-    """Echo every received message back to the sender, verbatim.
+    """Echo every received message back verbatim, text or binary.
 
-    Works for both text and binary because `websockets` preserves
-    the message kind across the round trip. Connection terminates
-    naturally when the client sends a close frame or drops the
-    transport — `async for` exits, the handler returns, and the
-    library completes the close handshake.
+    When the client closes or drops the transport the loop exits and
+    the library completes the close handshake.
     """
     async for message in websocket:
         await websocket.send(message)
 
 
 async def main() -> int:
-    # Raise the inbound frame cap well above the default 1 MiB so the
-    # §9 large-send regression (test_ws_echo case 9) can bounce a >12 MB
-    # message off this fixture; the default would reject it with 1009.
+    # Inbound frame cap above the default 1 MiB, so test_ws_echo case 9
+    # can bounce a >12 MB message; the default would answer 1009.
     async with websockets.serve(echo, HOST, PORT, max_size=32 * 1024 * 1024):
         print(f"READY ws {HOST}:{PORT}", flush=True)
-        # Sleep forever — the orchestrator signals shutdown by
-        # killing us, which raises CancelledError out of this wait.
+        # Sleep until the runner kills the process.
         await asyncio.Future()
     return 0
 

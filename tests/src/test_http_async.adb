@@ -1,32 +1,25 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Exercises AHT.HTTP.Client.Send_Async / Await / Cancel.
+--  Exercises AHT.HTTP.Client.Send_Async / Await / Cancel against the
+--  Python fixture's /hello route and two in-process servers.
 --
---  Eight cases:
---    1. Happy path — Send_Async to /hello, Await returns 200 with
---       body "hello, world\n" and Is_Done flips to true.
---    2. Concurrent requests — two handles, two Send_Asyncs to
---       /hello, both Await complete with 200 and matching bodies.
---    3. Cancel before Await — silent in-process server holds the
---       connection; sibling task fires Cancel; Await re-raises
---       Aborted_Error with original identity preserved.
---    4. Double Send_Async raises — calling Send_Async on a handle
---       that's already started raises HTTP_Error.
---    5. Drop without Await — handle is declared inside an inner
---       block and Send_Async'd against /hello; the block ends
---       without Awaiting, and the enclosing master waits for the
---       worker (which is short). Test asserts the wait was bounded.
---    6. Exception identity round-trip — Send_Async against a
---       wss:// URL (rejected by Send) propagates the original
---       HTTP_Error out of Await, not a generic wrapper.
---    7. Await before Send_Async — calling Await on a fresh handle
---       must raise HTTP_Error, not deadlock on the worker's Start
---       rendezvous.
---    8. Double Await returns the same result — a second Await on
---       a Done handle returns the same response without blocking
---       (the worker stashed the result in the protected state and
---       has already terminated, so this only re-reads).
+--  Cases:
+--    1. Send_Async to /hello; Await returns 200, body "hello, world\n",
+--       Is_Done true.
+--    2. Two handles, two Send_Asyncs to /hello; both Await 200 with
+--       matching bodies.
+--    3. Cancel before Await against a silent server; Await re-raises
+--       Aborted_Error with the original identity.
+--    4. Send_Async on an already-started handle raises HTTP_Error.
+--    5. Drop without Await: handle in an inner block; the master's wait
+--       for the worker is bounded.
+--    6. Send_Async against a wss:// URL; Await re-raises the original
+--       HTTP_Error, not a wrapper.
+--    7. Await on a fresh handle raises HTTP_Error instead of parking on
+--       the worker's Start rendezvous.
+--    8. Second Await on a Done handle returns the same result without
+--       blocking.
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;
@@ -338,7 +331,7 @@ begin
       AHT.HTTP.Client.Await (H, Resp);
    end;
 
-   --  Case 5: drop without Await — declare handle in inner block,
+   --  Case 5: drop without Await. Declare handle in inner block,
    --  Send_Async, exit. Master waits for worker; total elapsed
    --  must be bounded (the /hello fetch is fast).
    declare
@@ -353,8 +346,8 @@ begin
          Req.Method := AHT.HTTP.Methods.GET;
          Req.Target := AHT.URL.Parse ("http://127.0.0.1:8764/hello");
          AHT.HTTP.Client.Send_Async (C, Req, H);
-      end;  -- master waits for the worker to finish Run_Request +
-            -- collapse via terminate alternative
+      end;  --  master waits for the worker to finish Run_Request +
+            --  collapse via terminate alternative
       Ended := Clock;
 
       if Ended - Started > 2.0 then
@@ -365,7 +358,7 @@ begin
    end;
 
    --  Case 6: original exception identity is preserved. wss://
-   --  goes through Send → HTTP_Error; Await must re-raise that
+   --  goes through Send, which raises HTTP_Error; Await must re-raise that
    --  exact exception, not a wrapped substitute.
    declare
       C    : AHT.HTTP.Client.Client_Type;
@@ -394,9 +387,8 @@ begin
    end;
 
    --  Case 7: Await on a never-Send_Async'd handle must raise
-   --  HTTP_Error promptly (not deadlock on the worker's Start
-   --  rendezvous, which is what would happen without the guard
-   --  in Await).
+   --  HTTP_Error promptly. Without the guard in Await the call parks
+   --  on the worker's Start rendezvous.
    declare
       H        : AHT.HTTP.Client.Async_Handle;
       Resp     : AHT.HTTP.Response.Response_Type;
@@ -422,10 +414,9 @@ begin
       end if;
    end;
 
-   --  Case 8: a second Await on a Done handle returns the same
-   --  result without blocking. The worker has already terminated
-   --  after stashing the result in the protected state, so this
-   --  is purely a Read_Result call.
+   --  Case 8: a second Await on a Done handle returns the same result
+   --  without blocking. The worker stashed the result in the protected
+   --  state and has terminated, so this is a Read_Result call.
    declare
       C    : AHT.HTTP.Client.Client_Type;
       Req  : AHT.HTTP.Request.Request_Type;

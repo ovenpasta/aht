@@ -1,27 +1,14 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Example 9 — the same one-line GET, but over TLS (https://).
---
---  Nothing about the request changes from ex_01: Client.Get parses the
---  URL, sees the https:// scheme, and runs the round trip over an
---  AHT.Transport.TLS connection instead of plain TCP. The only
---  difference is trust configuration, and unlike the WebSocket client
---  (where it is a Connect parameter, see ex_08) the HTTP client carries
---  it as two fields on the Client_Type:
---    * Insecure => True accepts any certificate without verification.
---      We use it here because the bundled fixture serves a self-signed
---      cert with no CA to chain to. It is the WRONG default for real
---      traffic -- it disables the protection TLS exists to provide.
---    * In production leave Insecure False (the secure default) and set
---      CA_Path to your trust anchor instead, e.g.
---         Client.CA_Path := To_Unbounded_String ("/etc/ssl/certs/ca.pem");
---      Then the handshake verifies the peer cert against that CA.
+--  Example 9: the one-line GET of ex_01 over https:// against the TLS
+--  fixture on :8766. Client.Get sees the scheme and runs the round
+--  trip over AHT.Transport.TLS. Trust is two Client_Type fields:
+--  Insecure => True accepts any certificate (the fixture's is
+--  self-signed); production leaves it False and sets CA_Path instead.
 --
 --  Run:  ./examples/bin/<mode>/ex_09_https [URL]
---  Default URL is the bundled TLS fixture's /hello route on :8766; pass
---  any https:// URL to retarget. A public https:// host whose cert
---  chains to a system CA works with Insecure left False.
+--  A public https:// host works with Insecure left False.
 
 with Ada.Command_Line; use Ada.Command_Line;
 with Ada.Exceptions;
@@ -42,8 +29,8 @@ procedure Ex_09_HTTPS is
 begin
    Put_Line ("GET " & URL & " (TLS, accepting self-signed cert)");
 
-   --  Trust the fixture's self-signed cert. See the header comment: in
-   --  production set Client.CA_Path instead and leave this False.
+   --  Trust the fixture's self-signed cert; production sets CA_Path
+   --  and leaves this False.
    Client.Insecure := True;
 
    Resp := AHT.HTTP.Client.Get (Client, URL);

@@ -29,18 +29,12 @@ procedure Test_HTTP_Client is
       Failures := Failures + 1;
    end Fail;
 
-   --  In-process HTTP/1.1 server. One connection per task instance.
-   --  The test configures the canned response and optional fixed
-   --  Content-Length of the request body to drain; the task surfaces
-   --  the full captured request (head + body) so tests can inspect
-   --  what AHT actually put on the wire.
-   --
-   --  Set_Response is a separate entry so callers can build the
-   --  response string (which may include the bound port) before the
-   --  socket is bound. The task accepts Set_Response first, then
-   --  binds, then yields the port via Get_Port — that way callers
-   --  pass a fully-formed response that may reference no per-request
-   --  state.
+   --  In-process HTTP/1.1 server, one connection per task instance.
+   --  The test sets the canned response and an optional Content-Length
+   --  to drain; the task surfaces the captured request (head + body).
+   --  Set_Response is accepted before the socket is bound so the
+   --  response string can be built without per-request state; the port
+   --  is then yielded via Get_Port.
    task type HTTP_Server is
       entry Set_Response
         (R                   : String;
@@ -128,13 +122,11 @@ procedure Test_HTTP_Client is
                begin
                   Accept_Socket (Server, Client, Peer);
 
-                  --  Read until we have the full request: head ends
-                  --  at the first CRLFCRLF, then exactly Body_Drain
-                  --  more bytes for the body. The body may arrive in
-                  --  the same TCP segment as the headers, so we
-                  --  track total length against (separator + 3 +
-                  --  Body_Drain) rather than reading head and body
-                  --  in separate phases.
+                  --  Read until the full request is in: head ends at
+                  --  the first CRLFCRLF, then exactly Body_Drain more
+                  --  bytes. The body may share a TCP segment with the
+                  --  headers, so track total length against
+                  --  (separator + 3 + Body_Drain).
                   declare
                      Buf     : Stream_Element_Array (1 .. 4_096);
                      Last    : Stream_Element_Offset;
@@ -200,12 +192,11 @@ procedure Test_HTTP_Client is
          end;
       end if;
 
-      --  If the test bails out before calling Wait_Done (e.g. when
-      --  Get_Port reported a setup error and the case skipped the
-      --  client path), the parent declare block would otherwise wait
-      --  forever for this rendezvous and hang the binary. The
-      --  terminate alternative lets the task collapse cleanly once
-      --  the master is waiting for it.
+      --  If the test bails out before Wait_Done (Get_Port reported a
+      --  setup error and the case skipped the client path), the parent
+      --  declare block would wait forever for this rendezvous. The
+      --  terminate alternative lets the task collapse once the master
+      --  is waiting for it.
       select
          accept Wait_Done
            (Captured : out Unbounded_String;
@@ -234,7 +225,7 @@ procedure Test_HTTP_Client is
 
 begin
 
-   --  Case 1: GET — default headers (Host, User-Agent, Connection:
+   --  Case 1: GET. Default headers (Host, User-Agent, Connection:
    --  close) are auto-added; response body comes back intact.
    declare
       Server   : HTTP_Server;
@@ -302,7 +293,7 @@ begin
       end if;
    end;
 
-   --  Case 2: POST with body — Content-Length auto-injected,
+   --  Case 2: POST with body. Content-Length auto-injected,
    --  body bytes forwarded to the server, response body returned.
    declare
       Server   : HTTP_Server;
@@ -370,7 +361,7 @@ begin
       end if;
    end;
 
-   --  Case 3: HEAD — the peer advertises Content-Length but sends no
+   --  Case 3: HEAD. The peer advertises Content-Length but sends no
    --  body. Client.Send with Method = HEAD must not block reading
    --  the announced body bytes.
    declare
@@ -383,7 +374,7 @@ begin
       Resp     : AHT.HTTP.Response.Response_Type;
       Started  : constant Ada.Calendar.Time := Ada.Calendar.Clock;
    begin
-      C.Timeout_Seconds := 2;  -- safety: if we ever did block, fail fast
+      C.Timeout_Seconds := 2;  --  safety: if we ever did block, fail fast
       Server.Set_Response
         ("HTTP/1.1 200 OK" & ASCII.CR & ASCII.LF
          & "Content-Length: 9999" & ASCII.CR & ASCII.LF
@@ -425,7 +416,7 @@ begin
       end if;
    end;
 
-   --  Case 4: interim 1xx — server sends 100 Continue then 200.
+   --  Case 4: interim 1xx. Server sends 100 Continue then 200.
    --  Client must loop past the 1xx and return the 200.
    declare
       Server   : HTTP_Server;
@@ -516,7 +507,7 @@ begin
       end if;
    end;
 
-   --  Case 6: header precedence — Default_Headers["user-agent"]
+   --  Case 6: header precedence. Default_Headers["user-agent"]
    --  overrides Self.User_Agent, and an explicit Connection on the
    --  request beats the auto Connection: close default.
    declare

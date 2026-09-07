@@ -4,24 +4,23 @@
 """AHT plain-HTTP test fixture.
 
 Serves a handful of HTTP/1.1 routes on 127.0.0.1:8764 that the Ada
-integration tests in tests/src/test_http_*.adb hit. Routes mirror the
-plan in docs/plan.md:
+integration tests in tests/src/test_http_*.adb hit:
 
-    GET  /hello      → 200 text/plain "hello, world\\n"
-    GET  /slow       → 200 text/plain, but only after SLOW_DELAY seconds
-    GET  /chunked    → 200 with Transfer-Encoding: chunked, three frames
-    GET  /json       → 200 application/json
-    GET  /redirect   → 302 Location: /hello
-    GET  /protected  → 401 without Authorization header,
-                       200 echoing the header value otherwise
-    POST /echo       → 200 echoing the request body and Content-Type
+    GET  /hello      -> 200 text/plain "hello, world\\n"
+    GET  /slow       -> 200 text/plain, but only after SLOW_DELAY seconds
+    GET  /chunked    -> 200 with Transfer-Encoding: chunked, three frames
+    GET  /chunked-big
+                     -> 200 chunked, one >12 MB chunk
+    GET  /json       -> 200 application/json
+    GET  /redirect   -> 302 Location: /hello
+    GET  /protected  -> 401 without Authorization header,
+                        200 echoing the header value otherwise
+    POST /echo       -> 200 echoing the request body and Content-Type
 
-The handler emits `Connection: close` everywhere so the Ada client
-(also Connection: close in v1) sees a clean EOF after each response
-without keep-alive parsing.
+Every response carries `Connection: close`, so the client sees a
+clean EOF after each one.
 
-Prints `READY http 127.0.0.1:8764\\n` to stdout once it is listening
-so tests/run_tests.sh can wait for that line instead of racing.
+Prints `READY http 127.0.0.1:8764` once listening.
 """
 
 from __future__ import annotations
@@ -33,21 +32,17 @@ import time
 HOST = "127.0.0.1"
 HTTP_PORT = 8764
 
-#  How long /slow withholds its response. Sized for the per-phase
-#  bound test in test_http_phase_bounds.adb, which brackets it: a
-#  1 s read deadline must trip on this route and a 6 s one must not,
-#  so the delay has to sit clear of both ends. The handler is served
-#  on its own thread (ThreadingHTTPServer), so this blocks nothing else.
+#  How long /slow withholds its response. test_http_phase_bounds
+#  brackets it: a 1 s read deadline must trip on this route and a 6 s
+#  one must not. Each handler runs on its own thread.
 SLOW_DELAY = 3.0
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    # Match the default protocol so chunked transfer is legal on the wire.
+    # HTTP/1.1, so chunked transfer is legal on the wire.
     protocol_version = "HTTP/1.1"
 
-    # Silence the per-request access log: the tests' own output is the
-    # signal we care about, and BaseHTTPRequestHandler's default goes to
-    # stderr and clutters CI output.
+    # Silence the per-request access log.
     def log_message(self, fmt, *args):  # noqa: D401, ARG002
         pass
 
@@ -69,14 +64,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif self.path == "/slow":
             #  Withhold the whole response, status line included, so
-            #  the client's read deadline is what decides the outcome
-            #  rather than a partially-delivered body.
+            #  the client's read deadline decides the outcome.
             time.sleep(SLOW_DELAY)
             self._send_fixed(200, b"slow, world\n", "text/plain")
 
         elif self.path == "/chunked":
-            # Three deliberately uneven chunks so the Ada decoder has
-            # to reassemble across boundaries.
+            # Three uneven chunks so the Ada decoder has to reassemble
+            # across boundaries.
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Transfer-Encoding", "chunked")
@@ -89,12 +83,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b"0\r\n\r\n")
 
         elif self.path == "/chunked-big":
-            # One deliberately huge (>12 MB) chunk in a single
-            # chunk-frame. The chunk-size line names a length far larger
-            # than the client's thread stack, so a naive Size-sized
-            # decode buffer overflows; this exercises the bounded-window
-            # chunk reader. Body is a 0..255 ramp so the client can
-            # verify reassembly byte-for-byte.
+            # One >12 MB chunk, larger than the client's thread stack,
+            # so a Size-sized decode buffer would overflow. The body is
+            # a 0..255 ramp so the client can verify reassembly.
             n = 13_000_000
             pattern = bytes(range(256))
             body = (pattern * (n // 256 + 1))[:n]
@@ -125,9 +116,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     ),
                 )
             else:
-                # Echo the header value so the test can confirm AHT
-                # actually transmitted what it built (not just that the
-                # server flipped 401 → 200 on header presence).
+                # Echo the header value so the test can check what AHT
+                # transmitted, not only the 401 -> 200 flip.
                 self._send_fixed(200, auth.encode("utf-8") + b"\n",
                                  "text/plain")
 
@@ -135,11 +125,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_fixed(404, b"not found\n", "text/plain")
 
     def do_HEAD(self):  # noqa: N802
-        # HEAD mirrors GET /hello's headers — including the
-        # Content-Length the body *would* have — but writes no body.
-        # Lets the Ada client demonstrate that a HEAD response carries
-        # framing headers yet an empty Body_B (body framing suppressed
-        # client-side regardless of Content-Length).
+        # HEAD mirrors GET /hello's headers, Content-Length included,
+        # with no body; the client must return an empty Body_B.
         if self.path == "/hello":
             body = b"hello, world\n"
             self.send_response(200)

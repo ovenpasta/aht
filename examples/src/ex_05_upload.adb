@@ -1,28 +1,14 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Example 5 — streaming a request body up from disk, no buffering.
---
---  A small POST/PUT body? `Set_Body` is enough. But to upload a file --
---  maybe gigabytes -- without slurping it into memory, stream it: the
---  client pulls the body in fixed windows from a `Body_Source`. You used
---  to hand-write that source; `AHT.HTTP.Request.Sources.Stream_Source`
---  wraps any Ada stream (a file via `Stream_IO`, a socket, a generator)
---  as one, so a file upload is a few lines.
---
---  Framing is header-driven: set `Content-Length` for fixed framing
---  (done here from the file's size), or omit it to send
---  `Transfer-Encoding: chunked`. The source never buffers the body.
---
---  Here we stage a small temp file, stream it to /echo (which reflects
---  the body back), and print what returned -- proving the bytes made the
---  trip while the body was never held in a buffer. This is the upload
---  mirror of ex_03's stream-Target download.
+--  Example 5: streaming a request body from disk. The client pulls
+--  the body in fixed windows from a Body_Source; Stream_Source in
+--  AHT.HTTP.Request.Sources wraps any Ada stream as one. A set
+--  Content-Length gives fixed framing, none gives chunked. A temp
+--  file is streamed to the fixture's /echo and the reflection printed.
 --
 --  Run:  ./examples/bin/<mode>/ex_05_upload [URL]
---  URL defaults to the fixture's /echo; point it at e.g. a go-httpbin
---  /post to try it elsewhere (drop Set_Content_Length there for a
---  chunked upload).
+--  URL defaults to the fixture's /echo on :8764.
 
 with Ada.Command_Line; use Ada.Command_Line;
 with Ada.Directories;
@@ -53,8 +39,7 @@ procedure Ex_05_Upload is
    Payload : constant String :=
      "streamed straight from a file on disk" & ASCII.LF;
 begin
-   --  Stage a file to upload. In real use this is whatever file you
-   --  already have -- the point is it is never read into memory here.
+   --  Stage a file to upload; it is never read into memory below.
    declare
       F : Ada.Streams.Stream_IO.File_Type;
    begin

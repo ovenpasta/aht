@@ -9,8 +9,8 @@ with AHT.Transport;
 
 --  Exercises AHT.Transport.Transport_Type's inherited Finalize, which
 --  dispatches to the concrete Close so an abandoned transport is still
---  reclaimed at scope exit. Uses an in-process test double — no socket,
---  no fixture — so both branches (Close runs / Close raises and is
+--  reclaimed at scope exit. Uses an in-process test double, no socket
+--  and no fixture, so both branches (Close runs / Close raises and is
 --  swallowed) are driven deterministically.
 procedure Test_Transport_Finalize is
 
@@ -23,8 +23,8 @@ procedure Test_Transport_Finalize is
    end Fail;
 
    --  Observable side effects that outlive the finalized object: Close
-   --  bumps the counter, and (when armed) raises so we can prove
-   --  Finalize swallows it.
+   --  bumps the counter, and (when armed) raises so the test can check
+   --  that Finalize swallows it.
    Close_Count    : Natural := 0;
    Raise_On_Close : Boolean := False;
 
@@ -64,7 +64,7 @@ procedure Test_Transport_Finalize is
 
 begin
    --  Case 1: a transport that leaves scope without an explicit Close is
-   --  still reclaimed — Finalize dispatches to the concrete Close exactly
+   --  still reclaimed: Finalize dispatches to the concrete Close exactly
    --  once.
    Close_Count    := 0;
    Raise_On_Close := False;
@@ -103,9 +103,9 @@ begin
    end;
 
    --  Case 3: an explicit Close followed by scope-exit Finalize drives
-   --  Close twice — the contract Finalize leans on. A real transport's
-   --  Close is idempotent; here we just confirm the second (Finalize)
-   --  call still happens and is harmless.
+   --  Close twice, the contract Finalize relies on. A real transport's
+   --  Close is idempotent; this confirms the second (Finalize) call
+   --  still happens and is harmless.
    Close_Count    := 0;
    Raise_On_Close := False;
    declare

@@ -3,10 +3,9 @@
 
 --  Truncation policy, mbedtls backend: an abrupt TCP close without
 --  close_notify (tests/server/server_tls_abrupt.py, 127.0.0.1:8771)
---  reads as a clean EOF (Last = 0) on this backend — the documented
+--  reads as a clean EOF (Last = 0) on this backend, the documented
 --  difference from the openssl backend, which raises TLS_Error. This
---  test pins the behavior down so a change is deliberate, not
---  accidental.
+--  test pins that behavior.
 
 with Ada.Command_Line;
 with Ada.Exceptions;

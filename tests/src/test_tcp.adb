@@ -132,7 +132,7 @@ procedure Test_TCP is
    end Echo_Server;
 
    --  A server that accepts one client and then holds the connection
-   --  open without ever sending. Used by the cancel/timeout cases —
+   --  open without ever sending. Used by the cancel/timeout cases:
    --  the client's Read is guaranteed to block with zero bytes in
    --  flight, so the only way for Read to return is via
    --  `Set_Read_Deadline` expiry or `Abort_Pending`.
@@ -202,9 +202,9 @@ procedure Test_TCP is
                   Accept_Socket (Server, Client, Peer);
                   --  Block here until the client closes its half: a
                   --  single Receive on a silent connection returns
-                  --  0 bytes on peer close, ≥ 1 on data (we ignore
-                  --  either way — the point is to outlive the client's
-                  --  cancel/timeout attempt, not to interact).
+                  --  0 bytes on peer close, 1 or more on data. Either
+                  --  is ignored; the server only has to outlive the
+                  --  client's cancel/timeout attempt.
                   declare
                      Buf  : Stream_Element_Array (1 .. 16);
                      Last : Stream_Element_Offset;
@@ -241,7 +241,7 @@ procedure Test_TCP is
    end Silent_Server;
 
    --  A server that accepts one client, shrinks its receive buffer so the
-   --  kernel absorbs almost nothing, and then never reads — it parks on the
+   --  kernel absorbs almost nothing, and then never reads: it parks on the
    --  Release rendezvous, holding the connection open. The client's Write
    --  fills the send + receive buffers and blocks on a full window, so the
    --  only way Write can return is via Set_Write_Deadline expiry or
@@ -356,14 +356,11 @@ procedure Test_TCP is
       end Wait_Done;
    end Deaf_Server;
 
-   --  Accepts one client and, like Deaf_Server, never reads — so the
-   --  client's large Write fills the buffers and parks in the selector
-   --  after at least one successful partial send. Only when the caller
-   --  signals Close_Now (after the client is demonstrably blocked) does
-   --  it drop the connection, forcing the resume-after-partial-send path
-   --  to wake on the peer's RST. This is what makes Case 13 actually
-   --  exercise the non-blocking loop's peer-close handling rather than a
-   --  trivial fail-on-first-send (Codex F2).
+   --  Accepts one client and, like Deaf_Server, never reads, so the
+   --  client's large Write parks in the selector after at least one
+   --  partial send. Drops the connection only on Close_Now, once the
+   --  client is blocked, so case 13 exercises the resume-after-partial
+   --  -send path waking on the peer's RST.
    task type Closer_Server is
       entry Get_Port
         (P   : out AHT.URL.Port_Number;
@@ -451,8 +448,8 @@ procedure Test_TCP is
          end;
       end if;
 
-      --  Hold the connection open (never reading) until the caller — which
-      --  has by now started the big write and let it block — says to drop
+      --  Hold the connection open (never reading) until the caller, which
+      --  has by now started the big write and let it block, says to drop
       --  it. The shutdown+close sends a RST that wakes the parked write.
       accept Close_Now;
 
@@ -475,13 +472,13 @@ procedure Test_TCP is
 
    --  Accepts one client and, only once the caller signals Reset_Now,
    --  RST-closes it (SO_LINGER 0), so a client that connects, triggers the
-   --  reset, lets it settle, then writes hits a dead endpoint on its *first*
-   --  send — zero bytes accepted. This drives the zero-progress poison path:
-   --  a peer reset must tear the transport down even though no byte of the
-   --  write went out (Codex slice-1 F-C). The reset is caller-gated (not
-   --  fired right at accept) so it can never race the client's
-   --  connect-completion check — under load an accept-time RST surfaces as a
-   --  Connect failure instead of the first-send failure this case exercises.
+   --  reset, lets it settle, then writes hits a dead endpoint on its FIRST
+   --  send, with zero bytes accepted. This drives the zero-progress poison
+   --  path: a peer reset must tear the transport down even though no byte
+   --  of the write went out. The reset is caller-gated (not fired right at
+   --  accept) so it can never race the client's connect-completion check;
+   --  under load an accept-time RST surfaces as a Connect failure instead
+   --  of the first-send failure this case exercises.
    task type Resetter_Server is
       entry Get_Port
         (P   : out AHT.URL.Port_Number;
@@ -571,9 +568,8 @@ procedure Test_TCP is
 
       if Accepted then
          begin
-            --  Linger enabled with a 0-second timeout makes Close send a RST
-            --  instead of a graceful FIN, so the peer's next send fails
-            --  immediately rather than draining a FIN.
+            --  Linger with a 0-second timeout makes Close send a RST
+            --  instead of a FIN, so the peer's next send fails at once.
             Set_Socket_Option
               (Client, Socket_Level,
                (Name => Linger, Enabled => True, Seconds => 0));
@@ -678,8 +674,8 @@ procedure Test_TCP is
       end;
       --  Always close, regardless of how the above exited. TCP_Transport
       --  Close is idempotent, so double-close after a clean exit is a
-      --  no-op; the point is that assertion-style early returns in
-      --  Drive_Echo never leave the socket open.
+      --  no-op, and assertion-style early returns in Drive_Echo never
+      --  leave the socket open.
       Close_Quietly (T);
    end Run_Connect;
 
@@ -699,7 +695,7 @@ procedure Test_TCP is
    end Reserve_Unreachable_Port;
 
 begin
-   --  Case 1: literal path — Inet_Addr parses, single candidate.
+   --  Case 1: literal path. Inet_Addr parses, single candidate.
    declare
       Srv         : Echo_Server;
       Port        : AHT.URL.Port_Number;
@@ -716,7 +712,7 @@ begin
       Check_Server_Runtime ("literal 127.0.0.1 (server)", Runtime_Err);
    end;
 
-   --  Case 2: DNS path — Inet_Addr fails, so the name goes to
+   --  Case 2: DNS path. Inet_Addr fails, so the name goes to
    --  AHT.DNS.Resolve and its literals become the candidate list.
    declare
       Srv         : Echo_Server;
@@ -801,7 +797,7 @@ begin
 
    --  Case 4: all-candidates-fail. Two bound-but-not-listening ports
    --  so every attempt is refused. Verifies Connect_Candidates raises
-   --  Transport_Error with the *last* address's error in the message —
+   --  Transport_Error with the LAST address's error in the message:
    --  the "last error wins" contract.
    declare
       Refuser_A, Refuser_B : Socket_Type := No_Socket;
@@ -1014,10 +1010,9 @@ begin
    --  Case 7: Set_Read_Deadline is compound (wall-clock from the
    --  call), not per-Read. If the deadline has already elapsed by
    --  the time Read is invoked, it raises Timeout_Error almost
-   --  immediately — it does not grant another full budget. This is
-   --  the semantic HTTP.IO's line/body loops rely on, so a
-   --  slow-drip peer cannot dodge the deadline by keeping each
-   --  individual Read under it.
+   --  immediately; it does not grant another full budget. HTTP.IO's
+   --  line/body loops rely on this, so a slow-drip peer cannot dodge
+   --  the deadline by keeping each individual Read under it.
    declare
       Srv         : Silent_Server;
       Port        : AHT.URL.Port_Number;
@@ -1079,7 +1074,7 @@ begin
    end;
 
    --  Case 8: a refused connect under a Connect_Timeout budget must
-   --  still raise Transport_Error, not Timeout_Error — a fast failure
+   --  still raise Transport_Error, not Timeout_Error: a fast failure
    --  is not a timeout. Exercises the budgeted Connect_Socket path
    --  (positive remaining budget) and its Socket_Error handler: the
    --  refusal lands well within the generous 5 s budget, so a regression
@@ -1131,7 +1126,7 @@ begin
 
    --  Case 9: multi-candidate fallback survives a budget. First
    --  candidate refused (instant, leaving nearly the whole budget),
-   --  second is the echo server — connect + echo must still succeed, so
+   --  second is the echo server; connect + echo must still succeed, so
    --  budgeting does not short-circuit the fallback loop after one
    --  budgeted-but-failed attempt.
    declare
@@ -1191,15 +1186,12 @@ begin
       end if;
    end;
 
-   --  Case 10: an exhausted budget raises Timeout_Error before a
-   --  connect is even attempted. Connect_Timeout => 0.0 puts the
-   --  deadline in the past by the time the first candidate is tried, so
-   --  the pre-attempt budget check trips. A reserved (refusing) port
-   --  proves the dial never happens: had it attempted, the refusal
-   --  would surface as Transport_Error, which this case rejects. This
-   --  is the only deterministic way to drive the budget-exhausted
-   --  branch — a genuine mid-connect stall would need an
-   --  unroutable/firewalled peer, too environment-dependent for CI.
+   --  Case 10: an exhausted budget raises Timeout_Error before a connect
+   --  is attempted. Connect_Timeout => 0.0 puts the deadline in the past
+   --  by the first candidate, so the pre-attempt check trips. A reserved
+   --  (refusing) port proves the dial never happens: an attempt would
+   --  surface as Transport_Error, which this case rejects. A mid-connect
+   --  stall would need an unroutable peer, too environment-dependent.
    declare
       Refuser  : Socket_Type := No_Socket;
       Bad_Port : AHT.URL.Port_Number;
@@ -1245,7 +1237,7 @@ begin
    --  Case 11: Set_Write_Deadline causes a stuck Write to raise
    --  Timeout_Error. The deaf server accepts and never reads, so after
    --  the kernel buffers fill the client's non-blocking partial-send loop
-   --  re-parks in Check_Selector and the write deadline trips — proving a
+   --  re-parks in Check_Selector and the write deadline trips, proving a
    --  wedged upload is bounded, not hung forever.
    declare
       Srv         : Deaf_Server;
@@ -1297,10 +1289,10 @@ begin
                            & Ada.Exceptions.Exception_Message (E));
                end;
 
-               --  A timeout after a partial send leaves a truncated message
-               --  on the wire, so the transport must be poisoned (Finding B):
-               --  Is_Connected goes False and a retry is rejected rather than
-               --  appending onto the desynchronised stream.
+               --  A timeout after a partial send leaves a truncated
+               --  message on the wire, so the transport must be
+               --  poisoned: Is_Connected goes False and a retry is
+               --  rejected instead of appending to the stream.
                if T.Is_Connected then
                   Fail ("write-timeout: still connected after a mid-send "
                         & "timeout (truncated stream left reusable)");
@@ -1332,9 +1324,9 @@ begin
    --  Case 12: Abort_Pending unblocks a Write wedged on a deaf peer. A
    --  sibling task calls Abort_Pending after a short delay; because each
    --  send is non-blocking and partial, the abort bites at the next
-   --  re-park (one selector cycle) — proving the cancel is not lost inside
-   --  an in-flight syscall, the exact race slice 1 must close. No write
-   --  deadline is set, so only the abort can end the Write.
+   --  re-park (one selector cycle), proving the cancel is not lost inside
+   --  an in-flight syscall. No write deadline is set, so only the abort
+   --  can end the Write.
    declare
       Srv         : Deaf_Server;
       Port        : AHT.URL.Port_Number;
@@ -1389,9 +1381,9 @@ begin
                            & Ada.Exceptions.Exception_Message (E));
                end;
 
-               --  Same poisoning contract as the timeout case (Finding B):
-               --  an abort mid-send truncated the message, so the transport
-               --  is torn down and a retry must be rejected.
+               --  Same poisoning contract as the timeout case: an abort
+               --  mid-send truncated the message, so the transport is torn
+               --  down and a retry must be rejected.
                if T.Is_Connected then
                   Fail ("write-abort: still connected after a mid-send "
                         & "abort (truncated stream left reusable)");
@@ -1422,20 +1414,12 @@ begin
       Check_Server_Runtime ("write-abort (server)", Runtime_Err);
    end;
 
-   --  Case 13: a peer that accepts then closes *mid-upload* must surface
-   --  Transport_Error promptly, not spin or hang. The closer server stays
-   --  deaf (never reads) after accept, so the client's non-blocking write
-   --  succeeds with at least one partial send and then parks in the
-   --  selector on the full buffer. A sibling Closer task waits 0.1 s — long
-   --  enough for the write to be demonstrably blocked past its first
-   --  partial send — then signals Close_Now, which RST-closes the peer and
-   --  wakes the parked write. The resumed send then fails (or returns the
-   --  zero-byte closed-peer signal), which the loop turns into
-   --  Transport_Error rather than re-parking forever. This is the
-   --  resume-after-partial-send path Codex F2 asked Case 13 to exercise.
-   --  A generous write deadline is set purely as a backstop: if it ever
-   --  fired we'd see Timeout_Error, which we treat as a FAIL because it
-   --  would mean the close was *not* detected and the write hung.
+   --  Case 13: a peer that closes mid-upload must surface Transport_Error
+   --  promptly. The closer server stays deaf after accept, so the write
+   --  makes at least one partial send and parks in the selector; the
+   --  Closer task then signals Close_Now, which RST-closes the peer and
+   --  wakes the parked write. The write deadline is a backstop only:
+   --  Timeout_Error is a FAIL, meaning the close was not detected.
    declare
       Srv         : Closer_Server;
       Port        : AHT.URL.Port_Number;
@@ -1505,16 +1489,12 @@ begin
       Check_Server_Runtime ("write-close (server)", Runtime_Err);
    end;
 
-   --  Case 14: a peer reset before the *first* byte is accepted must still
-   --  poison the transport (Codex slice-1 F-C — the zero-progress path the
-   --  Progress-only gate missed). The resetter waits for our Reset_Now, then
-   --  RST-closes; the client connects, signals the reset, lets it settle,
-   --  then writes a tiny payload, so the very first send hits a dead endpoint
-   --  with no byte accepted. The write must raise Transport_Error,
-   --  Is_Connected must go False, and a retry must be rejected — even though
-   --  Progress was never set. The reset is gated on Reset_Now (not fired at
-   --  accept) so it cannot race the connect and masquerade as a Connect
-   --  failure under load.
+   --  Case 14: a peer reset before the first byte is accepted must still
+   --  poison the transport (the zero-progress path). The client connects,
+   --  signals Reset_Now, lets the RST settle, then writes a tiny payload
+   --  so the first send hits a dead endpoint. Write must raise
+   --  Transport_Error, Is_Connected must go False, a retry must be
+   --  rejected. Gating the reset on Reset_Now keeps it off the connect.
    declare
       Srv         : Resetter_Server;
       Port        : AHT.URL.Port_Number;
@@ -1537,9 +1517,9 @@ begin
                         & Ada.Exceptions.Exception_Message (E));
             end;
 
-            --  Now that the connect handshake is done, tell the server to RST.
-            --  Driving the reset here (rather than at accept) keeps it from
-            --  racing the connect-completion check under load.
+            --  The connect handshake is done: tell the server to RST.
+            --  Driving the reset here keeps it from racing the
+            --  connect-completion check under load.
             Srv.Reset_Now;
 
             if T.Is_Connected then
@@ -1594,26 +1574,13 @@ begin
       Check_Server_Runtime ("write-reset (server)", Runtime_Err);
    end;
 
-   --  Case 15: a write-side teardown while another task is parked in Read on
-   --  the *same* transport must not race the reader's selector (Codex slice-1
-   --  F-D). This package supports concurrent read+write on one connection, so
-   --  Write's failure path must not Close_Selector while a reader is still
-   --  inside Check_Selector — it Poisons instead, shutting the socket down,
-   --  aborting the selectors, and deferring the selector reclaim to the
-   --  single-threaded Close. Here a reader sits in Read against a deaf peer;
-   --  the writer saturates the send buffer and trips its write deadline,
-   --  whose handler poisons the transport. Asserts: the write fails
-   --  (bounded), the reader comes back by the poison path rather than by
-   --  EOF, an abort or its own 5 s backstop — that is, the transport was
-   --  live at its entry check and poisoned by the time its selector call
-   --  returned — the transport ends disconnected, and nothing hangs.
-   --
-   --  That ordering is what is established, and not that the reader was
-   --  parked when the poison landed. The note on the delay below says why
-   --  nothing here could establish that, and this header does not get to
-   --  claim more than the code underneath it.
-   --
-   --  The write selector's half of that abort is case 15b, below.
+   --  Case 15: Write's failure path must Poison, not Close_Selector,
+   --  while a reader is inside Check_Selector on the same transport. The
+   --  reader parks in Read on a deaf peer; the writer trips its write
+   --  deadline, which poisons. The write must fail bounded, the reader
+   --  must return by the poison path (not EOF, abort or its 5 s backstop)
+   --  and the transport must end disconnected. Parking itself is not
+   --  proven; see the delay below. Case 15b covers the write selector.
    declare
       Srv         : Deaf_Server;
       Port        : AHT.URL.Port_Number;
@@ -1664,21 +1631,12 @@ begin
                      when AHT.Transport.Aborted_Error =>
                         Reader_Out := To_Unbounded_String ("aborted");
                      when E : AHT.Transport.Transport_Error =>
-                        --  Which Transport_Error matters. The two
-                        --  wordings separate "already dead at the entry
-                        --  check" from "live there, dead by the
-                        --  selector call", and only the second is this
-                        --  case's subject. The entry check, not the
-                        --  start of the call: a task can enter and be
-                        --  descheduled before it looks.
-                        --
-                        --  Both are matched positively, and anything
-                        --  else is carried through with its message
-                        --  rather than folded into one of them. A
-                        --  socket failure is not evidence about the
-                        --  poison path in either direction, and
-                        --  treating "not the post-check wording" as
-                        --  "the entry guard" would report it as one.
+                        --  Only "live at the entry check, dead by the
+                        --  selector call" is this case's subject; the
+                        --  other wording means dead before the check
+                        --  (a task can be descheduled between entering
+                        --  and looking). Anything else carries its
+                        --  message: it says nothing about the poison.
                         declare
                            M : constant String :=
                              Ada.Exceptions.Exception_Message (E);
@@ -1697,46 +1655,15 @@ begin
                           ("exn:" & Ada.Exceptions.Exception_Name (E));
                   end Reader;
                begin
-                  --  Give the reader a chance to reach Check_Selector
-                  --  before the write starts tearing the socket down.
-                  --
-                  --  Read that as it is written. The delay is not
-                  --  evidence and the message the reader returns is not
-                  --  evidence *of parking* either -- Abort_Selector
-                  --  queues an event the next Check_Selector consumes
-                  --  as readily as a current one, so a reader that
-                  --  passed its entry guard, lost the CPU, and arrived
-                  --  at the selector after the poison reports the same
-                  --  thing without ever having blocked.
-                  --
-                  --  What is proven: the transport was live when the
-                  --  reader's entry check looked at it and dead by the
-                  --  time its selector call returned, and it came out
-                  --  by the poison path rather than by EOF, an abort,
-                  --  or its own deadline. That rules out the wrong
-                  --  answers this case exists to catch.
-                  --
-                  --  The landmark is that entry check, not the start of
-                  --  the Read. A reader can enter and be descheduled
-                  --  before it looks, so the other outcome does not
-                  --  even mean the poison preceded the call. And
-                  --  neither outcome establishes that the wake
-                  --  interrupted a wait; nothing available here would,
-                  --  since there is no observable for "a task is inside
-                  --  a selector".
-                  --
-                  --  The parked path is not unevidenced, just not
-                  --  evidenced *here* -- and not proven anywhere.
-                  --  Before Poison aborted the selector, this case
-                  --  failed on Windows by taking the whole 5 s read
-                  --  deadline, which is strong evidence: the only
-                  --  thing in that loop that consumes time is the
-                  --  selector wait. Evidence, not proof. A task
-                  --  descheduled for five seconds before it ever
-                  --  reached the park would look the same from out
-                  --  here -- implausible, not impossible. There is no
-                  --  observable for selector residency, so this is
-                  --  where the claim stops.
+                  --  Lets the reader reach Check_Selector first; not
+                  --  evidence, nor is its message: Abort_Selector
+                  --  queues an event the next Check_Selector consumes.
+                  --  Proven: live at the entry check, dead after the
+                  --  selector call, out by the poison path; nothing
+                  --  observes a task inside a selector. Backout:
+                  --  without Poison's selector abort this case takes
+                  --  the whole 5 s read deadline on Windows; evidence,
+                  --  not proof.
                   delay 0.2;
 
                   T.Set_Write_Deadline (0.3);
@@ -1762,18 +1689,12 @@ begin
                declare
                   Outcome : constant String := To_String (Reader_Out);
                begin
-                  --  Exactly Transport_Error, not merely "something
-                  --  other than a timeout". Poison can wake this reader
-                  --  two ways -- the socket shutdown makes it readable on
-                  --  POSIX, the selector abort reports Aborted on both --
-                  --  and Read is required to collapse that into one
-                  --  answer by deciding on Is_Connected. Accepting "eof"
-                  --  or "aborted" here would let that collapse be deleted
-                  --  and still pass, which is how this check read before:
-                  --  it proved the reader woke, and nothing about what it
-                  --  was told. "eof" is the specific wrong answer, since
-                  --  a write tearing the connection down is not the peer
-                  --  closing.
+                  --  Exactly Transport_Error. Poison can wake the reader
+                  --  two ways (the shutdown makes the socket readable
+                  --  on POSIX, the selector abort reports Aborted on
+                  --  both) and Read must collapse both into one answer
+                  --  by deciding on Is_Connected. "eof" is the specific
+                  --  wrong answer: a write teardown is not a peer close.
                   if Outcome = "live-at-guard" then
                      null;  --  came out by the poison path, as required
                   elsif Outcome = "dead-at-guard" then
@@ -1814,43 +1735,17 @@ begin
       Check_Server_Runtime ("write-vs-read (server)", Runtime_Err);
    end;
 
-   --  Case 15b: the write selector's half of the same abort.
-   --
-   --  Poison must wake a parked WRITER too, and not because the writer
-   --  poisoned itself. TLS's Drop_Connection fires from read-side fatal
-   --  paths, so the poisoner is routinely neither of the two tasks --
-   --  which is why Poison aborts both selectors rather than only the
-   --  read one. An earlier version of this file claimed that case could
-   --  not be arranged here. It can: Poison is public, so the main task
-   --  is the third party.
-   --
-   --  A writer sits in Write against a deaf peer, with no deadline
-   --  near enough to rescue it; the main task poisons; the writer must
-   --  come back saying the transport was live at its entry check and
-   --  poisoned by the time its selector call returned.
-   --
-   --  That is an ordering, not a parking proof, exactly as in case 15
-   --  — the note on the delay below says why, and this header does not
-   --  get to claim more than the code underneath it.
-   --
-   --  What that pins, measured by backing each half out separately:
-   --
-   --    - The write loop's Connected check. Removing it fails this case
-   --      with "aborted" — which is incidentally the proof that the
-   --      selector abort is what wins the wake, Aborted being the
-   --      status only it produces.
-   --    - NOT Abort_Selector (Write_Selector). Removing that leaves
-   --      this case passing on both Linux and Windows-under-wine,
-   --      because shutting the socket down wakes a parked writer on
-   --      both. The read side is not like that: there Windows wakes
-   --      only through the selector, and dropping it fails case 15.
-   --
-   --  So the write-selector abort is kept without a test that fails
-   --  when it goes, and this says so rather than leaving the symmetry
-   --  to imply otherwise. It is kept because "shutdown happens to wake
-   --  writers here too" is an observation about two platforms rather
-   --  than a property Poison should rest on — and the read side is
-   --  where that exact assumption was already found to be false.
+   --  Case 15b: Poison must wake a parked writer when a third task
+   --  poisons (TLS's Drop_Connection fires from read-side fatal paths).
+   --  A writer sits in Write on a deaf peer with a far write deadline;
+   --  the main task poisons; the writer must report live at its entry
+   --  check and poisoned once its selector call returned. An ordering,
+   --  not a parking proof, as in case 15.
+   --  Validated by: without the write loop's Connected check this fails
+   --  with "aborted", the status only the selector abort produces.
+   --  Without Abort_Selector (Write_Selector) it still passes on Linux
+   --  and wine, where shutdown wakes a parked writer; the abort stays
+   --  because on Windows the read side wakes only through the selector.
    declare
       Srv         : Deaf_Server;
       Port        : AHT.URL.Port_Number;
@@ -1914,22 +1809,21 @@ begin
                           ("exn:" & Ada.Exceptions.Exception_Name (E));
                   end Writer;
                begin
-                  --  Same standing, and same caveat, as case 15's
-                  --  delay: it makes the writer likely to be parked and
-                  --  proves nothing, and the message it returns proves
-                  --  an ordering rather than a park. See the note there.
+                  --  As for case 15's delay: it makes the writer likely
+                  --  to be parked and proves nothing, and the message
+                  --  proves an ordering, not a park.
                   delay 0.5;
                   T.Poison;
-                  --  Leaving this block joins Writer. If the poison did
-                  --  not wake it, the wait is bounded by the 10 s write
-                  --  deadline above rather than being forever.
+                  --  Leaving this block joins Writer; the 10 s write
+                  --  deadline bounds the wait if the poison did not
+                  --  wake it.
                end;
 
                declare
                   Outcome : constant String := To_String (Writer_Out);
                begin
                   if Outcome = "live-at-guard" then
-                     null;  --  the point: a third party ended the write
+                     null;  --  a third party ended the write
                   elsif Outcome = "dead-at-guard" then
                      Fail ("poison-vs-write: the writer raised the entry "
                            & "guard's Transport_Error, so the transport "
@@ -1970,19 +1864,12 @@ begin
    end;
 
 
-   --  Case 16: a transport is single-use (Codex slice-1 F-E / F-F). A
-   --  transport poisoned by a write failure still owns its fd/selectors
-   --  (poison leaves them live for the single-threaded Close to reclaim, so
-   --  Is_Connected reads False while the socket is still open). Connect must
-   --  NOT silently reclaim such an object in place: a reader parked on the
-   --  old session could wake after a new fd was swapped in and read the
-   --  wrong generation. So reconnecting the SAME poisoned object must be
-   --  rejected; the caller has to Close it (single-threaded, after reads
-   --  have stopped) and use a fresh transport. Phase 1 poisons T on a deaf
-   --  peer; phase 2 asserts an in-place reconnect raises; phase 3 Closes T
-   --  (reclaim must not hang/raise) and round-trips a FRESH transport to the
-   --  echo server, proving the dead session was fully released and a clean
-   --  object works.
+   --  Case 16: a transport is single-use. A poisoned transport still owns
+   --  its fd/selectors until the single-threaded Close reclaims them, and
+   --  Connect must not reclaim them in place: a reader parked on the old
+   --  session could wake on a swapped-in fd. Phase 1 poisons T on a deaf
+   --  peer; phase 2 asserts an in-place reconnect raises; phase 3 Closes
+   --  T and round-trips a fresh transport to the echo server.
    declare
       Deaf        : Deaf_Server;
       Echo        : Echo_Server;
@@ -2038,7 +1925,7 @@ begin
             Free (Big);
 
             --  Phase 2: an in-place reconnect of the SAME poisoned (never
-            --  Closed) object must be rejected — the fd is still owned, so
+            --  Closed) object must be rejected: the fd is still owned, so
             --  recycling it would race a stale reader. No silent reuse/leak.
             begin
                T.Connect ("127.0.0.1", Echo_Port);
@@ -2056,7 +1943,7 @@ begin
 
             --  Phase 3: Close reclaims the poisoned fd/selectors (must not
             --  hang or raise). Single-use is permanent: even after Close, a
-            --  Connect on the SAME (already-used) object must still raise —
+            --  Connect on the SAME (already-used) object must still raise;
             --  this is the latch that survives a Close which raced a parked
             --  reader and could only best-effort the selector teardown.
             Close_Quietly (T);
@@ -2075,7 +1962,7 @@ begin
             end;
 
             --  A FRESH transport, by contrast, connects and round-trips
-            --  cleanly — proving nothing global was corrupted. Drive_Echo
+            --  cleanly, proving nothing global was corrupted. Drive_Echo
             --  closes Fresh.
             declare
                Fresh : AHT.Transport.TCP.TCP_Transport;

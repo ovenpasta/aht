@@ -1,84 +1,40 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  The I7 probe: tearing down while the write latch is contended.
+--  Tearing down while the write latch is contended. One connection
+--  has one send guard, and everything that writes a frame goes
+--  through it: the application's Send_*, the Pong owed a Ping, the
+--  Close owed a Close. Runs against the hostile fixture on 8777, whose
+--  deaf routes stop reading so writers park holding the guard.
 --
---  One connection has one send guard, and everything that writes a
---  frame goes through it — the application's Send_*, and the
---  receiver's own echoes, the Pong it owes a Ping and the Close it
---  owes a Close. A teardown therefore has to reach tasks in three
---  quite different positions, and they fail differently enough that
---  one probe would not find all three.
+--  Cases:
+--    1. receiver-side gate: the receiver queues on the guard to
+--       answer a Ping, behind a writer that will not finish
+--    2. sender-side gate: further senders queued on the guard behind
+--       the blocked one when the teardown fires
+--    3. blocked in the transport: a single holder parked in a write
+--       with no deadline of its own
 --
---  Shapes:
+--  Covers:
+--    - before any teardown: every writer entered Send_Text (counted
+--      on the way in), none returned, and the peer peeked bytes
+--    - shape 1 pings only once the fixture has seen that traffic
+--    - shape 2 needs the post-guard state re-check: without it a
+--      queued sender takes the guard after the one-shot Abort_Pending
+--      is consumed and the borrow drain never reaches zero
+--    - shape 3 terminates only through Try_Take and the fallback that
+--      skips the Close frame
+--    - Timeout_Error from Close is a failure: the drain did not finish
+--    - elapsed time runs through the writer joins, not only to the
+--      point where Close returns
 --
---    1. RECEIVER-SIDE GATE. An application writer is parked in the
---       transport holding the guard, and the peer sends a Ping — so
---       the receiver wants the guard to answer with a Pong and is
---       queued behind a writer that will not finish.
+--  Does not cover:
+--    - Close_Frame_Sent: a peer-initiated teardown never latches it,
+--      so the re-check is on the state, not on that flag
 --
---    2. SENDER-SIDE GATE. Further application senders are queued on
---       the guard behind the blocked one when the teardown fires.
---       This is the one that needs the post-guard state re-check:
---       without it a queued sender acquires the guard after the
---       one-shot Abort_Pending has already been consumed, starts a
---       write on a session that is being torn down, and the borrow
---       drain never reaches zero. Close_Frame_Sent does not cover
---       this — a peer-initiated teardown never latches it — which is
---       why the re-check is on the state and not on that flag.
---
---    3. BLOCKED IN THE TRANSPORT, not merely queued on the guard.
---       The teardown needs the guard to write its Close frame, and
---       the holder is parked in a write that has no deadline of its
---       own. Try_Take plus the skip-the-Close-frame fallback is what
---       makes this terminate.
---
---  ---------------------------------------------------------------
---  How the premise is established, because a delay does not do it
---  ---------------------------------------------------------------
---
---  Every shape needs a writer genuinely parked in the transport
---  before the teardown starts. Sleeping and assuming does not show
---  that, and the first version of this test proved the point twice:
---  its writer tasks were declared where they activated BEFORE
---  Connect, so every one took Closed_Error off an unconnected client
---  and finished instantly; and its "did they park?" check counted
---  writers that had RETURNED, which is zero both when they are all
---  parked and when they never ran. The case passed having raced
---  nothing.
---
---  So three independent facts are established before any teardown:
---
---    * Every writer has ENTERED Send_Text. Counted on the way in,
---      not on the way out.
---    * No writer has returned. With one guard serialising them, that
---      means one holds it and the rest are queued on it — which is
---      shapes 2 and 3's premise, directly rather than inferred from
---      a clock.
---    * The peer has OBSERVED bytes arriving. That is what separates
---      "holding the guard, about to write" from "holding the guard
---      and parked in the transport". The fixture detects it by
---      peeking, so asking does not consume the bytes and the peer
---      stays deaf.
---
---  The Ping in shape 1 is likewise sent only once the fixture has
---  seen that traffic, so the receiver queues behind a writer that
---  really is stuck rather than racing one that may not have started.
---
---  ---------------------------------------------------------------
---  What counts as success
---  ---------------------------------------------------------------
---
---  The teardown must abort the stuck writer and reclaim within its
---  bound. Timeout_Error is therefore a FAILURE here, not an accepted
---  outcome: it means the drain did not finish, which is exactly the
---  regression these shapes exist to catch.
---
---  And the elapsed time is measured through the task joins, not only
---  to the point where Close returns. A teardown that returns
---  promptly and then leaves writers stuck for another half minute
---  has bounded nothing; the joining is where that shows, so the
---  clock has to still be running when it happens.
+--  Validated by:
+--    with the guard bound removed the teardown takes about 34 s, well
+--    outside Bound + Slack.
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;
@@ -98,9 +54,9 @@ procedure Test_WS_Reconnect_Echo_Race is
    --  What the caller asks for, and what it must come back inside.
    Bound : constant Duration := 3.0;
 
-   --  Headroom over Bound for reclamation and the joins. Far smaller
-   --  than the ~34 s a missing guard bound produces, so the two are
-   --  never confusable.
+   --  Headroom over Bound for reclamation and the joins. With the
+   --  guard bound removed the teardown takes about 34 s, well outside
+   --  Bound + Slack.
    Slack : constant Duration := 5.0;
 
    Failures : Natural := 0;
@@ -161,13 +117,10 @@ procedure Test_WS_Reconnect_Echo_Race is
    end Writers;
 
    --  Ask the fixture whether the connection tagged Token has put
-   --  bytes on the wire. Answered over a separate connection; the
-   --  fixture peeks rather than reads, so the parked writer stays
-   --  parked.
-   --
-   --  Closed on every path: leaving this open would park its receiver
-   --  on a socket the fixture holds for thirty seconds, and the
-   --  enclosing scope would wait for it.
+   --  bytes on the wire, over a separate connection; the fixture
+   --  peeks, so the parked writer stays parked. Closed on every path:
+   --  left open, its receiver parks on a socket the fixture holds for
+   --  thirty seconds and the enclosing scope waits for it.
    function Peer_Saw_Traffic (Token : String) return Boolean is
       Q      : AHT.Websocket.Client.Client_Type;
       Msg    : AHT.Websocket.Client.Message_Type;
@@ -200,7 +153,7 @@ procedure Test_WS_Reconnect_Echo_Race is
    --  Ask_Traffic says whether this shape should confirm the peer saw
    --  bytes by querying /traffic. The deafping route consumes that
    --  same record itself, to decide when to send its Ping, so shape 1
-   --  must not also ask — there is one record per token.
+   --  must not also ask: there is one record per token.
    procedure Probe
      (What         : String;
       Route        : String;
@@ -222,8 +175,8 @@ procedure Test_WS_Reconnect_Echo_Race is
          task body Writer is
          begin
             Writers.Note_Entered;
-            --  Capped rather than infinite, so a teardown that never
-            --  arrives still ends the task and leaves a report.
+            --  Capped, so a teardown that never arrives still ends the
+            --  task and leaves a report.
             for I in 1 .. 10_000 loop
                AHT.Websocket.Client.Send_Text (C, Payload);
             end loop;
@@ -243,9 +196,7 @@ procedure Test_WS_Reconnect_Echo_Race is
          pragma Unreferenced (Pool);
       begin
          --  Time for the writers to reach the transport and fill it.
-         --  This delay is not the evidence; the checks below are. If
-         --  it is too short they fail loudly instead of passing
-         --  hollow.
+         --  The delay is not the evidence; the checks below are.
          delay 2.0;
 
          if Writers.Entered < Count then
@@ -284,11 +235,10 @@ procedure Test_WS_Reconnect_Echo_Race is
                      & Ada.Exceptions.Exception_Name (E) & ": "
                      & Ada.Exceptions.Exception_Message (E));
          end;
-         --  Took is deliberately NOT computed here. The writers are
-         --  joined at the end of this procedure, and a teardown that
-         --  returns promptly and then leaves them stuck for another
-         --  half minute has bounded nothing. The clock has to still
-         --  be running through the join.
+         --  Took is not computed here. The writers are joined at the
+         --  end of this procedure, and a teardown that returns
+         --  promptly and then leaves them stuck has bounded nothing,
+         --  so the clock runs through the join.
       end With_Writers;
 
    begin
@@ -329,8 +279,8 @@ procedure Test_WS_Reconnect_Echo_Race is
 begin
    --  Shape 1: the receiver is queued on the guard, wanting to answer
    --  a Ping. The fixture waits for this connection's traffic before
-   --  pinging, and consumes that record doing so — hence no /traffic
-   --  query of our own here.
+   --  pinging, and consumes that record doing so, so this shape does
+   --  not query /traffic itself.
    Writers.Reset;
    Probe ("receiver-gate", "/deafping", "r1", 1, Ask_Traffic => False);
 

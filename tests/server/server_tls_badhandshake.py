@@ -3,32 +3,24 @@
 #  SPDX-License-Identifier: Apache-2.0
 """Malformed-handshake TLS fixtures (two ports, one process).
 
-Neither port ever runs a real TLS server — the point is what the
-CLIENT does with a handshake it cannot complete.
+Neither port runs a real TLS server.
 
-  8774 — invalid: answer the ClientHello with a record carrying an
-         undefined content type, then HOLD the connection open. The
-         client must reject it promptly by diagnosing the record
-         itself; holding the connection is what makes that meaningful,
-         since a close would let a client that diagnosed nothing still
-         fail fast on the EOF.
+  8774 - invalid: answer the ClientHello with a record carrying an
+         undefined content type, then hold the connection open. The
+         client must reject the record itself; a close would let a
+         client that diagnosed nothing fail fast on the EOF.
 
-  8775 — dribble: answer with part of a record header, pause, send one
-         more byte, then go silent (connection held). The client has
-         consumed bytes and is waiting for the rest of a record that
-         never arrives, so its handshake deadline must fire. The pause
-         is the point: with a budget measured from Connect the client
-         gives up at roughly the deadline, whereas a deadline
-         restarted per read would give up around deadline + pause —
-         so the two are measurably distinguishable.
+  8775 - dribble: answer with part of a record header, pause, send one
+         more byte, then go silent with the connection held. The
+         client's handshake deadline must fire: a budget measured from
+         Connect gives up at about the deadline, one restarted per
+         read at about deadline + pause.
 
-Both: the client must not report Is_Connected, and must leave the
-transport object reusable, the failure having happened before any
-session existed. Covered by test_tls_bad_handshake.
+Both: the client must not report Is_Connected and must leave the
+transport reusable. Covered by test_tls_bad_handshake.
 
-Prints `READY tlsbadhandshake 127.0.0.1:8774+8775` only after BOTH
-sockets are bound and listening, so a bind failure cannot masquerade
-as readiness.
+Prints `READY tlsbadhandshake 127.0.0.1:8774+8775` only after both
+sockets are listening.
 """
 
 from __future__ import annotations
@@ -42,10 +34,8 @@ HOST = "127.0.0.1"
 INVALID_PORT = 8774
 DRIBBLE_PORT = 8775
 
-# Content type 0xFF is not a defined TLS record type (handshake is
-# 0x16, application data 0x17, alert 0x15...), so a peer can reject
-# this from the header alone — no waiting for a message body that
-# would make "prompt" ambiguous.
+# Content type 0xFF is not a defined TLS record type, so a peer can
+# reject this from the header alone.
 INVALID_RECORD = b"\xff\x03\x03\x00\x08" + bytes(8)
 
 # A partial record header, then (after a pause) one more byte: still
@@ -92,9 +82,8 @@ def serve_dribble(lsock: socket.socket) -> None:
 
 
 def main() -> int:
-    # Bind BEFORE announcing readiness: doing this on the main thread
-    # means a bind failure exits non-zero instead of being swallowed by
-    # a thread while READY had already been printed.
+    # Bind on the main thread before printing READY, so a bind failure
+    # exits non-zero.
     invalid_sock = socket.create_server((HOST, INVALID_PORT), reuse_port=False)
     invalid_sock.listen(8)
     dribble_sock = socket.create_server((HOST, DRIBBLE_PORT), reuse_port=False)

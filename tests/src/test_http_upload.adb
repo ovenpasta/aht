@@ -1,35 +1,26 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Streaming request-body upload via AHT.HTTP.Client.Send_Streaming_Body.
+--  Streaming request-body upload via Send_Streaming_Body: the
+--  Body_Source threaded through Run_Request / Wire_Round_Trip over a
+--  real socket, the write deadline, the buffered response. Interop
+--  peer: go-httpbin, whose /post echoes the (dechunked) body in the
+--  JSON "data" field; run_tests.sh exports AHT_HTTPBIN_URL only with Go.
 --
---  The on-the-wire framing (fixed Content-Length vs chunked, the chunk
---  sizes, the 0\r\n\r\n terminator, the anti-smuggling rejections) is
---  pinned deterministically against the mock transport in test_http_wire
---  (slice 2). This binary exercises the layer above — the *client*
---  surface that threads a Body_Source through Run_Request /
---  Wire_Round_Trip over a real socket, arms the write deadline, and
---  buffers the response — and proves the framing is accepted by a real,
---  third-party HTTP/1.1 server rather than a hand-rolled test peer.
+--  Cases:
+--    1. Fixed framing: Set_Content_Length + Send_Streaming_Body; the
+--       /post echo contains the payload. SKIP without AHT_HTTPBIN_URL.
+--    2. Chunked framing: no Content-Length; go-httpbin dechunks and
+--       echoes. SKIP without AHT_HTTPBIN_URL.
+--    3. Cancel mid-upload: a multi-MB body to an in-process non-reading
+--       peer parks the write; a sibling Cancel raises Aborted_Error.
 --
---  Interop peer: go-httpbin (mccutchen/go-httpbin), the same fixture
---  test_httpbin uses. Its /post endpoint reads the request body
---  (transparently dechunking a Transfer-Encoding: chunked upload, since
---  it is Go net/http) and echoes it back inside the JSON "data" field.
---  The orchestrator (tests/run_tests.sh) starts it only when a Go
---  toolchain is available and exports AHT_HTTPBIN_URL; when that is
---  unset the two framing cases SKIP cleanly so the suite stays green on
---  machines without Go. The cancel case never needs Go.
+--  Covers:
+--    - the framing is accepted by a third-party HTTP/1.1 server.
 --
---  Three cases:
---    1. Fixed framing  — Set_Content_Length + Send_Streaming_Body; the
---       go-httpbin /post echo must contain the sent payload.
---    2. Chunked framing — no Content-Length; the source drives
---       Transfer-Encoding: chunked, dechunked by go-httpbin and echoed.
---    3. Cancel mid-upload — a multi-MB body to an in-process non-reading
---       peer fills the socket buffer so the write parks; a sibling task
---       fires Cancel and Send_Streaming_Body raises Aborted_Error. This
---       case is self-contained and runs with or without Go.
+--  Does not cover:
+--    - the wire framing itself (chunk sizes, terminator, anti-smuggling
+--      rejections); test_http_wire pins it against the mock transport.
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;
@@ -59,9 +50,6 @@ procedure Test_HTTP_Upload is
       Failures := Failures + 1;
    end Fail;
 
-   ---------------------------------------------------------------
-   --  Test pull sources
-   ---------------------------------------------------------------
 
    --  Array-backed source: hands out its stored bytes in slices of at
    --  most Chunk per Read_Chunk so even a small payload exercises the
@@ -129,12 +117,10 @@ procedure Test_HTTP_Upload is
       Last := Buf'First + N - 1;
    end Read_Chunk;
 
-   ---------------------------------------------------------------
    --  Non-reading peer for the cancel case: accepts and holds the
-   --  socket without ever draining it, so a large upload fills the
-   --  socket buffer and the client's write parks — the only exit is
-   --  Cancel (Aborted_Error) or the write deadline.
-   ---------------------------------------------------------------
+   --  socket without draining it, so a large upload fills the socket
+   --  buffer and the client's write parks until Cancel or the write
+   --  deadline.
    task type Idle_Server is
       entry Get_Port
         (P   : out AHT.URL.Port_Number;
@@ -156,12 +142,10 @@ procedure Test_HTTP_Upload is
          Set_Socket_Option
            (Server, Socket_Level, (Name => Reuse_Address, Enabled => True));
          --  Shrink the receive buffer (accepted sockets inherit it from
-         --  the listener) so that, with the peer never reading, the
-         --  client's much larger body cannot be swallowed whole by the
-         --  kernel: its Write parks once this tiny buffer + the client's
-         --  send buffer fill. That makes the cancel hit the *parked
-         --  write* deterministically, not the response read (which the
-         --  client never reaches because no response is ever sent).
+         --  the listener) so the kernel cannot swallow the client's
+         --  body: its Write parks once this buffer and the client's send
+         --  buffer fill, so the cancel hits the parked write and not a
+         --  response read.
          Set_Socket_Option
            (Server, Socket_Level, (Name => Receive_Buffer, Size => 4096));
          Bind_To.Addr := Inet_Addr ("127.0.0.1");
@@ -272,8 +256,8 @@ begin
 
    --  Case 3: cancel an in-flight upload. A multi-MB chunked body to a
    --  non-reading peer fills the socket buffer; the write parks and a
-   --  sibling Cancel breaks it with Aborted_Error. Self-contained — no
-   --  Go fixture stalls, so this always runs.
+   --  sibling Cancel breaks it with Aborted_Error. Self-contained, so
+   --  it runs with or without Go.
    declare
       Server   : Idle_Server;
       Port     : AHT.URL.Port_Number;

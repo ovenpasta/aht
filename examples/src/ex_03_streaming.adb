@@ -1,28 +1,14 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Example 3 — streaming a large body without buffering it.
---
---  `Send` accumulates the whole response body in `Resp.Body_B`. For a
---  big download that means holding the entire thing in memory. The
---  streaming variant hands each slice to a `Sink` callback as it
---  arrives, so you can process (write to disk, hash, count) on the fly
---  and never materialise the full body. `Resp.Body_B` comes back empty.
---
---  Two passes here, both against the fixture's /chunked-big route (a
---  13 MB ramp delivered in one chunked frame):
---    * push style — a Sink callback tallies bytes and prints a line per
---      megabyte. The many progress lines show the body really is arriving
---      in windowed slices, not one allocation.
---    * stream-target style (the library-provided, no-callback way) —
---      hand Send_Streaming an Ada stream as the Target and the body is
---      written straight there. Here the Target is a temp file's stream,
---      so the download lands on disk with no sink to write yourself --
---      the download mirror of ex_05's Stream_Source upload.
+--  Example 3: streaming a large response body instead of buffering
+--  it in Resp.Body_B. Two passes against the fixture's /chunked-big
+--  (a 13 MB ramp in one chunk): a Sink callback that tallies bytes
+--  and prints a line per megabyte, then Send_Streaming with an Ada
+--  stream as Target, so the body lands in a temp file with no sink.
 --
 --  Run:  ./examples/bin/<mode>/ex_03_streaming [URL]
---  URL defaults to the fixture's /chunked-big; pass any URL to a large
---  body to retarget.
+--  URL defaults to the fixture's /chunked-big on :8764.
 
 with Ada.Command_Line; use Ada.Command_Line;
 with Ada.Directories;
@@ -66,7 +52,7 @@ procedure Ex_03_Streaming is
    end On_Chunk;
 
 begin
-   --  Pass 1 — push style: process each slice in a Sink callback.
+   --  Pass 1, push style: process each slice in a Sink callback.
    Put_Line ("GET (streaming, Sink) " & URL);
    Req.Method := AHT.HTTP.Methods.GET;
    Req.Target := AHT.URL.Parse (URL);
@@ -82,7 +68,7 @@ begin
              & Natural'Image (Resp.Body_B.Length)
              & " (body never accumulated)");
 
-   --  Pass 2 — stream-target style: no callback at all. Give
+   --  Pass 2, stream-target style: no callback at all. Give
    --  Send_Streaming a Target stream (here a temp file) and the body is
    --  written there directly as it arrives.
    New_Line;

@@ -1,24 +1,14 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Example 2 — build a request by hand, and the HEAD special case.
---
---  `Client.Get` only does GET-with-no-body. For anything else you
---  fill in a `Request_Type`: the verb, the target URL, any headers,
---  and (for POST/PUT/PATCH) the body bytes. The client supplies the
---  routing headers (Host, Content-Length, Connection) for you.
---
---  Two round trips here:
---    * a POST to /echo — the fixture reflects our body + Content-Type
---      so you can see the bytes made the trip intact.
---    * a HEAD to /hello — same wire as GET, but the server sends only
---      headers. The client suppresses body framing for HEAD, so the
---      response advertises a Content-Length while Body_B stays empty.
+--  Example 2: a hand-built Request_Type (verb, URL, headers, body)
+--  and the HEAD special case. A POST to /echo comes back with the body
+--  and Content-Type reflected; a HEAD to /hello returns headers only,
+--  with Content-Length set and Body_B empty. The client supplies
+--  Host, Content-Length and Connection itself.
 --
 --  Run:  ./examples/bin/<mode>/ex_02_request [HOST]
---  HOST defaults to the bundled fixture's origin; pass e.g.
---  http://127.0.0.1:8764 to retarget. Paths (/echo, /hello) are
---  appended for you.
+--  HOST defaults to the fixture origin http://127.0.0.1:8764.
 
 with Ada.Command_Line; use Ada.Command_Line;
 with Ada.Exceptions;
@@ -54,8 +44,8 @@ begin
    Put_Line ("  status : " & Resp.Status'Image);
    Put_Line ("  echoed : " & Resp.Body_Text);
 
-   --  HEAD: headers only on the wire. Note the Content-Length header
-   --  survives while the body is empty.
+   --  HEAD: headers only on the wire; Content-Length survives, the
+   --  body is empty.
    New_Line;
    Put_Line ("HEAD " & Host & "/hello");
    declare

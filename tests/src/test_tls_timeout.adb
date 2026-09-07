@@ -1,16 +1,17 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  TLS handshake-timeout test. Drives both the transport-level
---  Handshake_Deadline and the HTTP client's Timeout_Seconds wiring
---  against tests/server/server_stall.py (127.0.0.1:8767), which
---  accepts the TCP connection but never sends a ServerHello. Without a
---  bounded handshake the client would block forever; with one it must
---  raise Timeout_Error promptly.
+--  TLS handshake timeout and write poisoning. Cases 1 and 2 run against
+--  tests/server/server_stall.py (127.0.0.1:8767), which accepts the TCP
+--  connection and never sends a ServerHello; if it is down, Connect
+--  fails with Transport_Error and the cases report that. Case 3 uses the
+--  deaf-TLS fixture (8769) and the HTTPS fixture (8766).
 --
---  Run from the repo root (run_tests.sh chdir's there). The stall
---  server must be up — if it isn't, Connect fails on the TCP connect
---  with Transport_Error and the cases report that instead.
+--  Cases:
+--    1. transport-level Handshake_Deadline raises Timeout_Error
+--    2. Client.Timeout_Seconds reaches Connect's Handshake_Deadline
+--    3. a write deadline mid-record poisons the session; the object
+--       cannot be reconnected in place; a fresh transport works
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -46,7 +47,7 @@ procedure Test_TLS_Timeout is
 
 begin
    --  Case 1: transport level. Insecure isolates this from cert
-   --  verification — the server never presents a cert anyway, so the
+   --  verification; the server never presents a cert anyway, so the
    --  only way out is the handshake deadline.
    declare
       T       : AHT.Transport.TLS.TLS_Transport;
@@ -110,13 +111,12 @@ begin
       end;
    end;
 
-   --  Case 3: write-poison. Against the deaf-TLS fixture (8769) — which
-   --  completes the handshake then never reads — a large Write with a short
-   --  write deadline must fire Timeout_Error *mid-record*. Because a partial
-   --  TLS record may already be on the wire while mbedTLS thinks nothing was
-   --  sent, the session is now record-desynchronised and the transport must
-   --  drop it: Is_Connected goes False and a second Write raises rather than
-   --  emitting onto the corrupt stream (Codex slice-1 F1).
+   --  Case 3: write-poison. Against the deaf-TLS fixture (8769), which
+   --  completes the handshake then never reads, a large Write with a
+   --  short write deadline must fire Timeout_Error mid-record. A partial
+   --  TLS record may be on the wire while mbedTLS thinks nothing was
+   --  sent, so the session is record-desynchronised: Is_Connected goes
+   --  False and a second Write raises.
    declare
       type Byte_Array_Access is access AHT.Bytes.Byte_Array;
       procedure Free is
@@ -185,14 +185,10 @@ begin
       end if;
 
       --  Phase 2: a TLS transport is single-use after success. The
-      --  poisoned object (Drop_Connection latched Fatal but left the
-      --  inner TCP poisoned and the crypto contexts live) must NOT be
-      --  reconnected in place — freeing/reusing the backend state while
-      --  a WSS receiver could still be inside TLS.Read would be a
-      --  use-after-free. The Used latch (set by the earlier successful
-      --  handshake) rejects the attempt with TLS_Error before any
-      --  backend state is touched; the caller has to Close and use a
-      --  fresh transport.
+      --  poisoned object must not be reconnected in place: freeing the
+      --  backend state while a WSS receiver could still be inside
+      --  TLS.Read would be a use-after-free. The Used latch rejects the
+      --  attempt with TLS_Error before any backend state is touched.
       begin
          T.Connect (Host, 8766, Insecure => True, Handshake_Deadline => 2.0);
          Fail ("reconnect: in-place Connect on a poisoned TLS transport "
@@ -206,10 +202,11 @@ begin
                   & Ada.Exceptions.Exception_Message (E));
       end;
 
-      --  Close reclaims the mbedTLS contexts + inner TCP (single-threaded),
-      --  then a FRESH transport must handshake the HTTPS fixture (8766) and
-      --  GET /hello cleanly — proving the dead session was fully released
-      --  and nothing leaked into a new connection.
+      --  Close reclaims the mbedTLS contexts + inner TCP
+      --  (single-threaded), then a FRESH transport must handshake the
+      --  HTTPS fixture (8766) and GET /hello cleanly, proving the dead
+      --  session was fully released and nothing leaked into a new
+      --  connection.
       begin
          T.Close;
       exception

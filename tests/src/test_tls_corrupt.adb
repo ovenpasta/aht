@@ -1,17 +1,15 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Integrity-failure fail-closed check (backend-neutral).
+--  Integrity-failure fail-closed check, backend-neutral, against
+--  tests/server/server_tls_corrupt.py (127.0.0.1:8773): a valid banner,
+--  then a record whose MAC cannot verify.
 --
---  Against tests/server/server_tls_corrupt.py (127.0.0.1:8773), which
---  sends a valid banner and then injects a record whose MAC cannot
---  verify: Read must raise TLS_Error, AND the transport must stop
---  reporting Is_Connected. Regression test — the mbedtls engine used
---  to latch its internal Engine_Dead flag on a fatal read without
---  latching the coordinator's Fatal (what Is_Connected reads) or
---  poisoning the socket, so a session killed by a bad record MAC kept
---  claiming it was connected and a retry would have written onto a
---  stream whose integrity had already failed.
+--  Cases:
+--    - Read raises TLS_Error on the corrupted record
+--    - Is_Connected goes False: a fatal read latches the coordinator's
+--      Fatal and poisons the socket, not only the engine's dead flag
+--    - a subsequent Write refuses
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -44,10 +42,9 @@ procedure Test_TLS_Corrupt is
 begin
    T.Connect ("127.0.0.1", Port, Insecure => True);
 
-   --  Bound the read. The fixture deliberately HOLDS the connection
-   --  open after injecting the bad record, so a client that failed to
-   --  recognise the corruption would block forever and hang the whole
-   --  suite rather than failing this test.
+   --  Bound the read. The fixture holds the connection open after the
+   --  bad record, so a client that missed the corruption would block
+   --  forever.
    T.Set_Read_Deadline (Read_Budget);
 
    --  Read until the corrupted record surfaces. The banner arrives
@@ -73,14 +70,14 @@ begin
                & Ada.Exceptions.Exception_Message (E));
    end;
 
-   --  The point of the test: the failure must be fail-closed.
+   --  The failure must be fail-closed.
    if Saw_Error and then T.Is_Connected then
       Fail ("Is_Connected still True after an integrity failure "
             & "(session must be poisoned, not reusable)");
    end if;
 
-   --  And a subsequent operation must refuse rather than write onto
-   --  the compromised stream.
+   --  And a subsequent operation must refuse to write onto the
+   --  compromised stream.
    if Saw_Error then
       begin
          T.Write (AHT.Bytes.From_String ("must not reach the wire"));

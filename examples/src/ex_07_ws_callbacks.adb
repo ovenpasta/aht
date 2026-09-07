@@ -1,22 +1,13 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Example 7 — the push API: react to messages with callbacks.
---
---  ex_06 *pulled* messages with a blocking Receive. The other style is
---  to *push*: register callbacks and let the client's receiver task call
---  them as frames arrive. Set_On_Message / Set_On_Close / Set_On_Error
---  install the handlers; both styles are live at once (Receive still
---  works), but here we drive everything from the callbacks.
---
---  The catch the API spells out: callbacks run on the *receiver task*,
---  not the main task, so they must be task-safe. We funnel every
---  callback through a protected object (the idiomatic Ada way to share
---  state across tasks without a data race) and the main task reads the
---  tally back after the dust settles.
+--  Example 7: the push API. Set_On_Message, Set_On_Close and
+--  Set_On_Error install callbacks that the client's receiver task
+--  calls as frames arrive from the echo fixture on :8765. Callbacks
+--  run on the receiver task, so each writes through a protected
+--  object and the main task reads the tally afterwards.
 --
 --  Run:  ./examples/bin/<mode>/ex_07_ws_callbacks [URL]
---  URL defaults to the bundled echo fixture on :8765.
 
 with Ada.Command_Line; use Ada.Command_Line;
 with Ada.Exceptions;
@@ -62,10 +53,9 @@ procedure Ex_07_WS_Callbacks is
       begin
          Close_Count := Close_Count + 1;
       end Note_Close;
-      --  Only *record* the error here. Doing I/O (Put_Line) inside a
-      --  protected action is a bounded error in Ada -- it can deadlock or
-      --  raise Program_Error. The main task prints the tally afterward,
-      --  exactly like the message/close counts.
+      --  Only record the error here: I/O inside a protected action is
+      --  a bounded error in Ada. The main task prints the tally
+      --  afterwards.
       procedure Note_Error (Text : String) is
       begin
          Err_Count := Err_Count + 1;
@@ -98,10 +88,9 @@ procedure Ex_07_WS_Callbacks is
    C : AHT.Websocket.Client.Client_Type;
 begin
    --  'Unrestricted_Access: the callback access types are library-level
-   --  while these handlers are nested in this procedure, so plain 'Access
-   --  is rejected on accessibility grounds. The handlers provably outlive
-   --  the connection (Close returns before this scope ends), so taking
-   --  Unrestricted_Access is sound here.
+   --  and these handlers are nested here, so plain 'Access is rejected.
+   --  The handlers outlive the connection (Close returns before this
+   --  scope ends).
    AHT.Websocket.Client.Set_On_Message (C, On_Message'Unrestricted_Access);
    AHT.Websocket.Client.Set_On_Close   (C, On_Close'Unrestricted_Access);
    AHT.Websocket.Client.Set_On_Error   (C, On_Error'Unrestricted_Access);
@@ -117,10 +106,8 @@ begin
    end loop;
    Put_Line ("  sent 3 messages; letting the receiver task drive ...");
 
-   --  Wait on the observable callback count (bounded), not a fixed
-   --  sleep: the echoes arrive on the receiver task and fire On_Message,
-   --  so synchronise on the count reaching 3 rather than guessing a
-   --  duration that could undercount on a slow box.
+   --  Wait (bounded) for the callback count to reach 3; the echoes
+   --  arrive on the receiver task, and a fixed sleep could undercount.
    declare
       Waited : Duration := 0.0;
    begin
@@ -163,7 +150,7 @@ exception
       Put_Line ("(is the fixture up? try: bash examples/run_examples.sh)");
       --  Tear down the receiver task if the socket opened before the
       --  failure (Timeout 0.0 = abort now); otherwise scope exit blocks
-      --  on the still-running receiver. See ex_06 for the full rationale.
+      --  on the still-running receiver.
       if AHT.Websocket.Client.Is_Open (C) then
          begin
             AHT.Websocket.Client.Close (C, Timeout => 0.0);

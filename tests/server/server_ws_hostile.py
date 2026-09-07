@@ -3,93 +3,58 @@
 #  SPDX-License-Identifier: Apache-2.0
 """WebSocket peer that misbehaves in ways a client has to survive.
 
-Listens on 127.0.0.1:8777. Raw sockets rather than the `websockets`
-library, because every behaviour here is one that library exists to
-prevent: declaring a payload it never sends, running a fragment
-sequence past a size limit, flooding a reader that is not draining,
-or simply stopping reading.
+Listens on 127.0.0.1:8777 on raw sockets. The request path selects
+the behaviour; every path may carry a trailing /<token> that ties a
+report to the connection it describes.
 
-The request path selects the behaviour:
+  /huge   A frame header declaring 1 GiB, then nothing, socket held
+          open. Only a ceiling enforced in the decoder can object.
 
-  /huge   Send a frame header declaring 1 GiB and then nothing at all,
-          holding the socket open. This is the case that separates a
-          ceiling enforced in the decoder from one applied to a
-          decoded frame: only the former can object, because the
-          latter is still waiting for a gigabyte that never comes.
-
-  /frag   A fragment sequence, 64 KiB per part, that keeps going well
-          past any small ceiling. Each part is individually tiny, so
-          this is only refused if the limit is tracked across the
-          logical message rather than per frame.
+  /frag   A fragment sequence, 64 KiB per part, past any small
+          ceiling. Refused only if the limit is tracked across the
+          logical message.
 
   /fragstall
-          Send the FIRST fragment of a text message — FIN = 0, so the
-          message is explicitly not over — and then nothing at all,
-          holding the socket open. The client is left holding
-          reassembly state for a message that will never complete,
-          which is the state a reconnect has to discard. The payload
-          is recognisable on purpose: if it ever survives into the
-          next generation, it arrives prepended to that generation's
-          first message and says exactly where it came from.
+          The first fragment of a text message (FIN = 0), then a Ping,
+          then nothing, socket held open. The client is left holding
+          reassembly state a reconnect has to discard; the payload
+          names itself, so a leak into the next generation is visible.
 
   /flood  Many small messages back to back, to outrun a client that
           is not calling Receive.
 
-  /deaf   Stop reading for a long while, with a tiny receive buffer
-          so the client's writer backs up after a few KB rather than
-          after however many megabytes the kernel felt like holding.
-          A WebSocket write carries no deadline of its own, so this
-          is all it takes to park a writer indefinitely — which is
-          how a caller ends up waiting on a latch that writer holds.
+  /deaf   Stops reading for a long while, with a tiny receive buffer
+          so the client's writer backs up after a few KB. A WebSocket
+          write carries no deadline of its own.
 
-  /echo   Drains whatever it is sent and holds the socket open, and
-          sends NOTHING -- not even a Close in answer to one. The name
-          is historical; it is a silent peer, not an echo, and tests
-          that need a real echo use the ordinary fixture on 8765.
-          Tearing a connection to this peer down therefore cannot
-          complete the RFC handshake and has to abort the receiver,
-          which is exactly why some tests want it.
+  /echo   Drains what it is sent, holds the socket open and sends
+          nothing, not even a Close in answer to one; tearing the
+          connection down has to abort the receiver. Real echo is on
+          8765.
 
   /deafping/<t>
-          Like /deaf, but sends a Ping once this connection has been
-          OBSERVED writing -- detected by the same peek /traffic uses,
-          so the bytes are not consumed and the peer stays deaf. Only
-          then is a writer really in the transport holding the send
-          guard, so only then does the client's receiver find itself
-          queued behind one in order to answer with a Pong. Sleeping a
-          fixed time instead would sometimes send the Ping before any
-          writer had started, and the receiver-side gate would not be
-          exercised at all.
+          /deaf, plus a Ping once the connection has been seen writing
+          (by peek, so the peer stays deaf). Only then is a writer
+          holding the send guard for the receiver to queue behind.
 
   /pong/<t>
-          Sends back whether a Pong was seen on the connection using
-          token <t>, waiting a bounded time for it. Frames are
-          processed in order, so this reports that everything the
-          fixture sent before its Ping was consumed.
+          Answers whether a Pong was seen on the connection using
+          token <t>, waiting a bounded time. Frames are processed in
+          order, so a Pong means everything sent before the Ping was
+          consumed.
 
   /traffic/<t>
-          Waits until the connection using token <t> has actually put
-          bytes on the wire, and answers. Detected by PEEKING, so the
-          bytes are not consumed and a /deaf peer stays deaf — which
-          matters, because the point of asking is usually to confirm a
-          writer is blocked, and reading would unblock it.
+          Waits until the connection using token <t> has put bytes on
+          the wire, detected by peek so a /deaf peer stays deaf.
 
   /report/<t>
-          Sends back the close code observed on the connection that
-          used token <t>, waiting a bounded time for it to arrive.
-          Without this the tests could only check the client's own
-          diagnostic text, and swapping 1008 for 1009 in the client
-          would go unnoticed — the code that actually reaches the peer
-          is the part of the contract worth pinning.
-
-Every path may carry a trailing /<token>, which is how a report is
-tied to the connection it describes rather than to whatever happened
-most recently.
+          Answers the close code observed on the connection that used
+          token <t>, waiting a bounded time. Tests assert on the code
+          that reaches the peer.
 
 After the handshake the connection is held open and inbound frames are
-drained — so a client that fails is failing on its own limits, never
-because this peer went away or stopped reading. Draining also parses,
-so the Close frame the client sends on its way out is recorded.
+drained and parsed, so a failing client fails on its own limits and
+the Close frame it sends is recorded.
 
 Prints `READY wshostile 127.0.0.1:8777` once listening.
 """
@@ -114,14 +79,11 @@ FRAG_PARTS = 512      # 32 MiB total, far past the small ceilings tested
 FLOOD_COUNT = 20_000
 FLOOD_PAYLOAD = b"x" * 256
 
-# /fragstall's opening fragment. Distinctive rather than arbitrary: a
-# test that finds these bytes in a later generation's message knows
-# what leaked and from where, which "aaaa" would not tell it.
+# /fragstall's opening fragment, distinctive so a test that finds it in
+# a later generation's message knows what leaked.
 FRAGSTALL_PART = b"STALE-FRAGMENT-"
 REPORT_WAIT = 5.0     # how long /report waits for its token's close
-DEAF_SECONDS = 20.0   # /deaf: long enough to outlast any client bound
-                      # that is working, and to be obvious when one is
-                      # not
+DEAF_SECONDS = 20.0   # /deaf: outlasts any working client bound
 
 OP_TEXT = 0x1
 OP_BINARY = 0x2
@@ -130,28 +92,21 @@ OP_CLOSE = 0x8
 OP_PING = 0x9
 OP_PONG = 0xA
 
-# Close codes observed, keyed by the token the test put in the path.
-#
-# Keyed rather than "the most recent one", and waited for rather than
-# sampled. A test cannot know when this fixture's reader has parsed the
-# Close frame -- its own Close returning proves only that IT finished
-# -- so a single non-blocking read here would sometimes answer before
-# the frame arrived. The token also means a late or duplicated close
-# can never be mistaken for another case's.
+# Close codes observed, keyed by the token in the path and waited for:
+# a test cannot know when this reader has parsed the Close frame, and
+# the token keeps a late close from being taken for another case's.
 _closes: dict[str, "int | None"] = {}
 _closes_cv = threading.Condition()
 
 
-# Whether a connection has sent anything, keyed the same way. Peeked
-# rather than read, so asking does not change the answer.
+# Whether a connection has sent anything, keyed the same way. Peeked,
+# so asking does not change the answer.
 _traffic: dict[str, bool] = {}
 _traffic_cv = threading.Condition()
 
 
 # Pongs observed, keyed by token. A Pong proves the client's receiver
-# processed the frames ahead of it, which is the only way a test can
-# tell "holding an incomplete message" apart from "never received
-# anything".
+# processed the frames ahead of it.
 _pongs: dict[str, bool] = {}
 _pongs_cv = threading.Condition()
 
@@ -175,9 +130,8 @@ def await_pong(token: str, timeout: float) -> bool:
 
 
 def record_traffic(token: str) -> None:
-    """Record once. Callers hold a per-connection flag as well, so a
-    connection that keeps sending cannot re-create evidence a reader
-    has already consumed -- which would make consuming it pointless."""
+    """Record once; a connection that keeps sending cannot re-create
+    a record a reader has already consumed."""
     if not token:
         return
     with _traffic_cv:
@@ -187,13 +141,9 @@ def record_traffic(token: str) -> None:
 
 
 def await_traffic(token: str, timeout: float) -> bool:
-    """Wait for this token's first traffic, then forget it.
-
-    Consumed on read for the same reason close codes are: a token that
-    answered yes forever would let a later run -- or a backout run
-    against the same fixture -- pass without anything having been
-    written at all.
-    """
+    """Wait (bounded) for this token's first traffic, then forget it,
+    so a backout run against the same fixture cannot pass on a stale
+    answer."""
     with _traffic_cv:
         found = _traffic_cv.wait_for(lambda: token in _traffic, timeout)
         if found:
@@ -221,7 +171,7 @@ def await_close(token: str, timeout: float) -> "tuple[bool, int | None]":
 
 
 def frame(fin: bool, opcode: int, payload: bytes) -> bytes:
-    """One unmasked server-to-client frame (RFC 6455 §5.2)."""
+    """One unmasked server-to-client frame (RFC 6455 section 5.2)."""
     b0 = (0x80 if fin else 0x00) | opcode
     n = len(payload)
     if n < 126:
@@ -234,11 +184,8 @@ def frame(fin: bool, opcode: int, payload: bytes) -> bytes:
 
 
 def lying_header(declared: int) -> bytes:
-    """A binary frame header declaring `declared` bytes, with no body.
-
-    Always the 64-bit form, so the declaration is a full ten bytes and
-    nothing about it is ambiguous.
-    """
+    """A binary frame header declaring `declared` bytes, with no body,
+    always in the ten-byte 64-bit form."""
     return bytes([0x80 | OP_BINARY, 127]) + declared.to_bytes(8, "big")
 
 
@@ -261,15 +208,8 @@ def token_of(path: str) -> str:
 
 
 def route_of(path: str) -> str:
-    """The leading path segment, matched exactly.
-
-    Exactly, and not by prefix: `/fragstall` starts with `/frag`, so a
-    startswith dispatch silently routed it to the fragment flood and
-    the test that depended on it failed with a close code from a
-    behaviour it never asked for. Every route here is one segment, and
-    anything after it is the token, so there is nothing a prefix match
-    buys that this does not.
-    """
+    """The leading path segment, matched exactly: `/fragstall` starts
+    with `/frag`. Anything after it is the token."""
     parts = [p for p in path.split("/") if p]
     return parts[0] if parts else ""
 
@@ -305,9 +245,9 @@ def handshake(conn: socket.socket, req: str) -> str:
 def take_frame(buf: bytes) -> tuple[int, bytes, bytes] | None:
     """Split one client frame off `buf`.
 
-    Returns (opcode, payload, rest) or None if `buf` does not yet hold
-    a whole frame. Client frames are always masked (RFC 6455 §5.3), so
-    the mask is not optional here.
+    Returns (opcode, payload, rest), or None if `buf` does not yet
+    hold a whole frame. Client frames are always masked (RFC 6455
+    section 5.3).
     """
     if len(buf) < 2:
         return None
@@ -347,23 +287,15 @@ def drain(
     token: str,
     deaf_for: float = 0.0,
 ) -> None:
-    """Keep reading so the client's writer never stalls on us, and
-    parse what arrives so the Close frame it ends with is recorded.
-
-    Publishes under `token`, or not at all when there is none — which
-    is how /report's own client, whose close is of no interest, stays
-    out of the record.
-    """
-    # Declared before the deaf loop below, which reads it: a name
-    # bound only afterwards would raise UnboundLocalError on the first
-    # peek and take this thread down without a word.
+    """Keep reading so the client's writer never stalls, and parse
+    what arrives so the Close frame is recorded under `token`; with no
+    token (a /report client) nothing is recorded."""
+    # Read by the deaf loop below, so bound before it.
     seen_traffic = False
 
-    # Not reading at all is the point of /deaf, but stop must still be
-    # honoured, so the wait is in slices rather than one sleep. Each
-    # slice peeks: peeking reports what has arrived without removing
-    # it, so the client's writer stays blocked exactly as intended
-    # while the test still gets told it really is writing.
+    # /deaf waits in slices so stop is honoured. Each slice peeks, so
+    # the client's writer stays blocked while the test is told it is
+    # writing.
     waited = 0.0
     if deaf_for > 0.0:
         conn.settimeout(0.05)
@@ -451,15 +383,9 @@ def serve(conn: socket.socket) -> None:
 
         elif route == "fragstall":
             conn.sendall(frame(False, OP_TEXT, FRAGSTALL_PART))
-            # Then a Ping, and nothing else ever.
-            #
-            # Frames are processed in order, so a Pong coming back
-            # proves the fragment ahead of it was consumed -- which a
-            # test cannot otherwise establish. Without this, "nothing
-            # was delivered" is equally consistent with the client
-            # holding an incomplete message and with the fixture
-            # having sent nothing at all, and the anti-vacuity check
-            # is itself vacuous.
+            # Then a Ping, and nothing else. Frames are processed in
+            # order, so a Pong coming back proves the fragment ahead of
+            # it was consumed.
             conn.sendall(frame(True, OP_PING, token_of(path).encode()))
 
         elif route == "flood":
@@ -491,18 +417,11 @@ def serve(conn: socket.socket) -> None:
             conn.sendall(frame(True, OP_TEXT, answer.encode("ascii")))
 
         elif route == "deaf":
-            pass          # the point is what this one does NOT do
+            pass          # never reads; see drain
 
         elif route == "deafping":
-            # Wait for evidence that this connection is actually
-            # writing before pinging. The drain thread peeks rather
-            # than reads, so asking does not unblock the writer -- the
-            # whole point is that it stays parked.
-            #
-            # A fixed sleep was wrong here: it sends the Ping whether
-            # or not a writer ever started, so the receiver could
-            # answer with the guard free and the contention this route
-            # exists to create would never happen.
+            # Ping only once this connection has been seen writing; the
+            # drain thread peeks, so asking does not unblock the writer.
             if await_traffic(token_of(path), REPORT_WAIT):
                 try:
                     conn.sendall(frame(True, OP_PING, b"gate"))
@@ -512,21 +431,19 @@ def serve(conn: socket.socket) -> None:
         elif route == "echo":
             pass          # the drain thread is all this one needs
 
-        # Hold the connection open so a client that fails is failing on
-        # its own limits, not because the peer vanished.
+        # Hold the connection open, so a failing client fails on its
+        # own limits.
         deadline = time.monotonic() + HOLD
         while time.monotonic() < deadline:
             time.sleep(0.1)
     except OSError:
         pass              # client tore the connection down: expected
     finally:
-        # Let the reader finish on its own before pulling the socket
-        # out from under it. It exits as soon as the peer closes, and
-        # the bytes still in flight at that moment include the Close
-        # frame carrying the diagnosis these tests assert on — closing
-        # here first would race exactly the thing being observed.
-        # Sends can fail long before the client is done talking, so
-        # this cannot be skipped just because the write side broke.
+        # Let the reader finish before closing the socket: it exits
+        # when the peer closes, and the bytes in flight then include
+        # the Close frame the tests assert on. Sends can fail long
+        # before the client is done talking, so this runs on that path
+        # too.
         reader.join(timeout=5.0)
         stop.set()
         reader.join(timeout=1.0)

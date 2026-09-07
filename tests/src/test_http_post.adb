@@ -4,7 +4,7 @@
 --  POST round-trip against /echo. Verifies that AHT.HTTP.Client.Send
 --  forwards the body bytes intact and that the server's echo comes
 --  back via Content-Length framing. Also pins down the auto-added
---  Content-Type round-trip — the server reflects whatever we sent,
+--  Content-Type round-trip: the server reflects whatever we sent,
 --  so a regression that mangles Content-Type on the request would
 --  show up here.
 

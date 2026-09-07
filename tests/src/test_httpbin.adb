@@ -1,22 +1,17 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Interop check against go-httpbin (mccutchen/go-httpbin), a real,
---  widely-used third-party HTTP/1.1 server — proof that AHT.HTTP.Client
---  talks to more than its own Python fixture. The orchestrator
---  (tests/run_tests.sh) installs/starts go-httpbin only when a Go
---  toolchain is available and exports its base URL in AHT_HTTPBIN_URL;
---  when that variable is unset this test SKIPs cleanly (exit 0) so the
---  suite stays green on machines without Go.
+--  Interop check against go-httpbin (mccutchen/go-httpbin), a
+--  third-party HTTP/1.1 server. run_tests.sh starts it only with a Go
+--  toolchain and exports its base URL in AHT_HTTPBIN_URL; unset, this
+--  test SKIPs (exit 0).
 --
---  Endpoints exercised (all deterministic, no JSON parsing required):
---    /status/204, /status/418   status-code passthrough (non-2xx is not
---                               an exception)
---    /bytes/256                 Content-Length framing round-trips
---    /redirect/1                a redirect surfaces raw (AHT does not
---                               auto-follow) with a Location header
---    /get                       JSON content-type on a vanilla GET
---    POST /post                 a buffered request body reaches the peer
+--  Cases:
+--    /status/204, /status/418: status passthrough; non-2xx not raised.
+--    /bytes/256: Content-Length framing round-trips.
+--    /redirect/1: a 3xx surfaces raw with Location; no auto-follow.
+--    /get: JSON content-type on a vanilla GET.
+--    POST /post: a buffered request body reaches the peer.
 
 with Ada.Command_Line;
 with Ada.Environment_Variables;

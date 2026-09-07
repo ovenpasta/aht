@@ -1,26 +1,16 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Example 4 — fire a request off to the side, and cancel one.
---
---  `Send_Async` runs a request on a worker task and returns straight
---  away, so the caller can do other work; `Await` collects the result
---  (or re-raises whatever the worker hit). `Cancel`, from any task,
---  aborts an in-flight request — `Await` then re-raises
---  `Aborted_Error`.
---
---  Two parts:
---    * happy path — Send_Async to /hello, do a little work, Await the
---      200.
---    * cancel — point a second handle at the stall fixture (accepts
---      the connection, then never answers), fire it, Cancel after a
---      moment, and watch Await surface Aborted_Error instead of
---      hanging.
+--  Example 4: Send_Async runs a request on a worker task; Await
+--  collects the result or re-raises what the worker hit; Cancel, from
+--  any task, aborts an in-flight request so Await raises
+--  Aborted_Error. First a plain Send_Async to /hello, then a request
+--  to the stall fixture (accepts, never answers) cancelled mid-flight.
 --
 --  Run:  ./examples/bin/<mode>/ex_04_async_cancel [URL] [STALL_URL]
---  URL defaults to the fixture's /hello; STALL_URL defaults to the
---  stall fixture on :8767. Cancel takes effect on the response read,
---  so the stall target must accept the connection first.
+--  URL defaults to /hello on :8764, STALL_URL to the stall fixture on
+--  :8767. Cancel takes effect on the response read, so the stall
+--  target must accept the connection first.
 
 with Ada.Command_Line; use Ada.Command_Line;
 with Ada.Exceptions;

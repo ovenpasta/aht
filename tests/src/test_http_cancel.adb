@@ -1,25 +1,23 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Cross-task cancel via AHT.HTTP.Client.Cancel_Handle.
+--  Cross-task cancel via AHT.HTTP.Client.Cancel_Handle: the protected
+--  Cancel_State that binds the live transport to the handle during
+--  Send, and the pre-cancel short-circuit. Two in-process servers, one
+--  silent and one fast.
 --
---  The cancel mechanism rides Transport.Abort_Pending, which is
---  already covered at the transport level by test_tcp. This binary
---  exercises the layer above it: the protected Cancel_State that
---  threads the live transport into the handle for the duration of
---  Send, and the pre-cancel short-circuit.
+--  Cases:
+--    1. Cancel during a blocked Read: the silent server never writes;
+--       a sibling task fires Cancel after 0.2 s; Send raises
+--       Aborted_Error inside the safety window.
+--    2. Pre-cancel: Cancel before Send; Send raises Aborted_Error
+--       without dialing.
+--    3. Cancel after Send completed is a no-op: no exception, no
+--       double-close.
+--    4. Is_Cancelled: false initially, true after any Cancel.
 --
---  Four cases:
---    1. Cancel during a blocked Read — silent in-process server
---       accepts but never writes; a sibling task fires Cancel after
---       0.2 s; Send raises Aborted_Error inside the safety window.
---    2. Pre-cancel — Cancel called before Send. Send raises
---       Aborted_Error immediately without dialing.
---    3. Post-Send Cancel is harmless — Send completes against a
---       fast in-process server, then Cancel runs and is a no-op
---       (no exception, no double-close on the closed transport).
---    4. Is_Cancelled reflects state — false initially, true after
---       any Cancel.
+--  Does not cover:
+--    - Transport.Abort_Pending itself; test_tcp covers it.
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;
@@ -113,16 +111,10 @@ procedure Test_HTTP_Cancel is
             if Status = Completed then
                begin
                   Accept_Socket (Server, Client, Peer);
-                  --  Drain the request, then sit on a second
-                  --  Receive that blocks until the client tears its
-                  --  end down. This is what makes the server
-                  --  "silent": once the request is in we never
-                  --  write, so the client's Read parks waiting for
-                  --  a response that will only ever arrive when
-                  --  Cancel (or the read deadline) fires and the
-                  --  client closes — at which point our blocked
-                  --  Receive returns Last < First (EOF) and we
-                  --  proceed to clean up.
+                  --  Drain the request, then park on a second Receive
+                  --  that returns only when the client closes: the
+                  --  server never writes, so the client's Read parks
+                  --  until Cancel or the read deadline fires.
                   declare
                      Buf  : Stream_Element_Array (1 .. 4_096);
                      Last : Stream_Element_Offset;
@@ -322,14 +314,14 @@ begin
          end;
       end Canceller;
    begin
-      C.Timeout_Seconds := 3;  -- safety: bail out before any test
-                               -- timeout would mask a stuck Send
+      C.Timeout_Seconds := 3;  --  safety: bail out before any test
+                               --  timeout would mask a stuck Send
 
       Server.Get_Port (Port, Setup_Err);
       if Length (Setup_Err) > 0 then
          Fail ("cancel-during-read: server setup: "
                & To_String (Setup_Err));
-         Canceller.Go;  -- still kick it so the task terminates
+         Canceller.Go;  --  still kick it so the task terminates
       else
          Req.Method := AHT.HTTP.Methods.GET;
          Req.Target := AHT.URL.Parse (URL_For (Port, "/hang"));
@@ -369,11 +361,11 @@ begin
       end if;
    end;
 
-   --  Case 2: pre-cancel — Cancel before Send. Must raise
-   --  immediately and must not even dial. We give the URL a port
-   --  with nothing listening so a "successful" connect would either
-   --  raise Transport_Error (visible as the wrong exception) or
-   --  hang on Connect's timeout (visible as a long Elapsed).
+   --  Case 2: pre-cancel. Cancel before Send must raise immediately
+   --  and must not even dial. The URL gets a port with nothing
+   --  listening, so a "successful" connect would either raise
+   --  Transport_Error (visible as the wrong exception) or hang on
+   --  Connect's timeout (visible as a long Elapsed).
    declare
       C       : AHT.HTTP.Client.Client_Type;
       Req     : AHT.HTTP.Request.Request_Type;

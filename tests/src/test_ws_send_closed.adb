@@ -1,20 +1,15 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Regression for the Send_* close-race: Send_Text / Send_Binary /
---  Send_Ping on a connection that is not Open must raise the catchable
---  Closed_Error, not Assertion_Error (the old `Pre => Is_Open` aspect
---  tripped under -gnata on a benign close race) and must never
---  dereference a null transport on a never-connected Client.
+--  Send_Text / Send_Binary / Send_Ping on a connection that is not
+--  Open raise Closed_Error, not Assertion_Error, and never dereference
+--  a null transport on a never-connected Client. A `Pre => Is_Open`
+--  aspect on the senders trips under -gnata on a benign close race.
+--  Case 2 uses the echo fixture on 8765.
 --
---  Two deterministic cases:
---    1. Never connected — a fresh Client has Active = null and
---       Is_Open = False; each of the three senders raises Closed_Error
---       (needs no server).
---    2. Closed after connect — Connect to the echo fixture, Close, then
---       Send_Text: the connection is Closed so the sender raises
---       Closed_Error. This is the real shape of the race the fix
---       targets (peer/handshake gone before the app sends).
+--  Cases:
+--    1. never connected: each of the three senders raises Closed_Error
+--    2. Connect, Close, then Send_Text raises Closed_Error
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -44,7 +39,7 @@ procedure Test_WS_Send_Closed is
       Fail (What & ": returned without raising (expected Closed_Error)");
    exception
       when AHT.Websocket.Closed_Error =>
-         null;  -- wanted
+         null;  --  wanted
       when E : others =>
          Fail (What & ": raised "
                & Ada.Exceptions.Exception_Name (E)

@@ -1,15 +1,10 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Hits the Python fixture's /hello route and asserts the
---  response body bytes round-trip. The route returns a fixed
---  "hello, world\n" with Content-Length framing, so this is the
---  thinnest possible end-to-end check that AHT.HTTP.Client.Get can
---  drive a real HTTP/1.1 peer at all.
---
---  Server-bring-up is the orchestrator's job (tests/run_tests.sh).
---  If the server isn't running, Client.Get raises Transport_Error
---  on connect — the test catches it and reports clearly.
+--  GET against the Python fixture's /hello route; the fixed
+--  "hello, world\n" body with Content-Length framing must round-trip.
+--  If the fixture is not running, Client.Get raises Transport_Error on
+--  connect and the test reports it.
 
 with Ada.Command_Line;
 with Ada.Exceptions;

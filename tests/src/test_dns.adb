@@ -2,36 +2,27 @@
 --  SPDX-License-Identifier: Apache-2.0
 
 --  Bounded resolution: AHT.DNS and the shim under it
---  (csrc/dns/aht_dns.c).
+--  (csrc/dns/aht_dns.c). The bound is on the CALLER, not the lookup.
+--  All cases but 1 and 6 run against a fake resolver installed through
+--  a C seam that replaces the LOOKUP only: the worker thread, the
+--  wait, the deadline and the reference-counted handoff are production.
 --
---  The bound here is on the CALLER, not on the lookup, and the two
---  cannot be tested the same way. That the caller stops waiting is
---  observable directly. That the abandoned worker is handled
---  correctly is not — so case 4 makes it observable rather than
---  assuming it, which is the whole reason the fake counts its own
---  completions.
+--  Cases:
+--    1. the real resolver, reached and answering (localhost)
+--    2. values survive the trip: three literals, in order
+--    3. a 3 s resolver with a 0.5 s budget returns at 0.5 s
+--    4. the abandoned worker finishes later and frees its half
+--    5. a fake sleeping inside a generous budget succeeds
+--    6. presentation form of IPv6, driven directly
 --
---  Everything below runs against a fake resolver installed through a
---  C seam, except cases 1 and 6. The seam replaces the LOOKUP only:
---  the worker thread, the wait, the deadline and the
---  reference-counted handoff are the production ones in every case.
---  A seam any higher — swapping AHT.DNS.Resolve itself — would test
---  none of those, which is to say it would test nothing that can go
---  wrong.
+--  Covers:
+--    - the caller left first: the completion counter has not moved on
+--      return, and then moves
+--    - case 5 stops a shim that returns Timed_Out unconditionally
 --
---  Why a fake at all: the timeout path needs a resolver that stalls,
---  and the real one stalls only against an unreachable nameserver.
---  That is /etc/resolv.conf, which is process-global and shared with
---  whatever else is running on the machine. A sleeping fake makes the
---  same path deterministic with no network, no configuration, and
---  identical behaviour under wine.
---
---  What is NOT covered: that a real getaddrinfo stall is survived.
---  Case 1 proves the real resolver is reached and answers; no case
---  drives it to its own timeout, because arranging that is exactly
---  the global-state problem above. The gap is narrow — the stall path
---  and the success path differ only in which function the seam holds
---  — but it is a gap.
+--  Does not cover:
+--    - a real getaddrinfo stall: making one happen means a black-hole
+--      nameserver in /etc/resolv.conf, process-global state
 
 with Ada.Real_Time; use Ada.Real_Time;
 with Ada.Command_Line;
@@ -58,9 +49,8 @@ procedure Test_DNS is
       Failures := Failures + 1;
    end Fail;
 
-   --  The seam. Imported here rather than bound in AHT.DNS on
-   --  purpose: the library's own API offers no way to reach it, so
-   --  installing a fake takes a deliberate import of a symbol with
+   --  The seam. The library's own API offers no way to reach it, so
+   --  installing a fake takes an explicit import of a symbol with
    --  _for_test in its name.
    procedure Install_Fake (Sleep_Ms, N_Addrs : Interfaces.C.int)
      with Import, Convention => C,
@@ -74,8 +64,8 @@ procedure Test_DNS is
      with Import, Convention => C,
           External_Name => "aht_dns_fake_completions_for_test";
 
-   --  Family is 4 or 6 rather than AF_INET/AF_INET6, so this side
-   --  needs no platform constant to reach it.
+   --  Family is 4 or 6, not AF_INET/AF_INET6, so this side needs no
+   --  platform constant to reach it.
    function Format_Addr
      (Family : Interfaces.C.int;
       Addr   : System.Address;
@@ -128,10 +118,9 @@ procedure Test_DNS is
 
 begin
    --  Case 1: the real resolver, reached and answering. This is the
-   --  only case that exercises getaddrinfo, and it is what stops the
-   --  rest passing against a shim that never reaches the lookup at
-   --  all. localhost is used because it resolves from /etc/hosts
-   --  without a nameserver.
+   --  only case that exercises getaddrinfo, and without it the rest
+   --  would pass against a shim that never reaches the lookup at all.
+   --  localhost resolves from /etc/hosts without a nameserver.
    AHT.DNS.Resolve
      (Host    => "localhost",
       Service => "80",
@@ -161,10 +150,9 @@ begin
 
    --  Case 2: values survive the trip. A fake that answers at once
    --  with three distinct literals must come back Resolved, with
-   --  those three, in that order. This is what would catch the slot
-   --  arithmetic in the binding being wrong — a fixed-width block
-   --  read at the wrong stride returns plausible-looking garbage
-   --  rather than failing.
+   --  those three, in that order. Catches wrong slot arithmetic in
+   --  the binding: a read at the wrong stride returns plausible
+   --  garbage.
    Install_Fake (0, 3);
    AHT.DNS.Resolve
      (Host    => "example.invalid",
@@ -194,17 +182,11 @@ begin
       end loop;
    end if;
 
-   --  Case 3 and 4 are one experiment, and case 4 is the half that
-   --  makes case 3 mean anything.
-   --
-   --  A resolver that sleeps 3 s, given a 0.5 s budget, must hand
-   --  control back at 0.5 s. That alone is equally consistent with
-   --  "the worker was abandoned correctly" and "no worker ever ran"
-   --  — the trap CLAUDE.md names. So the completion counter is read
-   --  immediately on return and must NOT yet have moved (the worker
-   --  is still asleep: the caller really did leave first), and is
-   --  then waited on until it does move (the worker really did
-   --  finish, late, and freed its half of the job).
+   --  Cases 3 and 4 are one experiment. A resolver that sleeps 3 s,
+   --  given a 0.5 s budget, must hand control back at 0.5 s; that is
+   --  equally true of "no worker ever ran". So the completion counter
+   --  is read on return and must NOT have moved, then is waited on
+   --  until it does.
    declare
       Before  : constant Interfaces.C.int := Fake_Completions;
       Started : Ada.Real_Time.Time;
@@ -234,9 +216,9 @@ begin
       --  The shim keeps its deadline in whole milliseconds on the
       --  monotonic clock, and takes "now" by truncation, so the wait
       --  can finish up to one tick inside the nominal budget. The
-      --  slack here is for that quantization and nothing else: a
-      --  genuine early return — the deadline ignored, the wait not
-      --  taken — is off by hundreds of milliseconds, not by two.
+      --  slack covers that quantization only: an early return (the
+      --  deadline ignored, the wait not taken) is off by hundreds of
+      --  milliseconds, not by two.
       if Took < 0.498 then
          Fail ("stall: returned after" & Duration'Image (Took)
                & "s, before the budget could have expired");
@@ -246,17 +228,16 @@ begin
       end if;
 
       --  The premise: the caller got out while the lookup was still
-      --  running. Had the worker already finished, this would be a
-      --  test of a slow return, not of an abandoned one.
+      --  running. Had the worker already finished, this would test a
+      --  slow return, not an abandoned one.
       if At_Exit /= Before then
          Fail ("stall: the fake had already completed when Resolve "
                & "returned — the wait was not cut short, so nothing "
                & "was abandoned and case 4 proves nothing");
       end if;
 
-      --  And the other half: it does finish, afterwards. Polled
-      --  rather than slept-through, so the delay is a liveness
-      --  backstop and the counter is the evidence.
+      --  The other half: it does finish, afterwards. Polled, so the
+      --  delay is a liveness backstop and the counter is the evidence.
       while Fake_Completions = Before and then Waited < 10.0 loop
          delay 0.1;
          Waited := Waited + 0.1;
@@ -303,12 +284,10 @@ begin
    --  binary could not silently inherit the fake.
    Restore_Real;
 
-   --  Case 6: presentation form, driven directly.
-   --
-   --  These are the inputs a resolver will not produce on request. The
-   --  zero-run rule is where this kind of formatter goes wrong: it
+   --  Case 6: presentation form, driven directly, on inputs a resolver
+   --  will not produce on request. The zero-run rule: the formatter
    --  must take the LONGEST run, the leftmost of equal runs, and must
-   --  leave a single zero group alone rather than compress it.
+   --  leave a single zero group uncompressed.
    declare
       V4  : constant Octets := [127, 0, 0, 1];
       Lo6 : constant Octets := [0, 0, 0, 0, 0, 0, 0, 0,
@@ -316,9 +295,9 @@ begin
    begin
       Check_Format ("v4", 4, V4, "127.0.0.1");
 
-      --  The literal test_dns already accepts from a live lookup, so
-      --  a regression here would also break case 1 on any host whose
-      --  localhost answers ::1 first.
+      --  The literal case 1 accepts from a live lookup; a regression
+      --  here also breaks case 1 on any host whose localhost answers
+      --  ::1 first.
       Check_Format ("v6 loopback", 6, Lo6, "::1");
 
       Check_Format ("v6 unspecified", 6,

@@ -1,33 +1,36 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Trust anchors supplied as PEM data rather than as a filesystem path.
+--  Trust anchors supplied as PEM data (CA_PEM) instead of a filesystem
+--  path (CA_Path). The same certificate, once by path and once as
+--  bytes, must produce the same verified handshake. Against
+--  server_ws_tls.py on localhost:8768 with the fixture's self-signed
+--  cert; run from the repo root so the relative CA path resolves.
 --
---  The point of CA_PEM is anchors compiled into the binary, so the
---  decisive comparison is against CA_Path: the SAME certificate, once
---  by path and once as bytes, must produce the same verified
---  handshake. Anything else means the in-memory route is not really
---  loading what it was given.
+--  Cases:
+--    1. the anchor as a path, as a baseline
+--    2. the same bytes in memory
+--    3. the anchor repeated: a duplicate is not malformed input
+--    4. CA_Path and CA_PEM together: refused before dialling
+--    5. nothing parseable: refused
+--    6. a valid certificate followed by corrupt data: refused
+--    6b. a valid certificate followed by ordinary text: refused
+--    6c. ordinary text before the first certificate: refused
+--    7. a truncated certificate: refused
+--    7b. malformed PEM is refused under Insecure
+--    8. the WebSocket client's own guard on a ws:// dial
+--    9. Reconnect replays the PEM
 --
---  The rest of the cases are about refusing, and they matter more than
---  the happy path:
---
---    * Both CA_Path and CA_PEM supplied is an error, with no
---      precedence, before anything is dialled. A caller who passed two
---      sets of anchors is wrong about which is in force, and honouring
---      one silently leaves that belief intact.
---
---    * Parsing is ALL-OR-NOTHING. A bundle whose tail is truncated or
---      corrupt must be rejected whole. This is the case worth having:
---      the natural implementation on both backends reads certificates
---      until one fails to parse, which would install everything before
---      the damage and report success -- trusting a prefix of what the
---      caller meant to trust, silently. The valid-cert-plus-garbage
---      case below is the one that catches it, because the
---      garbage-only case is refused by any implementation.
---
---  Run from the repo root, like the other TLS tests, so the relative
---  CA path resolves.
+--  Covers:
+--    - parsing is all-or-nothing: an implementation that reads until
+--      one fails installs a prefix and reports success; case 6 catches
+--      it, case 5 is refused by any implementation
+--    - 6b is caught by neither library's own error reporting
+--    - 7b: the answer does not depend on which backend is linked
+--    - case 8: Generation reads 0 afterwards, so the refusal comes
+--      before admission reserves a generation
+--    - case 9: a reference kept instead of a copy fails the second
+--      handshake
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -159,7 +162,7 @@ begin
          return;
    end;
 
-   --  Case 2: the same bytes, in memory. This is the feature.
+   --  Case 2: the same bytes, in memory.
    Expect_Connects ("ca-pem", Cert);
 
    --  Case 3: the anchor repeated. A real bundle may legitimately
@@ -167,7 +170,7 @@ begin
    --  malformed input.
    Expect_Connects ("ca-pem-duplicated", Cert & Cert);
 
-   --  Case 4: both routes at once. No precedence — refused before
+   --  Case 4: both routes at once. No precedence; refused before
    --  anything is dialled.
    Expect_Refused
      ("both-supplied", CA_File, Cert,
@@ -175,14 +178,13 @@ begin
       & "refused rather than silently resolved");
 
    --  Case 5: nothing parseable at all. Any implementation refuses
-   --  this; it is here so the harder cases below can be read as
-   --  strictly stronger.
+   --  this; it is the baseline for the cases below.
    Expect_Refused
      ("garbage-only", "", "not a certificate at all",
       "the PEM contained no certificate");
 
-   --  Case 6: a valid certificate followed by corrupt data. THE case.
-   --  An implementation that reads certificates until one fails would
+   --  Case 6: a valid certificate followed by corrupt data. An
+   --  implementation that reads certificates until one fails would
    --  install this one and report success, trusting a prefix of what
    --  was supplied.
    Expect_Refused
@@ -194,12 +196,11 @@ begin
       & "rejected rather than the leading certificate installed");
 
    --  Case 6b: a valid certificate followed by ORDINARY text, not a
-   --  malformed PEM block. This is the shape a stray log line, an
-   --  editor artefact or a concatenation accident actually takes, and
-   --  it is not caught by either library's own error reporting:
-   --  OpenSSL's PEM_R_NO_START_LINE means "no further header found",
-   --  which arbitrary trailing text also produces, and mbedTLS stops
-   --  at the missing header and returns the earlier success count.
+   --  malformed PEM block: the shape a stray log line or a
+   --  concatenation accident takes. Neither library's own error
+   --  reporting catches it: OpenSSL's PEM_R_NO_START_LINE also means
+   --  "no further header", and mbedTLS stops at the missing header
+   --  and returns the earlier success count.
    Expect_Refused
      ("valid-then-plain-garbage",
       "", Cert & "this is trailing garbage" & ASCII.LF,
@@ -213,22 +214,17 @@ begin
       "", "this is leading garbage" & ASCII.LF & Cert,
       "the bundle has leading non-PEM data");
 
-   --  Case 7: a truncated certificate — the shape a partial copy or a
-   --  clipped build artefact actually takes.
+   --  Case 7: a truncated certificate, the shape a partial copy or a
+   --  clipped build artefact takes.
    Expect_Refused
      ("truncated",
       "", Cert (Cert'First .. Cert'First + Cert'Length / 2),
       "the certificate is cut short, so it cannot be trusted in part");
 
-   --  Case 7b: malformed PEM is refused even under Insecure.
-   --
-   --  This pins a rule the two backends disagreed on: OpenSSL skips
-   --  CA loading entirely when verification is off, mbedTLS parsed it
-   --  anyway, so the same broken bundle raised on one backend and was
-   --  ignored on the other. Supplying broken trust material is a
-   --  caller error whether or not this particular dial would have
-   --  used it, and the answer must not depend on which backend is
-   --  linked.
+   --  Case 7b: malformed PEM is refused even under Insecure. Broken
+   --  trust material is a caller error whether or not this dial would
+   --  use it, and the answer must not depend on the backend: OpenSSL
+   --  skips CA loading when verification is off, mbedTLS parses it.
    declare
       T : AHT.Transport.TLS.TLS_Transport;
    begin
@@ -246,13 +242,10 @@ begin
                & Ada.Exceptions.Exception_Name (E));
    end;
 
-   --  Case 8: the WebSocket client's own guard.
-   --
-   --  On a ws:// dial no TLS transport is ever built, so the
-   --  transport-level refusal cannot fire and this is the only thing
-   --  that catches the contradiction. Generation must still read 0
-   --  afterwards: the refusal has to come before admission reserves a
-   --  generation, not after.
+   --  Case 8: the WebSocket client's own guard. On a ws:// dial no TLS
+   --  transport is built, so the transport-level refusal cannot fire.
+   --  Generation must still read 0 afterwards: the refusal comes
+   --  before admission reserves a generation.
    declare
       C : AHT.Websocket.Client.Client_Type;
    begin
@@ -284,15 +277,13 @@ begin
       C : AHT.Websocket.Client.Client_Type;
    begin
       declare
-         --  Deliberately a temporary: it is out of scope by the time
-         --  Reconnect runs, so only a copy taken at Connect can work.
+         --  A temporary: it is out of scope by the time Reconnect
+         --  runs, so only a copy taken at Connect can work.
          Anchors : constant String := Cert;
       begin
-         --  localhost rather than the IP literal, so this exercises
-         --  the dNSName path. The cert carries both SANs and both
-         --  backends honour both; the iPAddress path is covered by
-         --  test_tls_ip_host, and keeping it out of here means a
-         --  failure points at CA_PEM rather than at name matching.
+         --  localhost, not the IP literal, so this exercises the
+         --  dNSName path; the iPAddress path is covered by
+         --  test_tls_ip_host, so a failure here points at CA_PEM.
          AHT.Websocket.Client.Connect
            (C, "wss://localhost:8768/", Insecure => False,
             CA_PEM => Anchors);

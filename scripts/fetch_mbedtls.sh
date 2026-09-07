@@ -2,94 +2,49 @@
 #  Copyright (C) 2026 Aldo Nicolas Bruno
 #  SPDX-License-Identifier: Apache-2.0
 #
-# scripts/fetch_mbedtls.sh — download + build mbedTLS 3.6.7 into a
-# per-target tree under third_party/.
+# scripts/fetch_mbedtls.sh - download and build mbedTLS 3.6.7 into
+# third_party/mbedtls-<version>[-<triplet>]. Runs as the Alire
+# pre-build action; exits 0 without network or make once the tree's
+# stamp matches this invocation. The tarball is the official release
+# asset, pinned by the SHA-256 upstream publishes.
 #
-# Runs as the Alire pre-build action. Idempotent: once the target's
-# tree carries a build stamp matching what this invocation wants, the
-# script exits 0 without touching the network or invoking make. That
-# way `alr build` is cheap on every run after the first.
+# Inputs: AHT_TLS_BACKEND (no-op unless mbedtls), AHT_OS (posix |
+# windows), AHT_CROSS_TARGET (toolchain triplet, windows only), CC,
+# AR, AHT_WIN32_WINNT. Outputs: library/libmbed{tls,x509,crypto}.a,
+# the edited include/mbedtls/mbedtls_config.h and .aht-build-stamp
+# under the tree. Exit 0 on success or no-op, 1 on a missing hash
+# tool, 2 on a toolchain, download, hash, lock or tree error, 3 on a
+# config edit or build failure.
 #
-# The pinned SHA-256 is over upstream's official release asset,
-# mbedtls-3.6.7.tar.bz2, and is the hash they publish in the release
-# notes. A mismatch fails loudly with an integrity error.
-#
-# ---------------------------------------------------------------
-# Configuration lives in the tree's own include/mbedtls/config.h,
-# NOT in -D flags.
-#
-# This matters more than it looks. MBEDTLS_THREADING_C adds a mutex
-# member to several context structs, so a translation unit that
-# disagrees with the archive about that macro computes a different
-# sizeof, under-allocates in the glue's *_new, and mbedtls_*_init then
-# writes past the block. Heap corruption, and nothing reports it.
-#
-# Passing the macro on the command line means saying it twice -- here
-# and in aht.gpr's C switches -- and keeping two files in lockstep by
-# comment. Editing the header instead means the archive and the glue
-# read the same bytes from the same file, and cannot disagree. The
-# edit is a fixed-string substitution, which is only safe because the
-# archive is pinned by hash; it is verified afterwards regardless.
-#
-# The stamp carries the hash of the post-edit config.h for the same
-# reason. Trusting only "an archive exists" would let the header be
-# changed after the fact, at which point the glue compiles against the
-# new header and links the old archive -- recreating precisely the
-# mismatch this arrangement exists to prevent. The header is what the
-# archive's ABI came from, so the header is what gets fingerprinted.
-#
-# ---------------------------------------------------------------
-# Per-target trees.
-#
-# mbedTLS builds in-tree, so one source directory cannot hold two
-# targets' objects. The key is the toolchain TRIPLET, not merely the
-# OS: two mingw-w64 toolchains for different architectures are as
-# incompatible as a Linux one, and keying on "windows" alone would let
-# an i686 build silently reuse an x86-64 tree. posix keeps the
-# unsuffixed path so existing checkouts are undisturbed.
-#
-# aht.gpr composes the same name from AHT_OS and AHT_CROSS_TARGET, and
-# uses the same defaults. They have to agree, or the build compiles
-# against one tree's headers and links another tree's archives.
+# The config is edited into mbedtls_config.h, not passed as -D:
+# MBEDTLS_THREADING_C changes the sizeof of context structs, and the
+# glue must read the header the archive was built from; the stamp
+# fingerprints the post-edit header. Trees are keyed by toolchain
+# triplet, composed the same way in aht.gpr from AHT_OS and
+# AHT_CROSS_TARGET.
 #
 # Threading, per target:
+#   posix    MBEDTLS_THREADING_C + MBEDTLS_THREADING_PTHREAD;
+#            AHT.Transport.TLS is called from several Ada tasks.
+#   windows  threadless: mbedTLS ships no Windows mutex, and every
+#            mutex it would take guards state this client keeps per
+#            session or never reaches (docs/mbedtls.md lists them).
 #
-#   posix    MBEDTLS_THREADING_C + MBEDTLS_THREADING_PTHREAD, so the
-#            library's internal mutexes are real. AHT.Transport.TLS is
-#            called from several Ada tasks.
-#
-#   windows  threadless. mbedTLS ships no Windows mutex
-#            implementation -- only pthread or a caller-supplied
-#            THREADING_ALT -- and every mutex it would take is around
-#            state this client either keeps per session or never
-#            reaches. docs/tls.md enumerates them.
-#
-# That argument holds only while PSA Crypto stays unreached. PSA keeps
-# process-global state, guarded only under MBEDTLS_THREADING_C, which
-# this target does not have. Two macros reach it, and the probe
-# asserts both are off:
-#
-#   MBEDTLS_USE_PSA_CRYPTO       routes X.509 and TLS through PSA.
-#   MBEDTLS_SSL_PROTO_TLS1_3     the TLS 1.3 code always uses PSA,
-#                                whatever the first macro says, and a
-#                                1.3-capable client reaches it while
-#                                building the ClientHello -- so on
-#                                every handshake, not only the ones
-#                                that negotiate 1.3.
-#
-# The check is a compiled probe rather than a grep over
-# mbedtls_config.h, because a macro can arrive by routes a text search
-# would miss (MBEDTLS_CONFIG_FILE, a user config header); asking the
-# preprocessor asks the thing that actually decides. The same probe
-# confirms the config edits took, as the compiler sees them.
+# The windows build needs PSA Crypto unreached: its process-global
+# state is guarded only under MBEDTLS_THREADING_C. The probe asserts
+# both macros that reach it are off:
+#   MBEDTLS_USE_PSA_CRYPTO    routes X.509 and TLS through PSA.
+#   MBEDTLS_SSL_PROTO_TLS1_3  TLS 1.3 code always uses PSA, and a
+#                             1.3-capable client reaches it in every
+#                             ClientHello.
+# A compiled probe, not a grep: a macro can also arrive via
+# MBEDTLS_CONFIG_FILE or a user config header.
 
 set -eu
 
-# Only the mbedtls TLS backend needs the vendored library; under any
-# other AHT_TLS_BACKEND this pre-build action is a no-op. Keep this
-# default in lockstep with the AHT_TLS_BACKEND default in aht.gpr.
-# (The env var is the supported selection route precisely because it
-# reaches this action; a -X/gpr-set-externals-only selection does not.)
+# No-op under any other AHT_TLS_BACKEND. Keep the default in lockstep
+# with aht.gpr. The env var is the supported selection route because
+# it reaches this action; a -X selection does not.
 if [ "${AHT_TLS_BACKEND:-openssl}" != "mbedtls" ]; then
     exit 0
 fi
@@ -97,27 +52,17 @@ fi
 VERSION=3.6.7
 SHA256=a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
 
-# The official release asset. GitHub's auto-generated tag snapshots --
-# source.tar.gz and source.zip -- are unusable here: part of the build
-# infrastructure lives in a framework/ submodule, which those archives
-# omit, so they do not configure or build. Upstream says so in the
-# release notes. The failure they produce looks like a broken
-# toolchain rather than a wrong URL, which is why this is worth a
-# comment.
-#
-# The tag is mbedtls-<version>. The archive is bzip2.
+# The official release asset (tag mbedtls-<version>, bzip2). GitHub's
+# auto-generated tag snapshots omit the framework/ submodule and do
+# not build.
 URL=https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${VERSION}/mbedtls-${VERSION}.tar.bz2
 
 # Bumped whenever this script changes how a tree is produced or
-# checked -- different macros, different flags, a new validation. The
-# stamp carries it, so every existing tree is rebuilt rather than
-# accepted on the strength of checks that were weaker when it was
-# made.
+# checked; the stamp carries it, so an older tree is rebuilt.
 SCHEMA=6
 
 # Target OS family. Keep the default in lockstep with AHT_OS in
-# aht.gpr: this script picks the tree that project then points at, and
-# a disagreement is a link against the wrong archive.
+# aht.gpr, which points at the tree this script produces.
 TARGET=${AHT_OS:-posix}
 
 case "$TARGET" in
@@ -128,17 +73,15 @@ case "$TARGET" in
         TRIPLET=${AHT_CROSS_TARGET:-x86_64-w64-mingw32}
         ;;
     *)
-        echo "fetch_mbedtls: FATAL — AHT_OS=$TARGET is not one of" \
+        echo "fetch_mbedtls: FATAL - AHT_OS=$TARGET is not one of" \
              "posix, windows" >&2
         exit 2
         ;;
 esac
 
-# One knob, so the Ada and C halves cannot disagree: tests/run_tests.sh
-# passes this same triplet to gprbuild --target. CC and AR may still be
-# overridden for toolchains that do not follow the naming convention,
-# but the compiler's own target is checked against the triplet below,
-# so an override cannot quietly change architecture.
+# tests/run_tests.sh passes this same triplet to gprbuild --target.
+# CC and AR may be overridden, but the compiler's own target is
+# checked against the triplet below.
 if [ -n "$TRIPLET" ]; then
     SUFFIX=-${TRIPLET}
     CC=${CC:-${TRIPLET}-gcc}
@@ -152,33 +95,30 @@ fi
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 THIRD=${ROOT}/third_party
 DEST=${THIRD}/mbedtls-${VERSION}${SUFFIX}
-# Everything downstream -- the fixed-string edits, the stamp's
-# fingerprint, aht.gpr's -I for the glue -- reads this one path.
+# The edits, the stamp fingerprint and aht.gpr's -I all read this path.
 CFG=${DEST}/include/mbedtls/mbedtls_config.h
 STAMP=${DEST}/.aht-build-stamp
 ARCHIVE=${THIRD}/mbedtls-${VERSION}.tar.bz2
 
-# All three, not just libmbedtls.a. AHT.Mbedtls links every one of
-# them, and a build interrupted partway leaves some present.
+# AHT.Mbedtls links all three; an interrupted build leaves some present.
 LIB_TLS=${DEST}/library/libmbedtls.a
 LIB_X509=${DEST}/library/libmbedx509.a
 LIB_CRYPTO=${DEST}/library/libmbedcrypto.a
 
 if ! command -v "$CC" >/dev/null 2>&1; then
-    echo "fetch_mbedtls: FATAL — C compiler '$CC' not found on PATH." >&2
+    echo "fetch_mbedtls: FATAL - C compiler '$CC' not found on PATH." >&2
     echo "  Set AHT_CROSS_TARGET (e.g. i686-w64-mingw32) or CC/AR to" \
          "name the toolchain for AHT_OS=$TARGET." >&2
     exit 2
 fi
 
-# What the compiler says it targets, which is the only claim worth
-# trusting. `-dumpmachine` is understood by gcc and clang alike.
+# `-dumpmachine` is understood by gcc and clang alike.
 MACHINE=$("$CC" -dumpmachine)
 CCVER=$("$CC" -dumpversion)
 
 if [ -n "$TRIPLET" ]; then
     if [ "$MACHINE" != "$TRIPLET" ]; then
-        echo "fetch_mbedtls: FATAL — AHT_CROSS_TARGET is $TRIPLET but" \
+        echo "fetch_mbedtls: FATAL - AHT_CROSS_TARGET is $TRIPLET but" \
              "'$CC' targets $MACHINE" >&2
         echo "  The triplet names the tree, the object directories and" \
              "gprbuild --target, so these have to be the same string." >&2
@@ -187,18 +127,15 @@ if [ -n "$TRIPLET" ]; then
 else
     case "$MACHINE" in
         *mingw*|*cygwin*)
-            echo "fetch_mbedtls: FATAL — AHT_OS=posix but '$CC' targets" \
+            echo "fetch_mbedtls: FATAL - AHT_OS=posix but '$CC' targets" \
                  "$MACHINE" >&2
             exit 2
             ;;
     esac
 fi
 
-# Portable SHA-256: prefer the GNU `sha256sum` (most Linux distros),
-# fall back to BSD `shasum -a 256` (macOS, Alpine without GNU
-# coreutils), then to `openssl dgst -sha256` (universal). Each command
-# emits the hash differently; this helper normalises to a bare hex
-# string so the caller can do a straight `==`.
+# SHA-256 via sha256sum (GNU), shasum -a 256 (BSD, macOS) or openssl
+# dgst, normalised to a bare hex string.
 compute_sha256() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "$1" | awk '{print $1}'
@@ -207,34 +144,25 @@ compute_sha256() {
     elif command -v openssl >/dev/null 2>&1; then
         openssl dgst -sha256 "$1" | awk '{print $NF}'
     else
-        echo "fetch_mbedtls: FATAL — need sha256sum, shasum, or" \
+        echo "fetch_mbedtls: FATAL - need sha256sum, shasum, or" \
              "openssl on PATH to verify the mbedTLS archive" >&2
         return 1
     fi
 }
 
 # Everything that determines the bytes in the archives. A tree whose
-# stamp does not match is re-extracted rather than repaired: the config
-# edits below are one-way, and `make clean` would not undo them.
+# stamp does not match is re-extracted: the config edits are one-way.
 stamp_line() {
     echo "schema=$SCHEMA mbedtls=$VERSION os=$TARGET triplet=${TRIPLET:-none}" \
          "machine=$MACHINE cc=$CC ccver=$CCVER ar=$AR config=$1"
 }
 
-# Ask the preprocessor what the glue will actually see. Stronger than
-# grepping config.h, and it is what makes the fast path safe to take:
-# the stamp says the header has not moved since the archives were
-# built, and this says the header means what the build assumed.
+# Ask the preprocessor what the glue will see: the stamp says the
+# header has not moved since the build, this says it means what the
+# build assumed.
 check_config() {
-    # mktemp, not a fixed name. Two invocations for different targets
-    # run concurrently often enough -- a posix and a windows build in
-    # parallel is the obvious case -- and a shared probe path means
-    # each compiler reads the other target's assertions. The failures
-    # look like a genuinely misconfigured tree, which is the worst way
-    # for a race to present.
-    #
-    # No .c suffix, because mktemp templates must end in the X's; -x c
-    # tells the compiler what it is looking at instead.
+    # mktemp: a posix and a windows build may run in parallel. No .c
+    # suffix (mktemp templates end in X's); -x c names the language.
     probe=$(mktemp "${THIRD}/.aht-config-probe.XXXXXX")
     cat > "$probe" <<'EOF'
 #include <mbedtls/ssl.h>
@@ -266,7 +194,7 @@ EOF
     esac
     if ! "$CC" -x c -I"${DEST}/include" -fsyntax-only "$probe" 2>&1; then
         rm -f "$probe"
-        echo "fetch_mbedtls: FATAL — mbedTLS configuration check failed" \
+        echo "fetch_mbedtls: FATAL - mbedTLS configuration check failed" \
              "for $DEST" >&2
         return 1
     fi
@@ -274,9 +202,8 @@ EOF
 }
 
 # All three archives present, built for this target by this toolchain,
-# from a config.h that has not changed since. A function because it is
-# asked twice: once before waiting for the build lock, and once after,
-# by which time whoever held the lock may have done the work.
+# from an mbedtls_config.h that has not changed since. Asked before and after
+# waiting for the build lock.
 tree_is_current() {
     [ -s "$LIB_TLS" ] && [ -s "$LIB_X509" ] && [ -s "$LIB_CRYPTO" ] \
         && [ -f "$STAMP" ] && [ -f "$CFG" ] \
@@ -291,24 +218,15 @@ fi
 
 mkdir -p "$THIRD"
 
-# From here on the tree is going to be rewritten, and that is not
-# something two processes can do at once. Extraction, the config edits
-# and the build are a long non-atomic sequence over a fixed path, so
-# two runs of the same target interleave into one broken tree -- and
-# the `mv` that publishes it would move a finished tree *inside* the
-# other's rather than over it.
-#
-# mkdir is the lock, because it is atomic on every POSIX filesystem
-# and needs no tool that macOS might not ship (flock does not exist
-# there). Per DEST, so different targets still build in parallel --
-# which is the case that matters, since that is what the test runner
-# does.
+# From here on the tree is rewritten; two runs of the same target
+# would interleave into one broken tree. mkdir is the lock: atomic on
+# every POSIX filesystem, and macOS ships no flock. Per DEST, so
+# different targets still build in parallel.
 LOCK=${DEST}.lock
 HELD_LOCK=
 
-# HELD_LOCK is what tells the handler whether there is anything to
-# release -- the lock directory's existence cannot, since another
-# process's lock looks exactly the same from here.
+# HELD_LOCK tells the handler whether there is anything to release;
+# another process's lock directory looks the same from here.
 cleanup_lock() {
     if [ -n "$HELD_LOCK" ]; then
         rmdir "$LOCK" 2>/dev/null || true
@@ -317,29 +235,11 @@ cleanup_lock() {
 }
 trap cleanup_lock EXIT
 
-# Taking the lock and recording that we hold it are two statements,
-# and sh runs a trap between statements: a signal arriving during the
-# mkdir is delivered once it returns and before the assignment, where
-# the handler finds HELD_LOCK empty, declines to release, and leaves a
-# lock nobody owns for the timeout below to trip over.
-#
-# To see it: drop the hold_signals call from the loop below and put a
-# `kill -s HUP $$` between the mkdir and the assignment. The script
-# exits 129 and the lock directory is still there. Both steps are
-# needed -- with the hold in place that signal is ignored, which is
-# the point of it, so the instruction is how to reproduce the OLD
-# behaviour rather than something the current code still does.
-#
-# So signals are held off across that pair and armed everywhere else.
-# Held off means ignored, not queued, so a Ctrl-C landing in that
-# two-statement window is dropped and has to be repeated -- which is
-# the trade, and the right way round: a stale lock blocks every later
-# build of this target until someone deletes it by hand.
-#
-# HUP belongs here as much as INT and TERM: a build started over ssh
-# or from a terminal that goes away gets it, which is exactly the
-# unattended case where a lock left behind is discovered much later by
-# somebody else.
+# sh runs a trap between statements, so a signal between the mkdir
+# and the HELD_LOCK assignment would leave a lock nobody releases.
+# Signals are held off (dropped, not queued) across that pair and
+# armed everywhere else. HUP is included for builds whose terminal or
+# ssh session goes away.
 hold_signals() { trap '' INT TERM HUP; }
 arm_signals() {
     trap 'cleanup_lock; exit 130' INT
@@ -359,7 +259,7 @@ while :; do
     arm_signals
 
     if [ "$LOCK_WAIT" -ge 600 ]; then
-        echo "fetch_mbedtls: FATAL — waited 600s for $LOCK" >&2
+        echo "fetch_mbedtls: FATAL - waited 600s for $LOCK" >&2
         echo "  Another build of this target is either still running" \
              "or was killed without releasing it. If nothing is" \
              "building, remove that directory and re-run." >&2
@@ -373,42 +273,33 @@ while :; do
     LOCK_WAIT=$((LOCK_WAIT + 1))
 done
 
-# Recheck under the lock. Losing the race is the common case when two
-# builds start together, and the loser has nothing left to do.
+# Recheck under the lock: the loser of the race has nothing to do.
 if tree_is_current; then
     check_config
     exit 0
 fi
 
 # Download to a unique name, then rename. The archive is shared
-# between targets and the build lock above is per target, so two cold
-# builds for different targets can be here at the same time; a fixed
-# .part name would have them writing the same file and renaming it out
-# from under each other.
-#
-# No lock needed even so. Each writes its own file, rename within one
-# directory is atomic, and the tarball is hash-pinned -- so whichever
-# rename lands last, every reader sees one complete archive whose
-# contents are then verified anyway.
+# between targets and the lock is per target, so two cold builds can
+# be here at once; rename within one directory is atomic, and the
+# tarball is hash-checked afterwards.
 if [ ! -s "$ARCHIVE" ]; then
     echo "==> fetch_mbedtls: downloading ${VERSION}"
     part=$(mktemp "${ARCHIVE}.XXXXXX")
     if ! curl --fail --silent --show-error --location -o "$part" "$URL"
     then
         rm -f "$part"
-        echo "fetch_mbedtls: FATAL — download failed" >&2
+        echo "fetch_mbedtls: FATAL - download failed" >&2
         exit 2
     fi
     mv "$part" "$ARCHIVE"
 fi
 
-# Pinned-hash verification. Refuse to proceed on mismatch so a
-# tampered archive can't sneak into the build. This also underwrites
-# the fixed-string config edits further down: they are only safe
-# because the header's exact bytes are known.
+# Pinned-hash verification; the fixed-string config edits below rely
+# on the header's exact bytes being known.
 GOT_SHA=$(compute_sha256 "$ARCHIVE")
 if [ "$GOT_SHA" != "$SHA256" ]; then
-    echo "fetch_mbedtls: FATAL — SHA-256 mismatch for $ARCHIVE" >&2
+    echo "fetch_mbedtls: FATAL - SHA-256 mismatch for $ARCHIVE" >&2
     echo "  expected: $SHA256" >&2
     echo "  got:      $GOT_SHA" >&2
     echo "  delete the file and re-run, or update the pin in" \
@@ -417,16 +308,13 @@ if [ "$GOT_SHA" != "$SHA256" ]; then
     exit 2
 fi
 
-# Discard any existing tree. Reached when the stamp is absent, stale
-# (a different toolchain, a newer schema) or contradicted by the
-# header's hash, and in every case the config header has been edited
-# in ways `make clean` does not undo.
-#
-# Guarded on a file that only an extracted mbedTLS has, because the
+# Discard any existing tree: the stamp is absent, stale or contradicts
+# the header's hash, and the config edits are not undone by `make
+# clean`. Guarded on a file only an extracted mbedTLS has, because the
 # path is composed from environment variables and this is an `rm -rf`.
 if [ -d "$DEST" ]; then
     if [ ! -f "$DEST/library/Makefile" ]; then
-        echo "fetch_mbedtls: FATAL — $DEST exists but does not look" \
+        echo "fetch_mbedtls: FATAL - $DEST exists but does not look" \
              "like an mbedTLS source tree; refusing to remove it." >&2
         exit 2
     fi
@@ -434,15 +322,9 @@ if [ -d "$DEST" ]; then
     rm -rf "$DEST"
 fi
 
-# Unpacked into a staging directory first, because the tarball always
-# contains mbedtls-<version>/ -- extracting straight into third_party/
-# while building for windows would land on top of the posix tree and
-# then move it away, destroying a build this invocation never touched.
-#
-# mktemp -d for the same reason the probe uses mktemp: the name has to
-# be unique per invocation, not merely per target. Two windows
-# triplets, or two runs of the same target, would otherwise share it
-# and unpack into each other.
+# Unpacked into a staging directory first: the tarball contains
+# mbedtls-<version>/, which would land on the posix tree when building
+# for windows. mktemp -d, unique per invocation, not only per target.
 echo "==> fetch_mbedtls: extracting ($TARGET, $MACHINE)"
 STAGE=$(mktemp -d "${THIRD}/.unpack.XXXXXX")
 tar xjf "$ARCHIVE" -C "$STAGE"
@@ -450,17 +332,15 @@ mv "${STAGE}/mbedtls-${VERSION}" "$DEST"
 rmdir "$STAGE"
 
 # Turn a macro on in the config header, then prove it took. The
-# substitution is a fixed string against a hash-pinned file, so a miss
-# means the pin moved and the caller needs to know rather than get a
-# quietly different build. check_config re-checks the result through
-# the preprocessor; this one exists to name the line that was expected.
+# substitution is a fixed string against a hash-pinned file, so a
+# miss means the pin moved; this check names the expected line.
 enable_macro() {
     macro=$1
     # No `sed -i`: it needs an argument on BSD/macOS and none on GNU.
     sed "s|^//#define ${macro}\$|#define ${macro}|" "$CFG" > "${CFG}.new"
     mv "${CFG}.new" "$CFG"
     if ! grep -q "^#define ${macro}\$" "$CFG"; then
-        echo "fetch_mbedtls: FATAL — could not enable ${macro} in" \
+        echo "fetch_mbedtls: FATAL - could not enable ${macro} in" \
              "$CFG" >&2
         echo "  The expected '//#define ${macro}' line was not there." \
              "Has the pinned version changed?" >&2
@@ -468,15 +348,14 @@ enable_macro() {
     fi
 }
 
-# The inverse, for macros the pinned release ships enabled. Same
-# fixed-string-then-verify shape as enable_macro, and it fails the same
-# way: a miss means the pin moved, not that the macro was already off.
+# The inverse, for macros the pinned release ships enabled. A miss
+# means the pin moved, not that the macro was already off.
 disable_macro() {
     macro=$1
     sed "s|^#define ${macro}\$|//#define ${macro}|" "$CFG" > "${CFG}.new"
     mv "${CFG}.new" "$CFG"
     if ! grep -q "^//#define ${macro}\$" "$CFG"; then
-        echo "fetch_mbedtls: FATAL — could not disable ${macro} in" \
+        echo "fetch_mbedtls: FATAL - could not disable ${macro} in" \
              "$CFG" >&2
         echo "  The expected '#define ${macro}' line was not there." \
              "Has the pinned version changed?" >&2
@@ -484,35 +363,18 @@ disable_macro() {
     fi
 }
 
-# Both targets, not just windows. mbedTLS draws through AHT.Random
-# instead of its own entropy_poll.c -- see
-# src/tls/mbedtls/aht-mbedtls-entropy.ads -- so the platform entropy
-# decision is made in one place. entropy_poll.c's Windows branch calls
-# BCryptGenRandom, which imports bcrypt.dll and leaves the image
-# unloadable on the XP target.
-#
-# Enabling it on posix too is what gets the callback exercised: the
-# whole test suite then runs through it on the host, rather than only
-# under wine.
+# Both targets. mbedTLS draws through AHT.Random instead of its own
+# entropy_poll.c (src/tls/mbedtls/aht-mbedtls-entropy.ads), whose
+# Windows branch imports bcrypt.dll and leaves the image unloadable on
+# XP. On posix too, so the whole suite runs through the callback.
 enable_macro MBEDTLS_NO_PLATFORM_ENTROPY
 
-# TLS 1.3 always runs through PSA Crypto, independently of
-# MBEDTLS_USE_PSA_CRYPTO -- upstream's docs/use-psa-crypto.md says so
-# outright ("most of the TLS 1.3 code, which always uses PSA crypto").
-# A TLS 1.3-capable client puts a key_share in its ClientHello before
-# it knows what the server will choose, so PSA is reached on every
-# handshake and not only on negotiated-1.3 ones.
-#
-# Two consequences, either one disqualifying. PSA draws from its own
-# process-global entropy context, which MBEDTLS_NO_PLATFORM_ENTROPY
-# leaves sourceless and which aht_mbedtls_entropy_new cannot reach --
-# every handshake then fails with a generic error at ClientHello. And
-# PSA's global state is precisely what the threadless windows build
-# argues is not there; see the threading note above.
-#
-# The TLS1_3 key-exchange-mode macros stay as the release ships them.
-# Their prerequisites are PSA_WANT_* rather than this macro, so they
-# do not fail check_config.h with TLS 1.3 off; they are simply unused.
+# TLS 1.3 always uses PSA Crypto (upstream docs/use-psa-crypto.md),
+# reached in every ClientHello via the key_share; PSA's own entropy
+# context is left sourceless by MBEDTLS_NO_PLATFORM_ENTROPY, so every
+# handshake would fail. The TLS1_3 key-exchange-mode macros stay as
+# shipped: their prerequisites are PSA_WANT_*, so they pass
+# check_config.h unused.
 disable_macro MBEDTLS_SSL_PROTO_TLS1_3
 
 case "$TARGET" in
@@ -524,34 +386,29 @@ case "$TARGET" in
         ;;
     windows)
         THREADING="none"
-        # x509_crt.c calls the platform inet_pton at 0x0600 and above,
-        # and its own software one below. ws2_32 exports inet_pton
-        # only from Vista, and the loader resolves imports eagerly, so
-        # the higher value leaves any image that verifies an IP SAN
-        # unloadable on XP. Keep in lockstep with Win32_Winnt in
-        # aht.gpr: the glue and the archive are separate compilations
-        # and only agree because both are told the same thing.
+        # Below 0x0600 x509_crt.c uses its own inet_pton; ws2_32
+        # exports one only from Vista, and eager import resolution
+        # would leave the image unloadable on XP. Keep in lockstep
+        # with Win32_Winnt in aht.gpr, which the glue is compiled with.
         EXTRA_CFLAGS=" -D_WIN32_WINNT=${AHT_WIN32_WINNT:-0x0501}"
         ;;
 esac
 
 check_config
 
-# No threading macros on the command line: they are in the header
-# above, which the glue reads too. CFLAGS is set rather than appended
-# because the Makefile's own default is a bare -O2.
+# Threading macros are in the header, which the glue reads too. CFLAGS
+# is set, not appended: the Makefile's default is a bare -O2.
 echo "==> fetch_mbedtls: building (threading: $THREADING)"
 make -C "$DEST" CC="$CC" AR="$AR" CFLAGS="-O2$EXTRA_CFLAGS" lib >/dev/null
 
 for lib in "$LIB_TLS" "$LIB_X509" "$LIB_CRYPTO"; do
     if [ ! -s "$lib" ]; then
-        echo "fetch_mbedtls: FATAL — build did not produce $lib" >&2
+        echo "fetch_mbedtls: FATAL - build did not produce $lib" >&2
         exit 3
     fi
 done
 
-# Written last, so an interrupted build leaves no stamp and the next
-# run starts over rather than trusting a half-populated tree.
+# Written last, so an interrupted build leaves no stamp.
 stamp_line "$(compute_sha256 "$CFG")" > "$STAMP"
 
 echo "==> fetch_mbedtls: mbedTLS ${VERSION} built for ${TARGET}" \

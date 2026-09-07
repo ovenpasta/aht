@@ -3,11 +3,9 @@
 
 with "../../aht.gpr";
 
---  Standalone driver for the Autobahn|Testsuite "fuzzingserver" mode.
---  Kept out of tests/tests.gpr on purpose: it needs an external
---  Autobahn server on :9001 (run via Docker, see run.sh), so it must
---  not be swept into run_tests.sh, which expects every main to pass
---  unattended against the in-tree Python fixtures.
+--  Driver for the Autobahn|Testsuite fuzzingserver. Kept out of
+--  tests/tests.gpr: it needs an external server on :9001 (see
+--  run.sh), and run_tests.sh expects every main to pass unattended.
 project Autobahn is
 
    for Source_Dirs use ("src");

@@ -32,9 +32,9 @@ begin
    Check_Eq (AHT.URL.Encoding.Percent_Encode ("abcDEF_-.~"),
              "abcDEF_-.~", "unreserved");
 
-   --  Non-ASCII bytes (e.g. Latin-1 é = 0xE9) MUST be percent-encoded,
-   --  even though Ada.Characters.Handling.Is_Alphanumeric would accept
-   --  them as letters. This is the case the review flagged.
+   --  Non-ASCII bytes (e.g. Latin-1 e-acute = 0xE9) MUST be
+   --  percent-encoded, even though Ada.Characters.Handling's
+   --  Is_Alphanumeric accepts them as letters.
    Check_Eq (AHT.URL.Encoding.Percent_Encode
                ("" & Character'Val (16#E9#)),
              "%E9", "Latin-1 e-acute gets encoded");

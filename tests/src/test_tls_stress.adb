@@ -2,14 +2,14 @@
 --  SPDX-License-Identifier: Apache-2.0
 
 --  TLS concurrency stress (backend-neutral): one task floods large
---  binary messages over wss while the main task receives the echoes —
+--  binary messages over wss while the main task receives the echoes:
 --  a sustained bidirectional load through ONE TLS session, forcing
 --  outbound backpressure, partial drains and interleaved engine
 --  access from two tasks (receiver task inside Read + sender inside
 --  Write). Ordering and payload integrity must survive.
 --
 --  Fixture: tests/server/server_ws_tls.py (wss://localhost:8768,
---  websockets default max_size 1 MiB — payloads stay under that).
+--  websockets default max_size 1 MiB; payloads stay under that).
 
 with Ada.Command_Line;
 with Ada.Exceptions;

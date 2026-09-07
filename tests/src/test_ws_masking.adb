@@ -1,131 +1,38 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  The masking key and the handshake nonce must be unpredictable.
+--  The frame masking key and the handshake nonce must come from the
+--  strong entropy source (RFC 6455 5.3 and 4.1). A real client runs
+--  against a fake peer that completes the handshake and parses frames;
+--  the masks and nonces read off the socket are paired with the
+--  entropy requests AHT.Random counted while the frames went out.
 --
---  RFC 6455 §5.3 requires the frame masking key to come from a strong
---  entropy source, and §4.1 requires Sec-WebSocket-Key to be a nonce
---  selected randomly per connection. Neither is about
---  confidentiality: masking exists so a client cannot be coerced into
---  emitting bytes a caching proxy would read as a second,
---  attacker-chosen HTTP request. A mask an observer can predict
---  defeats the purpose of masking entirely rather than weakening it,
---  and nothing about that is visible on the wire — which is why it
---  needs a test rather than a comment.
+--  Cases:
+--    1. wire: masks and nonces emitted, entropy requests counted
+--    2. source: full byte range appears, output not constant
 --
---  ---------------------------------------------------------------
---  What is tested, and where the samples come from
---  ---------------------------------------------------------------
+--  Covers:
+--    - a call site stops calling AHT.Random, or calls it for the wrong
+--      width: both counters move
+--    - a PRNG re-seeded on every call: identical nonces across
+--      connections, a constant mask, a collapsed byte range
+--    - frames are masked at all, the mask is not a constant, nonces
+--      differ per connection
 --
---  Case 1 drives a real client against a fake peer that completes the
---  handshake and parses frames, and pairs two independent
---  observations: what the client emitted (masks and nonces, read off
---  the socket) and what it requested (entropy calls and their
---  widths, read from the counters).
+--  Does not cover:
+--    - that the requested bytes became the mask or the nonce: a draw
+--      whose result is discarded counts the same as one that ships
+--    - AHT.Random replaced by a PRNG seeded once and drawn
+--      sequentially: every counter unchanged, and no statistical check
+--      on the bytes tells it apart
+--    - duplicate masks: 4096 samples collide with probability 0.2% per
+--      run, so no duplicate check is used
+--    - the source itself, beyond reading it; the width algebra needs
+--      redoing if the entropy path grows past two call sites
 --
---  Pairing them is the point. Sampling the entropy package alone
---  would pass with the production call sites reverted to a
---  clock-seeded generator, which is the defect being guarded; and
---  sampling the wire alone cannot tell a strong source from any
---  generator with plausible-looking output. Together they establish
---  that the expected populations of requests accompanied the frames
---  that went out.
---
---  What that does NOT establish is provenance — see the limit
---  section below.
---
---  Case 2 samples the source directly, for two properties a handful
---  of live frames cannot show: that the full byte range appears, and
---  that the output is not constant.
---
---  ---------------------------------------------------------------
---  Why the wiring is checked by COUNTING, not by sampling
---  ---------------------------------------------------------------
---
---  The obvious test — collect masks off the wire and look for
---  repeats — does not work, and it is worth writing down why so it is
---  not reinvented.
---
---  Duplicate-counting on 32-bit masks has no usable operating point.
---  At 4096 samples a legitimate collision happens with probability
---  0.195% per run, roughly one CI run in 512: a flake, not a finding.
---  Shrink the sample to make that negligible and the detection power
---  goes with it — the measured regression produced 4 collisions in
---  4096 draws, which scales to 0.016 at 256. Tried both: reverting
---  the production mask call to a per-call-reset generator left a
---  256-sample duplicate check completely green.
---
---  And no sample size fixes the general case. A PRNG seeded once and
---  drawn sequentially produces uniform, non-repeating output, so no
---  statistical test on the bytes can tell it from the OS pool.
---
---  What CAN be pinned deterministically is narrower than it first
---  looks: that matching request-width populations OCCURRED during
---  those operations. AHT.Random counts calls and bytes, and because
---  the two callers ask for different widths — 4 for a mask, 16 for a
---  nonce — those two totals form a solvable system, so the number of
---  requests of each width can be recovered exactly and checked
---  against what the peer saw on the wire.
---
---  Not "the mask path requested entropy". A request whose result is
---  thrown away counts the same as one whose result ships, so what is
---  established is that the requests happened alongside the frames,
---  not that they were made in service of them.
---
---  ---------------------------------------------------------------
---  The limit of that, stated precisely
---  ---------------------------------------------------------------
---
---  Counters establish that the entropy was requested. They do NOT
---  establish that those particular bytes became the mask or the
---  nonce. This substitution satisfies every count exactly and still
---  puts predictable bytes on the wire:
---
---      AHT.Random.Fill (Dummy);            --  right width, discarded
---      Fill_From_A_Predictable_PRNG (Key); --  what actually ships
---
---  Verified: it passes. So the honest claim is "the paths requested
---  the entropy they should have", not "these bytes are the entropy".
---
---  Closing it needs a provider that emits recognisable bytes, so the
---  wire value can be matched against what was handed out. That does
---  NOT require exposing substitution to library users: a test-only
---  alternate body, selected by this project's source directories,
---  would do it without adding anything to the public API.
---
---  It is rejected on cost, not on safety. Two bodies for one package
---  means the tested build is not the shipped build, which is a poor
---  trade for closing an adversarial construction — draw, discard,
---  use something else — that no refactor produces.
---
---  Be exact about what is and is not covered, because the boundary
---  is not where one would guess:
---
---    Caught      a call site stops calling AHT.Random, or calls it
---                for the wrong width. Both counters move.
---    NOT caught  AHT.Random itself stops reading /dev/urandom and
---                returns the output of a PRNG seeded once and drawn
---                sequentially. Every counter is unchanged, and per
---                the paragraph above no statistical check on the
---                bytes can tell the difference either. Verified, not
---                assumed: substituting exactly that, with a fixed
---                seed, leaves this test fully green.
---
---                Note what does NOT demonstrate this. A PRNG re-seeded
---                on every call IS caught, loudly — identical nonces
---                across connections, a constant mask, a collapsed byte
---                range. It is the seeded-once sequential case that
---                slips through, and testing the wrong one of the two
---                is an easy way to conclude the opposite.
---
---  So this test guards the WIRING, and nothing guards the source
---  except reading it. If the entropy path ever grows past two call
---  sites, or the source acquires options, that calculation is worth
---  redoing.
---
---  The wire samples are still collected, for what they genuinely
---  show: that frames are masked at all, that the mask is not a
---  constant, and that nonces differ per connection.
+--  Validated by:
+--    reverting either production call site to a clock-seeded generator
+--    leaves the corresponding width population short in case 1.
 
 with Ada.Characters.Handling;
 with Ada.Command_Line;
@@ -146,11 +53,9 @@ procedure Test_WS_Masking is
    Port : constant := 8799;
    URL  : constant String := "ws://127.0.0.1:8799/";
 
-   --  Eight connections of thirty-two frames each. The size is not a
-   --  statistical threshold -- nothing here counts duplicates any
-   --  more -- it just needs to be large enough that a mask stuck at a
-   --  constant is obvious, and spread over several connections so the
-   --  nonce is sampled per connection rather than once.
+   --  Eight connections of thirty-two frames each. Not a statistical
+   --  threshold: large enough that a stuck mask is obvious, spread
+   --  over several connections so the nonce is sampled per connection.
    Connections  : constant := 8;
    Frames_Each  : constant := 32;
    Mask_Samples : constant := Connections * Frames_Each;
@@ -218,9 +123,7 @@ procedure Test_WS_Masking is
       function Error return String is (To_String (Err));
    end Wire;
 
-   ---------------------------------------------------------------
    --  Handshake helpers (the same computation the client does)
-   ---------------------------------------------------------------
 
    function Hex_To_Bytes (Hex : String) return AHT.Bytes.Byte_Array is
       function Val (C : Character) return Natural is
@@ -265,20 +168,13 @@ procedure Test_WS_Masking is
       return Ada.Strings.Fixed.Trim (Req (VS .. VE - 1), Ada.Strings.Both);
    end Extract_Key;
 
-   ---------------------------------------------------------------
    --  The fake peer
-   ---------------------------------------------------------------
 
-   --  Ready carries a status rather than being a bare rendezvous.
-   --
-   --  It used to be bare, and that deadlocked: if the bind failed --
-   --  the port already in use, say -- the peer raised before ever
-   --  reaching `accept Ready`, so the main task waited on Ready
-   --  forever while the peer waited on Finished forever. A test that
-   --  hangs on a busy port is worse than one that fails on it. Both
-   --  entries are now on every path, and the main task's calls are
-   --  timed so that a peer which dies in some way not foreseen here
-   --  still produces a report rather than a wedge.
+   --  Ready carries a status: a failed bind raises before `accept
+   --  Ready`, and a bare rendezvous would park the main task on Ready
+   --  and the peer on Finished. Both entries are on every path and the
+   --  main task's calls are timed, so a peer that dies some other way
+   --  still produces a report.
    task Peer is
       entry Ready (Listening : out Boolean);
       entry Finished;
@@ -312,13 +208,9 @@ procedure Test_WS_Masking is
                & Ada.Exceptions.Exception_Message (E));
       end;
 
-      --  Accepted whether or not the socket came up, and with a
-      --  terminate alternative: the main task's call is timed, so if
-      --  it expires while this task is merely slow, nobody will ever
-      --  call Ready again and a bare accept would park here forever
-      --  -- with master finalization then waiting on this task. Every
-      --  accept in this task needs the alternative for that reason,
-      --  not just the last one.
+      --  Accepted whether or not the socket came up, with a terminate
+      --  alternative: the main task's call is timed, and if it expires
+      --  nobody calls Ready again. Every accept in this task needs it.
       select
          accept Ready (Listening : out Boolean) do
             Listening := Up;
@@ -360,16 +252,11 @@ procedure Test_WS_Masking is
             end;
 
             --  Parse frames until the connection dies, taking the
-            --  4-byte mask off each. Every client-to-server frame
-            --  must be masked (§5.3), so an unmasked one is itself a
-            --  finding.
-            --
-            --  Every frame, not a fixed count: the client also sends
-            --  a Close frame, which draws a mask like any other. A
-            --  peer that stopped at Frames_Each would undercount, and
-            --  the draw check below -- which is calibrated from this
-            --  number -- would then have exactly enough slack to hide
-            --  a missing nonce draw. It did, before this was fixed.
+            --  4-byte mask off each; an unmasked frame is a finding
+            --  (5.3). Every frame, not Frames_Each: the Close frame
+            --  draws a mask too, and a peer that stops early leaves
+            --  the draw check below enough slack to hide a missing
+            --  nonce draw.
             loop
                declare
                   B0, B1 : Stream_Element;
@@ -430,14 +317,9 @@ procedure Test_WS_Masking is
          when others => null;
       end;
 
-      --  A terminate alternative, not a bare accept.
-      --
-      --  The main task returns early on some failure paths without
-      --  ever reaching Peer.Finished, and a bare accept would then
-      --  park this task forever -- so the test printed its diagnosis
-      --  and the PROCESS still hung, because Ada waits for dependent
-      --  tasks before leaving the master. `terminate` lets the task
-      --  end when the master is finishing and no call can arrive.
+      --  Terminate alternative: the main task returns early on some
+      --  failure paths without calling Finished, and a bare accept
+      --  would park this task with the master waiting on it.
       select
          accept Finished;
       or
@@ -455,8 +337,8 @@ procedure Test_WS_Masking is
          end select;
    end Peer;
 
-   Mask_Bytes  : constant := 4;    --  RFC 6455 §5.3 masking key
-   Nonce_Bytes : constant := 16;   --  §4.1 Sec-WebSocket-Key nonce
+   Mask_Bytes  : constant := 4;    --  RFC 6455 5.3 masking key
+   Nonce_Bytes : constant := 16;   --  4.1 Sec-WebSocket-Key nonce
 
    Draws_Before : Natural;
    Bytes_Before : Natural;
@@ -465,9 +347,7 @@ procedure Test_WS_Masking is
    Listening    : Boolean;
 
 begin
-   ---------------------------------------------------------------
-   --  Case 1: what the client actually put on the wire.
-   ---------------------------------------------------------------
+   --  Case 1: what the client put on the wire.
    Draws_Before := AHT.Random.Draws;
    Bytes_Before := AHT.Random.Bytes_Requested;
 
@@ -506,13 +386,12 @@ begin
                   & Ada.Exceptions.Exception_Name (E) & ": "
                   & Ada.Exceptions.Exception_Message (E));
 
-            --  Reporting is not enough. A client that connected and
-            --  then raised still owns a receiver parked on a socket
-            --  this peer holds open, and leaving the scope waits for
-            --  it -- so the test would hang after announcing its
-            --  failure, which is the worst of both. Bounded and
-            --  best-effort: the aim is to release the receiver, not
-            --  to complete a handshake.
+            --  A client that connected and then raised still owns a
+            --  receiver parked on a socket this peer holds open, and
+            --  leaving the scope waits for it, so the test would hang
+            --  after announcing its failure. Bounded and best-effort:
+            --  the aim is to release the receiver, not to complete a
+            --  handshake.
             if Connected then
                begin
                   AHT.Websocket.Client.Close
@@ -561,8 +440,8 @@ begin
       end loop;
    end if;
 
-   --  Masks were observed at all, and are not a stuck constant.
-   --  Deliberately NOT a duplicate check -- see the header.
+   --  Masks were observed at all, and are not a stuck constant. Not
+   --  a duplicate check; see the header.
    if Wire.Mask_Count < Mask_Samples then
       Fail ("only" & Natural'Image (Wire.Mask_Count) & " of"
             & Natural'Image (Mask_Samples)
@@ -587,35 +466,18 @@ begin
       end;
    end if;
 
-   --  The deterministic check: the production paths requested entropy
-   --  of the expected widths, one per frame and one per handshake.
-   --  Reverting either call site to another generator leaves the
-   --  corresponding population short, however good that generator's
-   --  output looks.
-   --
-   --  Split by WIDTH, not by caller. Counting calls alone cannot
-   --  separate requests of different sizes, so a missing call and a
-   --  compensating extra call cancel. Counting bytes as well removes
-   --  that, because the two callers ask for different widths:
-   --
-   --      calls =      masks +       nonces
-   --      bytes =  4 * masks +  16 * nonces
-   --
-   --  is two equations in two unknowns and solves uniquely for how
-   --  many requests of each width were made. Each population is then
-   --  checked against what was independently observed on the wire, so
-   --  a shortfall in one width cannot be paid for by a surplus in the
-   --  other.
-   --
-   --  It does not attribute a request to a caller. Two 4-byte
-   --  requests are indistinguishable, so a missing one and an
-   --  unrelated extra one still balance.
+   --  The production paths requested entropy of the expected widths,
+   --  one per frame and one per handshake. calls = masks + nonces and
+   --  bytes = 4*masks + 16*nonces solve uniquely for the number of
+   --  requests of each width, each checked against the wire count. A
+   --  request is not attributed to a caller: a missing 4-byte request
+   --  and an unrelated extra one still balance.
    declare
       Expected : constant Natural := Wire.Mask_Count + Connections;
 
       --  nonces = (bytes - 4*calls) / 12, from the pair above. Both
-      --  inputs count REQUESTS, including any that failed, which is
-      --  what makes the algebra exact rather than best-effort.
+      --  inputs count REQUESTS, including any that failed, so the
+      --  algebra is exact.
       Num       : constant Integer :=
         Integer (Bytes_During) - Mask_Bytes * Integer (Drew_During);
       Solvable  : constant Boolean :=
@@ -649,17 +511,9 @@ begin
                   & "missing or surplus");
          end if;
       end if;
-      --  Exact, not a lower bound.
-      --
-      --  A lower bound lets one deficit be paid for by another
-      --  surplus. That is not hypothetical: with the peer counting
-      --  only Frames_Each frames it missed each connection's Close
-      --  frame, whose own mask draw then covered the eight missing
-      --  nonce draws exactly, and reverting the nonce path passed.
-      --  Requiring equality means a swallowed parse error -- the peer
-      --  ignores them, so its count can only ever be low -- shows up
-      --  as a surplus of draws rather than silently financing a
-      --  missing one.
+      --  Exact, not a lower bound: the peer ignores parse errors, so
+      --  its count can only be low, and a lower bound would let the
+      --  surplus of mask draws pay for missing nonce draws.
       if Drew_During /= Expected then
          Fail (Natural'Image (Drew_During)
                & " entropy requests were made while"
@@ -674,9 +528,7 @@ begin
       end if;
    end;
 
-   ---------------------------------------------------------------
    --  Case 2: properties of the source itself.
-   ---------------------------------------------------------------
    declare
       Value_Seen : array (AHT.Bytes.Octet) of Boolean := [others => False];
       Nonzero    : Boolean := False;

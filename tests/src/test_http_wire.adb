@@ -223,7 +223,7 @@ procedure Test_HTTP_Wire is
    end Load_Stream;
 
 begin
-   --  Case 1: GET — request line, caller-supplied headers, no body,
+   --  Case 1: GET. Request line, caller-supplied headers, no body,
    --  no synthesized Content-Length.
    declare
       T   : Transport;
@@ -260,7 +260,7 @@ begin
       end;
    end;
 
-   --  Case 2: POST with body — Content-Length auto-injected, body
+   --  Case 2: POST with body. Content-Length auto-injected, body
    --  bytes emitted verbatim after the blank line.
    declare
       T    : Transport;
@@ -300,10 +300,9 @@ begin
       end;
    end;
 
-   --  Case 3: POST where the caller set Transfer-Encoding — v1 does
-   --  not chunk-encode request bodies, so Request.Write transcribing
-   --  Body_B verbatim would produce malformed wire. Expect a clean
-   --  Protocol_Error rather than silently-invalid bytes on the wire.
+   --  Case 3: POST where the caller set Transfer-Encoding. v1 does
+   --  not chunk-encode request bodies, so transcribing Body_B verbatim
+   --  would be malformed wire. Expect Protocol_Error.
    declare
       T    : Transport;
       Req  : AHT.HTTP.Request.Request_Type;
@@ -375,9 +374,9 @@ begin
       end if;
    end;
 
-   --  Case 6: neither Content-Length nor Transfer-Encoding —
-   --  read-until-EOF fallback. The mock ends its script right after
-   --  the body so Read returns Last=0 and the loop terminates.
+   --  Case 6: neither Content-Length nor Transfer-Encoding, so the
+   --  read-until-EOF fallback applies. The mock ends its script right
+   --  after the body so Read returns Last=0 and the loop terminates.
    declare
       T    : Transport;
       Resp : AHT.HTTP.Response.Response_Type;
@@ -392,7 +391,7 @@ begin
       end if;
    end;
 
-   --  Case 7: non-numeric Content-Length → Protocol_Error.
+   --  Case 7: non-numeric Content-Length raises Protocol_Error.
    declare
       T    : Transport;
       Resp : AHT.HTTP.Response.Response_Type;
@@ -412,7 +411,7 @@ begin
       end;
    end;
 
-   --  Case 8: status code out of 100..599 range → Protocol_Error.
+   --  Case 8: status code outside 100..599 raises Protocol_Error.
    declare
       T    : Transport;
       Resp : AHT.HTTP.Response.Response_Type;
@@ -431,7 +430,7 @@ begin
       end;
    end;
 
-   --  Case 9: malformed header line (no colon) → Protocol_Error.
+   --  Case 9: malformed header line (no colon) raises Protocol_Error.
    declare
       T    : Transport;
       Resp : AHT.HTTP.Response.Response_Type;
@@ -452,7 +451,7 @@ begin
    end;
 
    --  Case 10: status line without reason phrase is legal
-   --  (RFC 7230 §3.1.2 allows an empty reason). Reason is "".
+   --  (RFC 7230 section 3.1.2 allows an empty reason). Reason is "".
    declare
       T    : Transport;
       Resp : AHT.HTTP.Response.Response_Type;
@@ -549,7 +548,7 @@ begin
    end;
 
    --  Case 13: 204 with an erroneous Content-Length: 5 plus five
-   --  "body" bytes. Per RFC 7230 §3.3.3 the CL must be ignored;
+   --  "body" bytes. Per RFC 7230 section 3.3.3 the CL must be ignored;
    --  those five bytes must remain on the wire for the next parse.
    declare
       T    : Transport;
@@ -577,10 +576,10 @@ begin
       end if;
    end;
 
-   --  Case 14: 205 Reset Content — same no-body rule as 204. An
+   --  Case 14: 205 Reset Content, same no-body rule as 204. An
    --  erroneous `Content-Length: 4` with four "body" bytes must be
-   --  ignored (RFC 9110 §15.3.6 "The 205 response MUST NOT include
-   --  content"); those bytes remain on the wire.
+   --  ignored (RFC 9110 section 15.3.6, "The 205 response MUST NOT
+   --  include content"); those bytes remain on the wire.
    declare
       T    : Transport;
       Resp : AHT.HTTP.Response.Response_Type;
@@ -629,13 +628,12 @@ begin
       end if;
    end;
 
-   --  Case 16: HEAD response. The peer typically advertises the
-   --  GET-equivalent Content-Length but sends no body bytes. With
-   --  Method => HEAD, Response.Read must skip body framing entirely;
-   --  any bytes after CRLFCRLF (e.g. a next response on a persistent
-   --  connection) must stay on the wire. Without the suppression the
-   --  Content-Length path would try to Read_N and either hang or
-   --  consume the next response's status line.
+   --  Case 16: HEAD response. The peer advertises the GET-equivalent
+   --  Content-Length but sends no body bytes. With Method => HEAD,
+   --  Response.Read must skip body framing; bytes after CRLFCRLF (a
+   --  next response on a persistent connection) stay on the wire.
+   --  Without the suppression the Content-Length path would Read_N and
+   --  hang or consume the next status line.
    declare
       T    : Transport;
       Resp : AHT.HTTP.Response.Response_Type;
@@ -664,7 +662,8 @@ begin
 
    --  Case 17: Write_Streaming chunked, multi-window. No Content-Length
    --  is set, so the encoder frames each window as {hex}CRLF data CRLF
-   --  and closes with 0 CRLF CRLF. "Hello world" at Chunk=5 → 5/5/1.
+   --  and closes with 0 CRLF CRLF. "Hello world" at Chunk=5 frames as
+   --  5/5/1.
    declare
       T   : Transport;
       Req : AHT.HTTP.Request.Request_Type;
@@ -700,7 +699,7 @@ begin
       end;
    end;
 
-   --  Case 18: Write_Streaming chunked, empty body (immediate EOF) →
+   --  Case 18: Write_Streaming chunked, empty body (immediate EOF):
    --  just the 0-size terminator after the head.
    declare
       T   : Transport;
@@ -762,7 +761,7 @@ begin
       end;
    end;
 
-   --  Case 20: fixed framing under-run — source EOFs before N bytes.
+   --  Case 20: fixed framing under-run: source EOFs before N bytes.
    declare
       T   : Transport;
       Req : AHT.HTTP.Request.Request_Type;
@@ -783,7 +782,7 @@ begin
       end;
    end;
 
-   --  Case 21: fixed framing over-run — source hands over more than N.
+   --  Case 21: fixed framing over-run: source hands over more than N.
    declare
       T   : Transport;
       Req : AHT.HTTP.Request.Request_Type;
@@ -804,7 +803,7 @@ begin
       end;
    end;
 
-   --  Case 22: caller set Transfer-Encoding on Write_Streaming — the
+   --  Case 22: caller set Transfer-Encoding on Write_Streaming. The
    --  encoder owns that header, so this is rejected before any wire byte.
    declare
       T   : Transport;
@@ -829,8 +828,8 @@ begin
       end;
    end;
 
-   --  Case 23: duplicate Content-Length (caller Appends two) → rejected
-   --  as a request-smuggling hazard.
+   --  Case 23: duplicate Content-Length (caller Appends two) is
+   --  rejected as a request-smuggling hazard.
    declare
       T   : Transport;
       Req : AHT.HTTP.Request.Request_Type;
@@ -856,7 +855,8 @@ begin
    end;
 
    --  Case 24: buffered Write with a declared Content-Length that does
-   --  not match the body → Protocol_Error (RFC 7230 §3.3.3 framing lie).
+   --  not match the body raises Protocol_Error (RFC 7230 section 3.3.3
+   --  framing lie).
    declare
       T   : Transport;
       Req : AHT.HTTP.Request.Request_Type;
@@ -936,7 +936,7 @@ begin
 
    --  Case 27: 64-bit Content-Length. Set_Content_Length images a value
    --  above Natural'Last correctly, and the fixed pump accounts in
-   --  Byte_Count — a source that under-runs that huge N raises
+   --  Byte_Count: a source that under-runs that huge N raises
    --  Protocol_Error without integer overflow (no GBs written).
    declare
       T   : Transport;
@@ -986,10 +986,10 @@ begin
    end;
 
    --  Case 29: fixed framing over-run that sums to exactly N across
-   --  windows and then keeps going. With Content-Length 4, Chunk 4 and an
-   --  8-byte source, window 1 hits Sent = N exactly; the pump must read
-   --  once more, see the trailing bytes, and raise rather than silently
-   --  truncate to N. (Regression for the dropped `exit when Sent = N`.)
+   --  windows and then keeps going. With Content-Length 4, Chunk 4 and
+   --  an 8-byte source, window 1 hits Sent = N exactly; the pump must
+   --  read once more, see the trailing bytes, and raise. A pump that
+   --  exits as soon as Sent = N truncates here without raising.
    declare
       T   : Transport;
       Req : AHT.HTTP.Request.Request_Type;
@@ -1042,10 +1042,9 @@ begin
       Expect_Bad_CL ("99999999999999999999999999");
    end;
 
-   --  Case 31: Sources.Stream_Source chunked, multi-window. A Stream_Source
-   --  over an Ada stream that yields 5 bytes per Read must frame identically
-   --  to the hand-rolled Array_Source of Case 17 — proving the library source
-   --  is a faithful delegate, no boilerplate Read_Chunk needed.
+   --  Case 31: Sources.Stream_Source chunked, multi-window. A
+   --  Stream_Source over an Ada stream yielding 5 bytes per Read must
+   --  frame identically to the Array_Source of Case 17.
    declare
       T   : Transport;
       Req : AHT.HTTP.Request.Request_Type;
@@ -1116,7 +1115,7 @@ begin
 
    --  Case 33: Sources.Stream_Source over a real Stream_IO temp file. Write a
    --  known body to disk, stream it back fixed-framed, and assert it lands on
-   --  the wire byte-for-byte — the file path the ex_05 upload rung exercises.
+   --  the wire byte-for-byte, the file path the ex_05 upload example uses.
    declare
       Name : constant String := "/tmp/aht_test_http_wire.tmp";
       F    : Ada.Streams.Stream_IO.File_Type;

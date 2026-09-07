@@ -14,9 +14,9 @@ with AHT.URL;
 
 --  Transport-level TLS test. Drives AHT.Transport.TLS against the HTTPS
 --  fixture (tests/server/server_tls.py on 127.0.0.1:8766) by speaking a
---  minimal HTTP/1.1 GET over the established session — enough to
+--  minimal HTTP/1.1 GET over the established session: enough to
 --  exercise the handshake, certificate verification, Write and Read
---  without involving the HTTP client (that lands in split C2).
+--  without involving the HTTP client.
 --
 --  Run from the repo root (tests/run_tests.sh chdir's there) so the
 --  relative CA path resolves.
@@ -101,8 +101,9 @@ begin
       Close_Quietly (T);
    end;
 
-   --  Case 2: Insecure bypasses verification — same self-signed cert,
-   --  no CA supplied, handshake must still complete and serve /hello.
+   --  Case 2: Insecure bypasses verification. Same self-signed cert,
+   --  no CA supplied; the handshake must still complete and serve
+   --  /hello.
    declare
       T : AHT.Transport.TLS.TLS_Transport;
    begin
@@ -124,7 +125,7 @@ begin
 
    --  Case 3: verify required, no CA configured. The self-signed cert
    --  chains to no trusted root, so the handshake must be rejected with
-   --  TLS_Error rather than silently connecting.
+   --  TLS_Error.
    declare
       T : AHT.Transport.TLS.TLS_Transport;
    begin

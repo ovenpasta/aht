@@ -1,48 +1,32 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  The caller-side bound on reclamation.
+--  The caller-side bound on reclamation. Close waits for its own
+--  receiver to finish reclaiming the connection; the bound is a
+--  liveness report, not a safety decision, since the receiver still
+--  owns the session either way. Abort_Pending cancels transport I/O,
+--  not user code. Echo fixture on 8765 and the hostile one on 8777.
 --
---  Close waits for its own receiver to finish reclaiming the
---  connection, and that wait cannot be made safe by shortening it:
---  the receiver still owns the session either way. So the bound is a
---  liveness report rather than a safety decision — it says "this is
---  taking too long", not "I have given up on it".
+--  Cases:
+--    1. with a callback still running, Close reports Timeout_Error
+--    2. nothing was abandoned: still Closing, a later Close completes
+--    3. a writer parked in the transport does not outwait Close
+--    4. Timeout => 0.0 still sends the Close frame when nothing is in
+--       the way
+--    5. a caller-initiated teardown is not reported through On_Error
 --
---  The case that makes it necessary is a callback that does not
---  return. Abort_Pending cancels transport I/O; it cannot cancel user
---  code, so a receiver sitting inside On_Message will never reach
---  reclamation and no receiver-side mechanism can notice. Only the
---  caller can, which is why "callbacks must not block" is a contract
---  and not advice.
+--  Covers:
+--    - case 1 is bounded on both sides: too fast means the bound was
+--      never waited on
+--    - case 2: Configure raising Mode_Error proves the client is still
+--      Closing, not Disconnected, and the client is reusable after
+--    - case 3: the close handshake takes the send latch with a bound;
+--      a WebSocket write carries no deadline of its own
+--    - case 5: a peer-driven abort still reaches On_Error
 --
---  Cases, in the order they run:
---    1. With a callback still running, Close reports Timeout_Error
---       instead of blocking.
---    2. Nothing was abandoned by that report. The client is still
---       Closing immediately afterwards — checked, because a timeout
---       that wrongly marked the generation done would leave every
---       later assertion here passing anyway — and once the callback
---       returns, a later Close finds the same teardown, completes it,
---       and the client is reusable.
---    3. A writer parked in the transport does not outwait Close. The
---       close handshake takes the send latch BEFORE it reaches its
---       timed wait, so taking it unconditionally would let a stuck
---       writer outlast Timeout without Timeout ever being consulted —
---       and a WebSocket write carries no deadline of its own, so a
---       peer that stops reading is all it takes to arrange that.
---    4. Telling Close not to wait for the peer still sends the Close
---       frame when nothing is in the way. "Do not wait" must not
---       quietly become "do not try".
---    5. A teardown the caller asked for is not reported through
---       On_Error. The abort that ends it is the mechanism, not a
---       fault; a peer-driven one still reaches the callback.
---
---  Not covered: the close frame's own write parking on a full socket
---  buffer. Reaching it needs a writer that SUCCEEDS while leaving the
---  buffer exactly full — interrupting one instead poisons the
---  transport by design, so the next write fails fast rather than
---  parking — and that could not be arranged deterministically here.
+--  Does not cover:
+--    - the Close frame's own write parking on a full socket buffer:
+--      needs a writer that succeeds leaving the buffer exactly full
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;
@@ -103,8 +87,7 @@ procedure Test_WS_Teardown is
 
    --  Lets the test hold a callback inside the receiver for as long
    --  as it needs, and know for a fact that it is in there. The hold
-   --  is itself bounded: if the test never releases it, the receiver
-   --  must still eventually come back rather than wedging the suite.
+   --  is itself bounded, so a test that never releases it still ends.
    protected Gate is
       procedure Enter;
       function  Entered return Boolean;
@@ -143,8 +126,8 @@ procedure Test_WS_Teardown is
    end On_Message;
 
    --  Asks the peer whether the connection using this token has put
-   --  anything on the wire. The peer peeks rather than reads, so
-   --  asking does not unblock a writer that is deliberately stuck.
+   --  anything on the wire. The peer peeks, so asking does not
+   --  unblock a stuck writer.
    function Peer_Saw_Traffic (Token : String) return Boolean is
       Q   : AHT.Websocket.Client.Client_Type;
       Msg : AHT.Websocket.Client.Message_Type;
@@ -207,9 +190,9 @@ begin
       return;
    end if;
 
-   --  Case 1: Close cannot complete, and must say so rather than
-   --  block. Timeout is small because there is no peer to wait for
-   --  here; what is being bounded is our own receiver.
+   --  Case 1: Close cannot complete, and must say so. Timeout is
+   --  small because there is no peer to wait for; what is bounded is
+   --  our own receiver.
    Started := Clock;
    begin
       AHT.Websocket.Client.Close
@@ -246,13 +229,11 @@ begin
             & "s against a 1.0s drain bound — it did not wait");
    end if;
 
-   --  The report was a liveness complaint, not a conclusion. If the
-   --  timeout had marked the generation done, or abandoned the
-   --  session, the client would read as Disconnected here and
-   --  everything below would still pass. Configure answers that
-   --  without blocking: it is refused anywhere but Idle and
-   --  Disconnected, so Mode_Error here means the client is still
-   --  Closing and the teardown is still somebody's business.
+   --  The report was a liveness complaint, not a conclusion. Had the
+   --  timeout marked the generation done, the client would read as
+   --  Disconnected and everything below would still pass. Configure
+   --  is refused anywhere but Idle and Disconnected, so Mode_Error
+   --  here means the client is still Closing.
    begin
       AHT.Websocket.Client.Configure
         (C, AHT.Websocket.Client.Limits'(others => <>));
@@ -340,7 +321,7 @@ begin
 
       --  Gated on an entry: an ungated task activates at this block's
       --  `begin`, before Connect has run, and its send would raise
-      --  Closed_Error at once — indistinguishable from a write that
+      --  Closed_Error at once, indistinguishable from a write that
       --  completed.
       task Stuck_Writer is
          entry Go;
@@ -372,9 +353,8 @@ begin
          Stuck_Writer.Go;
       end if;
 
-      --  Positive confirmation, not an inference from a delay. The
-      --  peer reports (by peeking, so it stays deaf and the writer
-      --  stays blocked) that bytes really arrived; combined with the
+      --  The peer reports (by peeking, so it stays deaf and the
+      --  writer stays blocked) that bytes arrived; combined with the
       --  send not having returned, that puts the writer inside the
       --  transport holding the latch. A bare "it has not finished
       --  yet" would equally describe a task that had not started.
@@ -474,15 +454,10 @@ begin
                & Ada.Exceptions.Exception_Message (Err));
    end;
 
-   --  Case 5: a teardown the caller asked for is not an error.
-   --
-   --  Close stops a parked receiver by aborting its transport I/O, so
-   --  the receiver sees Aborted_Error on the way out. Reporting that
-   --  through On_Error would tell the application its connection
-   --  failed every single time it closed one — the abort is the
-   --  mechanism working, not a fault. A peer-driven abort still
-   --  reaches On_Error; only the caller's own does not.
-   --
+   --  Case 5: a teardown the caller asked for is not an error. Close
+   --  stops a parked receiver by aborting its transport I/O, so the
+   --  receiver sees Aborted_Error on the way out; that is not reported
+   --  through On_Error. A peer-driven abort still reaches On_Error.
    --  The peer here drains but never echoes a Close, so the handshake
    --  can only end by the caller aborting it.
    declare

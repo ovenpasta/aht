@@ -11,7 +11,7 @@
 package TLS_Sync_Cases is
 
    function Run (Label : String) return Natural;
-   --  Runs every case, printing "<Label>: FAIL — ..." for each
+   --  Runs every case, printing "<Label>: FAIL - ..." for each
    --  failure. Returns the number of failures (0 = all good).
 
 end TLS_Sync_Cases;

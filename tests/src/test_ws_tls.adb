@@ -1,30 +1,18 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  WebSocket client over wss://. Exercises the scheme dispatch added
---  in split C3: AHT.Websocket.Client.Connect now routes wss:// through
---  AHT.Transport.TLS (Insecure / CA_Path threaded into the handshake),
---  ws:// stays on the plain TCP transport. The frame / close mechanics
---  are already covered by test_ws_echo over ws://; this test's job is
---  to prove the TLS branch connects, verifies, and round-trips a real
---  message before the clean close.
+--  WebSocket client over wss://: Connect routes wss:// through
+--  AHT.Transport.TLS with Insecure / CA_Path threaded into the
+--  handshake; frame and close mechanics are in test_ws_echo. Against
+--  server_ws_tls.py on localhost:8768 (named, so SNI matches the
+--  cert's SAN); run from the repo root so the CA path resolves.
 --
---  Talks to tests/server/server_ws_tls.py on 127.0.0.1:8768, reusing
---  the self-signed cert from scripts/generate_cert.sh. URLs name
---  "localhost" (not the IP) so SNI matches the cert's DNS:localhost
---  SAN under verification. Run from the repo root (run_tests.sh
---  chdir's there) so the relative CA path resolves.
---
---  Three cases:
---    1. CA verify — Connect with CA_Path pointing at the fixture's
---       cert, text round-trip "secure, AHT!", clean Close, Is_Open
---       flips to False.
---    2. Insecure — Connect with Insecure => True (no CA), binary
---       round-trip of 0x00..0x0F, then Close.
---    3. Untrusted — verify required, no CA configured. The self-signed
---       chain trusts no root, so the TLS handshake is rejected and
---       Connect propagates AHT.Transport.TLS.TLS_Error (unwrapped, the
---       dial is outside the handshake's Handshake_Error wrapper).
+--  Cases:
+--    1. CA_Path at the fixture's cert: text round-trip, clean Close
+--    2. Insecure => True, no CA: binary round-trip
+--    3. verify required, no CA: Connect propagates TLS_Error,
+--       unwrapped, since the dial is outside the Handshake_Error
+--       wrapper
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -100,7 +88,7 @@ begin
       end if;
    end;
 
-   --  Case 2: Insecure bypasses verification — no CA supplied, the
+   --  Case 2: Insecure bypasses verification: no CA supplied, the
    --  self-signed cert is accepted and a 16-byte binary payload
    --  round-trips intact through the masking / framing path.
    declare

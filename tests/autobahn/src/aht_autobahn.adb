@@ -1,33 +1,24 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Autobahn|Testsuite client driver ("testee").
+--  Autobahn|Testsuite client driver ("testee"). Drives the
+--  fuzzingserver's client-test protocol against a running server
+--  (default ws://127.0.0.1:9001; run.sh brings one up via Docker).
+--  Usage: aht_autobahn [BASE_URL] [AGENT]; AGENT defaults to "AHT".
 --
---  Drives the Autobahn fuzzingserver's client-test protocol against a
---  running server (default ws://127.0.0.1:9001, see run.sh for bringing
---  one up via Docker):
---
---    1. /getCaseCount        — server sends the case count as one text
---                              message, then closes.
---    2. /runCase?case=N&agent=A
---                            — server drives case N; we echo every data
---                              message back verbatim (text as text,
---                              binary as binary) until it closes. Control
---                              frames (ping/pong/close) are handled by the
---                              client itself. This echo behaviour is what
---                              Autobahn scores.
---    3. /updateReports?agent=A
---                            — server writes the HTML/JSON reports to the
---                              outdir from fuzzingserver.json.
---
---  Usage: aht_autobahn [BASE_URL] [AGENT]
---    BASE_URL defaults to ws://127.0.0.1:9001, AGENT to "AHT".
+--  Cases:
+--    1. /getCaseCount: the server sends the case count as one text
+--       message, then closes.
+--    2. /runCase?case=N&agent=A: the server drives case N; every data
+--       message is echoed back verbatim (text as text, binary as
+--       binary) until it closes. The client handles control frames.
+--    3. /updateReports?agent=A: the server writes the HTML/JSON reports
+--       to the outdir from fuzzingserver.json.
 --
 --  Each case runs on its own Client_Type in a declare block and is
---  always Closed before the block exits, so the per-connection receiver
---  task is joined (an abandoned client with a live task would hang at
---  scope exit). Each case is also wrapped so one failing case (e.g. a
---  Storage_Error on a multi-megabyte payload) does not abort the run.
+--  always Closed before the block exits, so the receiver task is
+--  joined. Each case is wrapped so one failing case (a Storage_Error
+--  on a multi-megabyte payload) does not abort the run.
 
 with Ada.Command_Line;
 with Ada.Exceptions;

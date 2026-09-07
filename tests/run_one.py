@@ -3,39 +3,20 @@
 #  SPDX-License-Identifier: Apache-2.0
 """Run one test binary under a hard wall-clock cap.
 
-Why not timeout(1): it is coreutils, and the macOS CI job installs
-only openssl@3 — so on that runner the cap simply would not exist,
-which is the one place an abort regression could hang the job
-indefinitely. And GNU timeout without -k sends only SIGTERM, so a
-process that traps or ignores it outlives the advertised cap anyway.
-Python is already a hard requirement here (every fixture is a Python
-server), so this depends on nothing new.
-
-The child gets its own session, and everything below is driven by the
-resulting process GROUP rather than by the child itself. That
-distinction is the whole point: the group outlives its leader, so
-watching only the leader lets helpers escape twice over — once when
-the test exits normally having left something behind, and again on
-the timeout path, where the leader dying to SIGTERM would otherwise
-be read as "done" and skip the SIGKILL that the helper ignoring
-SIGTERM still needs.
-
-SIGTERM first, so a test can unwind and flush what it printed;
-SIGKILL after a grace period, because the tests this backstops are
-precisely the ones that may be unable to unwind — Ada waits for
-dependent tasks at scope exit, so a task that refuses to terminate
-blocks its test after it has already reported the problem.
-
-Because the child is in its own session it never sees signals sent to
-the runner's terminal, so interrupting the suite would otherwise
-leave a live test group behind. Termination signals are forwarded to
-the group, and the group is cleaned up on every exit path.
-
-Exit status is the child's, or 124 when the cap expired — matching
-timeout(1) so the runner's reporting does not have to care which
-mechanism enforced it.
-
     usage: run_one.py SECONDS PROGRAM [ARGS...]
+
+timeout(1) is coreutils, which the macOS CI job does not install, and
+without -k it sends only SIGTERM. The child gets its own session and
+everything is driven by the resulting process group, which outlives
+its leader, so helpers left behind by a normal exit or ignoring
+SIGTERM are still reached. SIGTERM first so a test can flush what it
+printed, SIGKILL after a grace period: Ada waits for dependent tasks
+at scope exit, and a task that refuses to terminate blocks its test.
+Termination signals to the runner are forwarded to the group, and the
+group is cleaned up on every exit path.
+
+Exit status is the child's, or 124 when the cap expired, as with
+timeout(1).
 """
 
 from __future__ import annotations
@@ -62,9 +43,9 @@ def signal_group(pgid: int, sig: int) -> None:
 def group_alive(pgid: int) -> bool:
     """Whether any process remains in the group.
 
-    Signal 0 checks for existence without delivering anything. A
-    reaped leader is gone from the group, so callers should poll the
-    child first — otherwise its zombie keeps the group 'alive'.
+    Signal 0 checks for existence without delivering anything. Poll
+    the child first: a reaped leader is gone from the group, an
+    unreaped zombie keeps it 'alive'.
     """
     try:
         os.killpg(pgid, 0)
@@ -80,10 +61,8 @@ def group_alive(pgid: int) -> bool:
 def reap_group(proc: subprocess.Popen, pgid: int) -> None:
     """Terminate everything left in the group, leader or not.
 
-    Driven by the group: the leader may already be gone (normal exit,
-    or killed by the SIGTERM below) while a helper that ignores
-    SIGTERM is still running, and that helper is exactly what must not
-    survive this call.
+    The leader may already be gone while a helper that ignores
+    SIGTERM is still running; that helper must not survive this call.
     """
     proc.poll()
     if not group_alive(pgid):
@@ -100,10 +79,8 @@ def reap_group(proc: subprocess.Popen, pgid: int) -> None:
 
     signal_group(pgid, signal.SIGKILL)
 
-    # Give the kill a moment to take, then stop caring: an
-    # unkillable process (uninterruptible sleep) must not make this
-    # wrapper hang, which would be the very failure it exists to
-    # prevent.
+    # Give the kill a moment to take, then stop waiting: a process in
+    # uninterruptible sleep must not hang this wrapper.
     deadline = time.monotonic() + GRACE
     while time.monotonic() < deadline:
         proc.poll()
@@ -116,10 +93,8 @@ def shell_status(status: int) -> int:
     """Translate a subprocess return code into a shell exit status.
 
     subprocess reports death by signal as a negative code; shells
-    report 128 + signal. Passing the negative straight to sys.exit
-    wraps it modulo 256, so a test killed by SIGTERM would surface as
-    241 instead of 143 — a number the runner would print as an
-    ordinary failure with no hint that a signal was involved.
+    report 128 + signal. Passed straight to sys.exit the negative wraps
+    modulo 256, so SIGTERM would surface as 241 instead of 143.
     """
     if status < 0:
         return 128 - status          # status is negative
@@ -143,14 +118,11 @@ def main() -> int:
 
     argv = sys.argv[2:]
 
-    # Handlers go in BEFORE the spawn. Installing them afterwards
-    # leaves a window between the child existing and the wrapper being
-    # able to clean it up: a signal arriving there kills the wrapper
-    # by default while the child, isolated in its own session, never
-    # sees it and survives. Measured — that window escapes.
-    #
-    # Until there is a group to clean, the handler can only record
-    # what arrived; the spawn honours it immediately afterwards.
+    # Handlers go in before the spawn: installed afterwards, a signal
+    # arriving between the child existing and the handler being in
+    # place kills the wrapper while the child, in its own session,
+    # survives. Until there is a group the handler only records what
+    # arrived; the spawn honours it immediately afterwards.
     state = {"proc": None, "pgid": None, "pending": None}
 
     def on_signal(signum, _frame):
@@ -170,15 +142,14 @@ def main() -> int:
         return 128 + state["pending"]   # nothing spawned yet
 
     # start_new_session puts the child in its own session and process
-    # group on POSIX; the group id is then the child's pid. Saved now,
-    # so the group stays addressable after the leader is gone.
+    # group; the group id is the child's pid, saved now so the group
+    # stays addressable after the leader is gone.
     proc = subprocess.Popen(argv, start_new_session=True)
     state["proc"] = proc
     state["pgid"] = proc.pid
     pgid = proc.pid
 
-    # A signal that landed during the spawn was recorded rather than
-    # acted on, because there was nothing to clean up yet.
+    # A signal that landed during the spawn was only recorded.
     if state["pending"] is not None:
         reap_group(proc, pgid)
         os._exit(128 + state["pending"])

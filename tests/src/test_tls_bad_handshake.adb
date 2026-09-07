@@ -1,26 +1,23 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Handshake-path fault injection (backend-neutral), the counterpart
---  to test_tls_corrupt's post-handshake case.
+--  Handshake-path fault injection, backend-neutral, against
+--  tests/server/server_tls_badhandshake.py, which holds each connection
+--  open so no assertion can be satisfied by an EOF.
 --
---  Two cases, both served by tests/server/server_tls_badhandshake.py,
---  which HOLDS each connection open so that neither assertion can be
---  satisfied by an EOF the client didn't have to understand:
+--  Cases:
+--    1. 8774, undefined record content type: Connect fails promptly
+--       with TLS_Error, then the same object Connects successfully.
+--    2. 8775, record header dribbled in two pieces around a pause, then
+--       silence: Connect fails with Timeout_Error at about the handshake
+--       deadline, not deadline + pause (a per-read budget).
 --
---    * 8774, an undefined record content type. Connect must fail
---      promptly with TLS_Error — a Timeout_Error would mean the
---      record was waited out rather than diagnosed.
---    * 8775, a record header dribbled in two pieces around a pause,
---      then silence. Connect must fail with Timeout_Error at roughly
---      the handshake deadline, NOT at deadline + pause, which is
---      where a per-read (rather than from-Connect) budget would land.
---
---  Both must leave Is_Connected False. The invalid-record case then
---  goes on to Connect the SAME object successfully, pinning that a
---  pre-session failure releases everything and does not set the
---  single-use latch; the dribble case shares that cleanup path, so it
---  only checks the failure itself and closes.
+--  Covers:
+--    - both failures leave Is_Connected False
+--    - a pre-session failure releases everything and does not set the
+--      single-use latch (case 1)
+--  Does not cover:
+--    - reuse after the dribble failure; it shares case 1's cleanup path
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -74,10 +71,10 @@ begin
    end;
    Elapsed := To_Duration (Clock - Started);
 
-   --  Promptness: the record must have been DIAGNOSED, not waited
-   --  out. The fixture holds the connection open precisely so this
-   --  means something — with a close, an undiagnosed client would
-   --  still fail fast on the EOF and this assertion would be vacuous.
+   --  Promptness: the record must have been diagnosed, not waited
+   --  out. The fixture holds the connection open so that an
+   --  undiagnosed client cannot fail fast on an EOF and satisfy this
+   --  assertion vacuously.
    if Elapsed >= Deadline * 0.5 then
       Fail ("Connect took" & Elapsed'Image
             & " s — the invalid record looks waited out rather than"
@@ -89,7 +86,7 @@ begin
    end if;
 
    --  Retryability: nothing was established, so the object must be
-   --  reusable — the same guarantee test_tls_retry pins for
+   --  reusable. This is the guarantee test_tls_retry pins for
    --  certificate failures, here for an unparsable peer.
    declare
       CRLF : constant String := ASCII.CR & ASCII.LF;
@@ -126,13 +123,12 @@ begin
       when others => null;
    end;
 
-   --  Case 2: a DRIBBLED record header — part of it, a pause, one
-   --  more byte, then silence. Distinct from the stall fixture, which
-   --  sends nothing at all: here the engine has consumed bytes and is
-   --  waiting for the rest of a record. The handshake deadline must
-   --  still fire, and — the property worth pinning — the bytes that
-   --  arrive mid-wait must NOT refresh it, because it is a budget
-   --  measured from Connect rather than per read.
+   --  Case 2: a dribbled record header: part of it, a pause, one more
+   --  byte, then silence. Unlike the stall fixture, which sends nothing,
+   --  the engine has consumed bytes and waits for the rest of a record.
+   --  The handshake deadline must still fire, and the bytes arriving
+   --  mid-wait must not refresh it: the budget is measured from Connect,
+   --  not per read.
    declare
       T2      : AHT.Transport.TLS.TLS_Transport;
       --  The fixture pauses this long between its two dribbles.
@@ -161,9 +157,7 @@ begin
       --    * a budget measured from Connect expires at ~Deadline;
       --    * a budget restarted on each read would expire at
       --      ~Deadline + Pause.
-      --  Those are far enough apart to tell apart, which is the whole
-      --  reason the fixture pauses rather than sending everything at
-      --  once.
+      --  The pause is long enough to tell the two apart.
       if Took < Deadline - 1.0 then
          Fail ("dribble: gave up after" & Took'Image
                & " s, well short of the" & Deadline'Image & " s budget");

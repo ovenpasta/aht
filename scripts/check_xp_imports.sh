@@ -2,23 +2,18 @@
 #  Copyright (C) 2026 Aldo Nicolas Bruno
 #  SPDX-License-Identifier: Apache-2.0
 #
-# Refuse a 32-bit Windows image that names an entry point Windows XP
-# does not export.
-#
-# XP loadability is a question about symbols, not about DLLs: the
-# version boundary runs through KERNEL32 and WS2_32 rather than between
-# them, and the loader resolves imports eagerly, so a single Vista-only
-# name fails the whole image. An import table listing only XP-era DLLs
-# is consistent with that and says nothing about it.
-#
-# This is a denylist and therefore incomplete by construction. It names
-# the entry points that have actually been reached for here -- a
-# condition variable, a 64-bit tick count, a one-time initialiser, a
-# presentation-form converter -- so that reintroducing one is reported
-# rather than discovered on the target. A name not on this list is not
-# thereby XP-safe.
+# Refuse a 32-bit Windows image that imports an entry point Windows
+# XP does not export. The loader resolves imports eagerly, so one
+# Vista-only name in KERNEL32 or WS2_32 fails the whole image; an
+# import table listing only XP-era DLLs says nothing about it.
 #
 # Usage: check_xp_imports.sh <objdump> <image>...
+# Exit 0 when no image imports a denied name, 1 otherwise or when an
+# import table cannot be read.
+#
+# A denylist, so incomplete: it names the entry points this code base
+# has reached for (condition variables, a 64-bit tick count, one-time
+# initialisers, inet_pton). A name not on it is not thereby XP-safe.
 
 set -e
 
@@ -63,17 +58,16 @@ for image in "$@"; do
     # Positive control first: an empty read would make every absence
     # assertion below pass against nothing at all.
     if ! printf '%s\n' "$imports" | grep -qx "GetLastError"; then
-        echo "check_xp_imports: FATAL — no import table read from $image" >&2
+        echo "check_xp_imports: FATAL - no import table read from $image" >&2
         exit 1
     fi
 
-    # An `if` and not `! grep -q`: under `set -e` a command preceded by
-    # `!` is exempt from errexit, so the negated form would find a
-    # forbidden symbol and let the script continue green.
+    # An `if`, not `! grep -q`: under `set -e` a `!` command is exempt
+    # from errexit, so a hit would let the script continue green.
     while IFS= read -r sym; do
         [ -n "$sym" ] || continue
         if printf '%s\n' "$imports" | grep -qx "$sym"; then
-            echo "check_xp_imports: FATAL — $(basename "$image")" \
+            echo "check_xp_imports: FATAL - $(basename "$image")" \
                  "imports $sym, which XP does not export" >&2
             status=1
         fi

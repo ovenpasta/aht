@@ -2,70 +2,43 @@
 --  SPDX-License-Identifier: Apache-2.0
 
 --  Asynchronous transfer of control across the WebSocket client's
---  ownership handoffs.
+--  ownership handoffs: tasks torn out of calls they are blocked in,
+--  where controlled finalization has to carry the invariant. Runs
+--  against a fake server in this file (completes the handshake, then
+--  drains without answering) and the stall fixture on 8767.
 --
---  Every other test drives the client through ordinary returns and
---  exceptions, so none of them reaches the paths where an Ada task is
---  torn out of a call it is blocked in. Those are exactly the paths
---  where hand-written cleanup fails and controlled finalization has
---  to carry the invariant instead.
+--  Cases:
+--    1. abort the winner of a teardown; the receiver must still wake
+--    2. abort a connect attempt in flight; the client must redial
+--    3. does not exist: the handover record is pinned by test_ws_handoff
+--    4. abort a sender holding Send_Guard and one queued on it
+--    5. abort across admission, then redial
 --
---  Four cases, in the order they run. How firmly each lands on the
---  state it means to test differs, so that is stated per case rather
---  than claimed uniformly.
+--  Covers:
+--    - case 1 aborts only after two observed facts: the teardown was
+--      taken (Is_Open false) and the Close frame reached the peer
+--    - case 4 aborts a writer provably parked in Write holding the
+--      guard, and a second sender on its entry queue
+--    - case 5: a client left admitted-but-unowned refuses every later
+--      Connect with Wrong_State; the retry is the check
+--    - every fixture outlasts the assertions that depend on it, and
+--      the bounds make a regression a FAIL, not a hung suite
 --
---  Cases 2 and 4 are skipped on Windows, where an abort cannot reach
---  a task parked in a socket call. See Abortable_Socket_Wait below.
+--  Does not cover:
+--    - case 2 is timing-based: a fixed delay against a fixture that is
+--      silent for far longer
+--    - case 4 does not reach the window where the abort lands as the
+--      acquisition completes; case 5 pins that
+--    - case 5 cannot steer the abort into the admission window: with
+--      the generation record moved out of the protected action it
+--      still passes, and nothing in the suite catches that
+--    - cases 2 and 4 are skipped on Windows, where an abort cannot
+--      reach a task parked in a socket call (Abortable_Socket_Wait)
 --
---    1. Abort the winner of a teardown. Winning stops admission and
---       makes that caller the only task that can wake the receiver:
---       every later Close joins and waits. If the abort skips the
---       wake gates, the receiver stays parked in Read and the join
---       cannot complete until the fixture drops the socket seconds
---       later — which is what the timing bound detects. Waits for two
---       observed facts before aborting: that the teardown was taken,
---       and that the Close frame reached the peer.
---
---    2. Abort a connect attempt in flight, after a fixed delay
---       against a fixture that never answers. The attempt owns an
---       unpublished session and holds the client's admission; if its
---       cleanup does not run, the client is stranded in Connecting
---       and can never be connected again. Timing-based, but the
---       fixture is silent for far longer than the delay.
---
---    The handover record used to be sampled here, by sweeping an
---    abort across a calibrated handshake. It is now its own type
---    and pinned deterministically by test_ws_handoff; see the note
---    where that case stood.
---
---    4. Abort senders around Send_Guard. The guard is a plain busy
---       latch, so a task torn out while holding it would leave it
---       latched and every later sender, the close handshake included,
---       would block on it forever. Two senders are aborted together:
---       one parked in Write provably holding the guard, one still on
---       its entry queue, covering the holder and cancellation paths.
---
---    5. Abort across ADMISSION, then redial. The owner is created
---       BEFORE admission is asked for; what has to happen inside the
---       protected action is the recording of the generation, which is
---       what makes that owner responsible for releasing the admission.
---       That distinction is the whole safety argument: an object that
---       merely exists cannot be told to release anything, and a
---       record made after the action has ended can be skipped by an
---       abort landing there. Get it wrong and the client is admitted
---       and unowned, and every later Connect is refused forever. The
---       window cannot be steered into, so this guards the consequence
---       rather than the race -- see the note on the case itself.
---
---  The guard's own ownership protocol is exercised separately, by
---  test_ws_send_guard: those cases leave a latch permanently held if
---  they fail, which shows up here as a hang, so they must not sit
---  behind a case that can hang first and hide them.
---
---  Every fixture outlasts the assertions that depend on it, so a
---  failure can only mean the client did the wrong thing, never that
---  the peer went away underneath it. The bounds make a regression a
---  FAIL rather than a hung suite.
+--  Validated by:
+--    case 1: if the abort skips the wake gates the receiver stays
+--    parked in Read and the join waits until the fixture drops the
+--    socket seconds later, which the timing bound detects.
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Characters.Handling;
@@ -79,11 +52,10 @@ with GNAT.Sockets; use GNAT.Sockets;
 
 with GNAT.SHA1;
 
---  System.OS_Constants is an internal GNAT unit, and GNAT says so.
---  Used here only to ask which OS this binary targets, which no
---  portable unit answers; the alternative is a gpr-fed external, and
---  a build knob that decides what a test claims is worse than a
---  target-generated constant.
+--  System.OS_Constants is an internal GNAT unit. It is used here only
+--  to ask which OS this binary targets, which no portable unit
+--  answers. A gpr-fed external would let a build knob decide what a
+--  test claims; a target-generated constant cannot be set wrong.
 pragma Warnings (Off, "*internal GNAT unit*");
 pragma Warnings (Off, "*non-portable and version-dependent*");
 with System.OS_Constants;
@@ -103,26 +75,11 @@ procedure Test_WS_Abort is
    Failures : Natural := 0;
 
    --  Whether `abort` can reach a task parked in a blocking socket
-   --  call. GNAT on Linux interrupts the syscall with a signal, so the
-   --  task unwinds; Windows has no equivalent, so the abort is
-   --  deferred until the call returns on its own -- never, for a
-   --  Forever wait. Measured with a standalone probe rather than read
-   --  off the platform: park a task in Check_Selector, abort it, ask
-   --  'Terminated. Linux terminates; Windows does not.
-   --
-   --  Cases 2 and 4 depend on it, and only those two are skipped.
-   --  The distinction is what the transfer of control has to travel
-   --  through, not which construct asks for it: case 2 uses an
-   --  asynchronous select and case 4 an `abort T`, and both are
-   --  aimed at a task parked inside a socket call -- Connect reading
-   --  a handshake response, a sender filling a socket buffer. Cases 1
-   --  and 5 abort tasks sitting in AHT's own protected actions and
-   --  waits, which are ordinary Ada and unwind everywhere.
-   --
-   --  Established by running it, not by reading the cases: case 4 was
-   --  skipped first on the assumption that it was the only one, and
-   --  the main still hung. Skipping the whole main instead would take
-   --  cases 1 and 5 with it, which have nothing to do with this.
+   --  call. GNAT on Linux interrupts the syscall with a signal and the
+   --  task unwinds; Windows defers the abort until the call returns,
+   --  never for a Forever wait. Measured with a standalone probe
+   --  (Check_Selector, abort, 'Terminated). Cases 2 and 4 aim at a
+   --  socket call and are skipped; cases 1 and 5 unwind everywhere.
    use type System.OS_Constants.OS_Type;
    Abortable_Socket_Wait : constant Boolean :=
      System.OS_Constants.Target_OS /= System.OS_Constants.Windows;
@@ -134,7 +91,7 @@ procedure Test_WS_Abort is
    end Fail;
 
    --  Spin until Cond holds or the bound expires, so every wait in
-   --  this test is on an observable fact rather than a guessed delay.
+   --  this test is on an observable fact.
    generic
       with function Cond return Boolean;
    function Await (Bound : Duration) return Boolean;
@@ -200,9 +157,9 @@ procedure Test_WS_Abort is
    end Extract_Key;
 
    --  Set by the fixture the moment it reads anything the client sent
-   --  after the handshake — in practice the Close frame. Case 1 waits
-   --  on this rather than on a delay, so "the closer is parked waiting
-   --  for an echo" is an observed fact.
+   --  after the handshake, in practice the Close frame. Case 1 waits
+   --  on this, so "the closer is parked waiting for an echo" is an
+   --  observed fact.
    protected Peer_Traffic is
       procedure Note;
       function  Seen return Boolean;
@@ -222,16 +179,11 @@ procedure Test_WS_Abort is
    function Await_Traffic is new Await (Traffic_Seen);
 
    --  Completes the WebSocket handshake, then drains without ever
-   --  answering: it reads the client's Close frame (so the test can
-   --  see that it arrived) but never echoes it, so a client waiting
-   --  for the echo waits forever and only its own machinery can end
-   --  the wait. Holds past every assertion, then drops the socket so
-   --  a stranded receiver still terminates and the suite reports a
-   --  failure instead of deadlocking.
-   --  Deaf_Ms delays the drain loop, so the peer stops reading for
-   --  that long after the handshake. A client writing more than the
-   --  socket buffers hold then blocks in Write -- which is the only
-   --  way to park a task inside Send_Guard.
+   --  answering: it reads the client's Close frame but never echoes
+   --  it. Holds past every assertion, then drops the socket so a
+   --  stranded receiver still terminates and the suite reports a
+   --  failure. Deaf_Ms delays the drain loop; a client writing more
+   --  than the socket buffers hold then blocks in Write.
    task type Silent_Server (Deaf_Ms : Natural := 0) is
       entry Get_Port (P : out AHT.URL.Port_Number; Err : out Unbounded_String);
       entry Wait_Done;
@@ -447,14 +399,10 @@ begin
          begin
             Closer.Go (C'Unchecked_Access);
 
-            --  Positive evidence before aborting anything. Is_Open goes
-            --  false the instant Begin_Teardown runs, so it proves the
-            --  closer won; the fixture seeing traffic proves it got as
-            --  far as putting the Close frame on the wire. Together
-            --  they place it in the wait for an echo that never comes.
-            --  Without this the abort could land before the teardown
-            --  even started, and the join below would then be measuring
-            --  an ordinary Close.
+             --  Positive evidence before aborting: Is_Open false proves
+             --  the closer won (Begin_Teardown ran); the fixture seeing
+             --  traffic proves the Close frame is on the wire. Together
+             --  they place it in the wait for an echo that never comes.
             if not Await_Closing (3.0) then
                Fail ("close-abort: the closer never took the teardown"
                      & " — nothing was aborted mid-handshake, so this"
@@ -505,23 +453,16 @@ begin
          end;
       end if;
 
-      --  Release the fixture rather than waiting out its cap here.
+      --  Release the fixture; do not wait out its cap.
       Server.Wait_Done;
    end;
 
-   --  Case 2: abort a connect attempt in flight.
-   --
-   --  The stall fixture on 8767 accepts and then says nothing, so the
-   --  upgrade response never arrives and Connect blocks. The attempt
-   --  holds both the client's admission and an unpublished session; if
-   --  its cleanup does not run, the client is stuck in Connecting and
-   --  the next Connect is refused.
-   --  Skipped on Windows for the same reason as case 4, reached by a
-   --  different construct: this one is an asynchronous select rather
-   --  than an `abort T`, but both are asynchronous transfer of
-   --  control, and neither can reach a task sitting in a blocking
-   --  socket call. Here the aborted party is Connect, parked reading
-   --  a handshake response the stall fixture never sends.
+   --  Case 2: abort a connect attempt in flight. The stall fixture on
+   --  8767 accepts and says nothing, so Connect blocks reading the
+   --  upgrade response. The attempt holds the client's admission and
+   --  an unpublished session; if its cleanup does not run the client
+   --  is stuck in Connecting and the next Connect is refused. Skipped
+   --  on Windows: an asynchronous select cannot reach a socket call.
    if not Abortable_Socket_Wait then
       Put_Line
         ("test_ws_abort: SKIP connect-abort (case 2) — this target"
@@ -539,10 +480,9 @@ begin
             end select;
          exception
             when E : others =>
-               --  The attempt is supposed to still be blocked when the
-               --  abort fires. Anything else means the fixture is not
-               --  what this case assumes, so say so rather than letting
-               --  the assertion below report a misleading cause.
+                --  The attempt is supposed to still be blocked when the
+                --  abort fires. Anything else means the fixture is not
+                --  what this case assumes, so say so.
                Fail ("connect-abort: the attempt ended on its own with "
                      & Ada.Exceptions.Exception_Name (E) & ": "
                      & Ada.Exceptions.Exception_Message (E)
@@ -568,38 +508,16 @@ begin
       end;
    end if;
 
-   --  Case 3 is gone, and deliberately not replaced here.
-   --
-   --  It swept an abort across a calibrated handshake, hoping some
-   --  samples would land on the Start rendezvous. That could not be
-   --  made to work: the window is a few instructions wide, the span
-   --  had to bracket a duration that varies several-fold under load,
-   --  and it failed in both directions -- runs where every sample was
-   --  torn and runs where none was. Three attempts at re-tuning it
-   --  changed which direction it failed in and nothing else.
-   --
-   --  What it was reaching for is the handover record, which is now
-   --  its own type and driven directly by test_ws_handoff: no
-   --  fixture, no timing, and the record's survival of its maker's
-   --  abort is asserted rather than sampled. Same move as
-   --  Send_Guards, and for the same reason.
+   --  Case 3 does not exist: the handover record is its own type and
+   --  is driven directly by test_ws_handoff, which asserts its
+   --  survival of its maker's abort.
 
-   --  Case 4: abort a sender parked inside Send_Guard.
-   --
-   --  Send_Guard is a plain busy latch. A task aborted between taking
-   --  it and giving it back leaves it latched with nobody able to
-   --  clear it, and every later sender -- including the receiver's own
-   --  echo paths and the close handshake -- blocks on it forever. The
-   --  probe: park a writer in Write by writing more than the socket
-   --  buffers hold to a peer that has stopped reading, abort it there,
-   --  then require Close to complete once the peer resumes draining.
-   --  Skipped on Windows, and only this case. See
-   --  Abortable_Socket_Wait above: the abort below has to reach a
-   --  sender parked inside a socket write, which is the one thing a
-   --  Windows abort cannot do. Left as a reported SKIP rather than a
-   --  hang, because the tasks are declared inside the block and Ada
-   --  waits for them at its exit -- an unabortable one would stall
-   --  the main here and take case 5 with it.
+   --  Case 4: abort a sender parked inside Send_Guard. The guard is a
+   --  plain busy latch; a task aborted while holding it leaves it
+   --  latched and every later sender, the close handshake included,
+   --  blocks forever. Park a writer in Write against a peer that has
+   --  stopped reading, abort it, then require Close to complete once
+   --  the peer drains. Skipped on Windows: see Abortable_Socket_Wait.
    if not Abortable_Socket_Wait then
       Put_Line
         ("test_ws_abort: SKIP guard-abort (case 4) — this target"
@@ -651,13 +569,11 @@ begin
             entry Go;
          end Bulk_Writer;
 
-         --  Queues behind the parked writer and is aborted with it, so
-         --  the cancellation path -- an abort arriving while the call is
-         --  still on the entry queue -- is exercised alongside the
-         --  holder's. The narrower window, where the abort arrives just
-         --  as the acquisition completes, is a couple of instructions
-         --  wide and is not reachable from this side of the API; case 5
-         --  pins that one directly.
+          --  Queues behind the parked writer and is aborted with it, so
+          --  the cancellation path (abort while still on the entry
+          --  queue) is exercised alongside the holder's. The window
+          --  where the abort arrives as the acquisition completes is
+          --  not reachable from this side of the API; case 5 pins it.
          task Queued_Sender is
             entry Go;
          end Queued_Sender;
@@ -763,40 +679,12 @@ begin
       end;
    end if;
 
-   --  Case 5: abort across ADMISSION, and then insist the client is
-   --  still usable.
-   --
-   --  Admission runs in one protected action at the very top of
-   --  Connect: it moves the client to Connecting and makes the
-   --  attempt owner responsible for taking it back out again. Abort
-   --  is deferred inside that action and takes effect the instant it
-   --  ends — so if the two halves are not both inside it, an abort
-   --  landing exactly there leaves the client Connecting with nobody
-   --  able to clear it. Nothing about that is visible at the time.
-   --  The attempt looks like any other torn attempt; the damage only
-   --  shows on the NEXT Connect, which is refused forever.
-   --
-   --  So the check is the retry, not the abort. Case 3 sweeps a
-   --  similar span but starts half a handshake in — past admission
-   --  entirely — and never redials a torn sample, which is why this
-   --  is separate rather than folded into it.
-   --
-   --  What this does and does not pin, plainly.
-   --
-   --  The window is a few instructions wide, at the top of Connect,
-   --  and a timed abort cannot be steered into it: backing the fix
-   --  out — moving the record from inside the protected action to the
-   --  statement after it — leaves this case passing. So it does NOT
-   --  catch that regression, and nothing in the suite does.
-   --
-   --  It is still worth running. What it guards is the CONSEQUENCE,
-   --  which is permanent and silent: whatever the reason a client
-   --  ends up admitted-but-unowned, every later Connect is refused
-   --  forever, and this is the only case that would notice. That is
-   --  the same split already recorded for the Send_Guard flag shape
-   --  in docs/websocket.md — the design rests on the structural
-   --  argument that there is no interval, and the suite guards what
-   --  would follow if there were.
+   --  Case 5: abort across admission, then redial. Admission is one
+   --  protected action at the top of Connect: it moves the client to
+   --  Connecting and records the generation that makes the attempt
+   --  owner release it. An abort between the halves leaves the client
+   --  Connecting for good, seen only on the NEXT Connect. The window
+   --  cannot be steered into (header); the retry guards the result.
    declare
       Samples  : constant := 60;
       Torn     : Natural := 0;
@@ -835,11 +723,10 @@ begin
             else
                Torn := Torn + 1;
 
-               --  The whole point. A client whose admission was
-               --  orphaned is stuck in Connecting, and every later
-               --  Connect is refused with Wrong_State — permanently,
-               --  because the owner that would have called
-               --  Abandon_Connect never existed.
+               --  A client whose admission was orphaned is stuck in
+               --  Connecting, and every later Connect is refused with
+               --  Wrong_State, permanently, because the owner that
+               --  would have called Abandon_Connect never existed.
                begin
                   AHT.Websocket.Client.Connect (C, Echo_URL);
                   Admitted := Admitted + 1;
@@ -866,7 +753,7 @@ begin
       end loop;
 
       --  A sweep where nothing was ever torn never reached the window
-      --  and is not sampling admission at all — in which case the
+      --  and is not sampling admission at all, in which case the
       --  clean retries above prove nothing.
       if Torn = 0 then
          Fail ("admission-sweep: no sample was torn, so the abort "

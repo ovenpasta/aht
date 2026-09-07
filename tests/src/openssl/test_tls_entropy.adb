@@ -1,24 +1,18 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Where the TLS engine gets its entropy, openssl backend.
+--  Where the TLS engine gets its entropy, openssl backend. The engine
+--  has its own RNG and never reaches AHT.Random, so a verified TLS
+--  connect against the HTTPS fixture (8766) must leave AHT.Random's
+--  counters where it found them. The mbedtls source of this test
+--  asserts the opposite on the same connect.
 --
---  The openssl engine has its own RNG and never reaches AHT.Random,
---  so a TLS connect must leave AHT.Random's counters exactly where it
---  found them.
+--  Cases:
+--    - Draws and Bytes_Requested are unchanged across the connect
 --
---  This is the half that gives the mbedtls source of this test its
---  meaning. That one asserts a connect *moves* the counters, proving
---  mbedTLS is fed by AHT.Mbedtls.Entropy.Poll rather than by a
---  platform source. An assertion like that is only worth something if
---  the counters would have stayed still otherwise -- and the same
---  operation on this backend is exactly that control.
---
---  It also pins a property worth keeping: AHT.Random's accounting is
---  read by test_ws_masking to recover how many requests of each width
---  a run made, and that arithmetic assumes the only callers are frame
---  masking and the handshake nonce. A backend that started drawing
---  through AHT.Random would break it silently.
+--  Covers:
+--    - the accounting test_ws_masking reads: its arithmetic assumes the
+--      only AHT.Random callers are frame masking and the handshake nonce
 
 with Ada.Command_Line;
 with Ada.Exceptions;

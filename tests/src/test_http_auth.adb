@@ -1,18 +1,17 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  /protected returns 401 with WWW-Authenticate when the request
---  carries no Authorization header, and 200 echoing the header value
---  otherwise. Two cases:
---    1. unauthenticated → 401, WWW-Authenticate present.
---    2. with Authorization → 200, body == the header value we sent
---       (so we know AHT actually transmitted it; otherwise a server
---       that flipped on header *presence* alone could pass while AHT
---       had silently dropped the value).
+--  /protected on the Python fixture: 401 with WWW-Authenticate when the
+--  request carries no Authorization header, 200 echoing the header
+--  value otherwise. Non-2xx is not an exception (Resp.Status carries
+--  it), so case 1 asserts on the response.
 --
---  Non-2xx is not an exception in v1 — Resp.Status carries the
---  signal — so the 401 case asserts on the response, not on a raised
---  exception.
+--  Cases:
+--    1. No Authorization: 401, WWW-Authenticate present.
+--    2. With Authorization: 200, body equals the header value sent.
+--
+--  Covers:
+--    - the header value reaches the peer, not only its presence.
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -42,7 +41,7 @@ procedure Test_HTTP_Auth is
 
    C : AHT.HTTP.Client.Client_Type;
 begin
-   --  Case 1: no Authorization → 401.
+   --  Case 1: no Authorization gives 401.
    declare
       Resp : AHT.HTTP.Response.Response_Type;
    begin
@@ -69,7 +68,7 @@ begin
       end if;
    end;
 
-   --  Case 2: with Authorization → 200, body == the bearer string.
+   --  Case 2: with Authorization gives 200, body == the bearer string.
    declare
       Req  : AHT.HTTP.Request.Request_Type;
       Resp : AHT.HTTP.Response.Response_Type;

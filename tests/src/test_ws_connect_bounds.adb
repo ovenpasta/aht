@@ -2,86 +2,43 @@
 --  SPDX-License-Identifier: Apache-2.0
 
 --  Bounds on Websocket.Client.Connect: Resolve_Timeout,
---  Connect_Timeout, Handshake_Deadline and Upgrade_Deadline. Before
---  these existed the client dialled with all four at Duration'Last,
---  so a peer that accepted the TCP connection and then went silent
---  parked the caller forever, with no API-level way to bound or
---  cancel it — and a name that would not resolve did the same before
---  a socket ever existed.
+--  Connect_Timeout, Handshake_Deadline and Upgrade_Deadline. Fixtures:
+--  ws://127.0.0.1:8767/ is server_stall.py, which accepts TCP and
+--  never speaks (the upgrade stalls); wss:// on the same port stalls
+--  in the TLS handshake; ws://127.0.0.1:8765/ is the live echo fixture.
 --
---  Routing:
---    * ws://127.0.0.1:8767/  — server_stall.py. Accepts TCP, then
---      never speaks a byte. The connect succeeds and the HTTP upgrade
---      is what stalls, so this is the Upgrade_Deadline fixture.
---    * wss://127.0.0.1:8767/ — the same fixture reached over TLS
---      (Insecure). Now the *handshake* stalls and the upgrade is
---      never reached, so this is the Handshake_Deadline fixture.
---    * ws://127.0.0.1:8765/  — the real echo fixture, for the
---      controls and for the deadline-cleared regression.
+--  Cases:
+--    1. Upgrade_Deadline 1.0 s ends the wait, elapsed in [1.0, 4.0]
+--    2. Upgrade_Deadline 6.0 s, elapsed in [6.0, 12.0]
+--    3. Handshake_Deadline bounds the TLS handshake
+--    4. Connect_Timeout reaches TCP.Connect's pre-attempt budget check
+--    5. the upgrade budget is disarmed after a successful upgrade
+--    6. a timed-out Connect leaves the same client dialable
+--    7. Resolve_Timeout ends a stalled resolver
+--    8. the addresses the resolver returns are the ones dialled
+--    9. an IP literal never consults the resolver
 --
---  What each case proves, and how it would fail:
+--  Covers:
+--    - the wait tracks the value passed: the windows of cases 1 and 2
+--      are disjoint, so no single fixed bound satisfies both
+--    - Timeout_Error, not Transport_Error, proves the TCP connect
+--      succeeded before the wait; every case rejects Transport_Error
+--    - case 3 hangs (run_tests.sh TIMEOUT) if Handshake_Deadline is
+--      not honoured, since Upgrade_Deadline is left at Duration'Last
 --
---  Cases 1 and 2 do not assert merely that *a* timeout happened; they
---  assert that the wait tracked the value passed. The fixture never
---  sends anything, so nothing but the deadline can end the wait, and
---  the lower bound (elapsed >= deadline) is therefore exact rather
---  than statistical: the wait cannot come back early, only late.
+--  Does not cover:
+--    - a mid-connect stall for Connect_Timeout: needs an unroutable
+--      peer; case 4 proves the parameter arrives, not that a stalled
+--      connect is interrupted
+--    - case 5 does not distinguish a real clear from a re-arm to a
+--      large finite budget; that Set_*_Deadline (Duration'Last) clears
+--      is the transports' contract, tested there
+--    - a stall in the real getaddrinfo, as test_dns records
 --
---  Lateness is the only noise, which is why the two cases are checked
---  against constants and never against each other. Their windows —
---  [1.0, 4.0] and [6.0, 12.0] — are disjoint, so no single fixed
---  internal bound can satisfy both, and a build that ignored the
---  parameter fails one of them whatever it hard-coded. Comparing the
---  two elapsed times would test the same thing but through two noisy
---  measurements at once, where a slow 1.0 s case could overtake a
---  prompt 6.0 s one and fail a test that had found nothing wrong.
---
---  The exception identity carries the rest of the premise. Reaching
---  Timeout_Error rather than Transport_Error is itself proof that the
---  TCP connect succeeded, so case 1 cannot pass by failing early for
---  an unrelated reason — a refused or unreachable port surfaces as
---  Transport_Error, which every case here rejects explicitly.
---
---  Case 3 leaves Upgrade_Deadline at its default deliberately. Were
---  the handshake bound not honoured, the dial would hang rather than
---  fall through to a different bound and pass for the wrong reason;
---  run_tests.sh's per-test cap reports that as a TIMEOUT.
---
---  Case 5 is the regression guard for the disarm at the end of
---  Connect. Set_Read_Deadline / Set_Write_Deadline are COMPOUND
---  budgets measured from the setter call, so an Upgrade_Deadline left
---  armed after a successful upgrade does not go on bounding the
---  upgrade — it expires under the receiver mid-session, on a
---  connection that was never in trouble. The case connects with a
---  1.0 s upgrade budget, idles well past it, and then requires a full
---  round trip. Backed out (both Set_*_Deadline (Duration'Last) calls
---  at the end of Connect removed) it fails, and fails in the place
---  the argument predicts: the receiver trips Timeout_Error during the
---  idle, so Is_Open is already False before the send.
---
---  What case 5 does not distinguish: a genuine clear from a disarm
---  that merely re-armed some very large finite budget. Both survive a
---  2.5 s idle. What makes the case sound is the specific pair of
---  numbers — any budget of 1.0 s that leaked is certainly expired by
---  then — not a proof that the deadline was zeroed. That the disarm
---  is a real clear rather than a large value is a property of
---  Set_*_Deadline (Duration'Last), which the transports implement by
---  dropping the flag; it is their contract, tested there, and this
---  case leans on it rather than re-proving it.
---
---  What is NOT covered. A genuine mid-connect stall for
---  Connect_Timeout: that needs an unroutable or firewalled peer, too
---  environment-dependent for CI — the same limitation test_tcp
---  records for its own budget-exhausted case. Case 4 drives the
---  pre-attempt budget check instead, which proves the parameter
---  reaches AHT.Transport.TCP.Connect and no more; it does not prove a
---  stalled connect is interrupted.
---
---  Resolution is covered by cases 7 to 9, through the same C seam
---  test_dns uses. What is not covered there is a stall in the real
---  getaddrinfo, for the reason test_dns records: making one happen
---  means pointing the process at a black-hole nameserver, which is
---  global state shared with the rest of the machine.
+--  Validated by:
+--    case 5 fails with both Set_*_Deadline (Duration'Last) calls at
+--    the end of Connect removed: the receiver trips Timeout_Error
+--    during the idle, so Is_Open is False before the send.
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;
@@ -100,9 +57,8 @@ procedure Test_WS_Connect_Bounds is
    use type AHT.Websocket.Message_Kind;
 
    --  Ada.Calendar is use'd above and both packages export Time and
-   --  Clock, so Ada.Real_Time is named explicitly rather than use'd.
-   --  This one operator still has to be made visible for the
-   --  subtraction in case 7.
+   --  Clock, so Ada.Real_Time is named explicitly. This one operator
+   --  still has to be made visible for the subtraction in case 7.
    use type Ada.Real_Time.Time;
    use type Interfaces.C.int;
 
@@ -121,9 +77,8 @@ procedure Test_WS_Connect_Bounds is
    function To_String (V : AHT.Bytes.Buffer) return String is
      (AHT.Bytes.To_String (V));
 
-   --  The resolver seam, as in test_dns: imported deliberately rather
-   --  than exposed by AHT.DNS. Used only by cases 7 to 9, and undone
-   --  before the run ends.
+   --  The resolver seam, as in test_dns. Used only by cases 7 to 9,
+   --  and undone before the run ends.
    procedure Install_Fake (Sleep_Ms, N_Addrs : Interfaces.C.int)
      with Import, Convention => C,
           External_Name => "aht_dns_install_fake_for_test";
@@ -168,9 +123,8 @@ procedure Test_WS_Connect_Bounds is
 
 begin
    --  Case 1: a peer that accepts the connection and never answers
-   --  the upgrade must not park the caller. 1.0 s budget, and the
-   --  wait must be over well before case 2's budget could have
-   --  produced it — see the note there for why 4.0 is the ceiling.
+   --  the upgrade must not park the caller. 1.0 s budget; elapsed
+   --  must land in [1.0, 4.0].
    Short_Took := Stalled_Upgrade_Took (1.0);
    if Short_Took > 0.0 then
       if Short_Took < 1.0 then
@@ -184,20 +138,10 @@ begin
       end if;
    end if;
 
-   --  Case 2: the wait tracks the value passed, not some fixed
-   --  internal bound. Same fixture, 6x the budget.
-   --
-   --  The two cases are deliberately checked against CONSTANTS rather
-   --  than against each other. Comparing the two elapsed times would
-   --  be comparing two measurements that scheduling delay can only
-   --  inflate, and on a loaded machine a slow 1.0 s case could
-   --  overtake a prompt 6.0 s one and fail a test that had found
-   --  nothing wrong. The windows do the same work without that: case
-   --  1 must land in [1.0, 4.0] and case 2 in [6.0, 12.0], and no
-   --  single fixed bound B satisfies both — it would need B <= 4.0
-   --  and B >= 6.0. So an implementation that ignored the parameter
-   --  fails one of the two whatever value it hard-coded, and neither
-   --  check depends on the other's timing.
+   --  Case 2: the wait tracks the value passed. Same fixture, 6x the
+   --  budget; elapsed must land in [6.0, 12.0]. Checked against
+   --  constants, not against case 1: no single fixed bound satisfies
+   --  both windows.
    Long_Took := Stalled_Upgrade_Took (6.0);
    if Long_Took > 0.0 then
       if Long_Took < 6.0 then
@@ -212,10 +156,8 @@ begin
    end if;
 
    --  Case 3: the TLS handshake against the same silent fixture.
-   --  Upgrade_Deadline is deliberately left at Duration'Last: the
-   --  upgrade is never reached, so if Handshake_Deadline did not
-   --  bound this the dial would hang rather than be rescued by the
-   --  other knob.
+   --  Upgrade_Deadline is left at Duration'Last: the upgrade is never
+   --  reached, so only Handshake_Deadline can end this dial.
    declare
       C       : AHT.Websocket.Client.Client_Type;
       Started : constant Time := Clock;
@@ -247,7 +189,7 @@ begin
 
    --  Case 4: Connect_Timeout reaches AHT.Transport.TCP.Connect. An
    --  exhausted budget trips the pre-attempt check, so the dial never
-   --  happens — which is why the target is the LIVE echo fixture. A
+   --  happens, so the target is the LIVE echo fixture. A
    --  build that dropped the parameter connects to it and returns
    --  normally, and that is the failure this case reports.
    declare
@@ -334,10 +276,8 @@ begin
    end;
 
    --  Case 6: a timed-out Connect leaves the client dialable. The
-   --  spec claims the attempt releases its admission and closes the
-   --  half-built session like any other failure, so the retry below
-   --  must be admitted — on the SAME client, which is what makes it a
-   --  test of the release rather than of a fresh object.
+   --  attempt releases its admission and closes the half-built
+   --  session, so the retry below must be admitted on the SAME client.
    declare
       C   : AHT.Websocket.Client.Client_Type;
       Msg : AHT.Websocket.Client.Message_Type;
@@ -377,22 +317,15 @@ begin
       end;
    end;
 
-   --  Cases 7 to 9 cover the fourth bound, Resolve_Timeout, which is
-   --  the one that cannot be reached with a fixture: the wait it
-   --  bounds happens before any socket exists. They drive it through
-   --  the same C seam test_dns uses, installed here so the path under
-   --  test is the real one — Client.Connect to TCP/TLS.Connect to
-   --  AHT.DNS to the resolver — with only the lookup replaced.
-   --
-   --  The fake answers with 127.0.0.1, which is what makes case 8 an
-   --  end-to-end check rather than a mock: the dial names a host that
-   --  does not exist, and reaches the echo fixture anyway, because
-   --  the address the resolver returned is the address that was used.
+   --  Cases 7 to 9 cover Resolve_Timeout, whose wait happens before
+   --  any socket exists. They install the C seam test_dns uses, so the
+   --  path under test is the real one with only the lookup replaced.
+   --  The fake answers with 127.0.0.1, so case 8 dials a host that
+   --  does not exist and reaches the echo fixture anyway.
 
    --  Case 7: a resolver that stalls must not park the dial. The host
-   --  name is deliberately one that could never resolve for real, so
-   --  a build that bypassed the seam fails here rather than passing
-   --  against an accidental answer.
+   --  name could never resolve for real, so a build that bypassed the
+   --  seam fails here.
    Install_Fake (3_000, 1);
    declare
       C       : AHT.Websocket.Client.Client_Type;
@@ -422,14 +355,9 @@ begin
    end;
 
    --  That dial left a worker still inside the fake, and the next
-   --  case reinstalls it with different settings. Those settings are
-   --  plain globals, so writing them while the outgoing worker is
-   --  still reading them is a data race — benign in its effect here,
-   --  since the worker's answer is already discarded, but a race all
-   --  the same and squarely in what dns_asan.sh's UBSan pass looks
-   --  for. Waiting for the worker removes it rather than reasoning
-   --  about why it would not matter. test_dns waits at the same
-   --  point, for the same reason.
+   --  case reinstalls it with different settings, which are plain
+   --  globals: writing them while the worker reads them is a data
+   --  race UBSan reports. Wait for the worker first.
    declare
       Before : constant Interfaces.C.int := Fake_Completions;
       Waited : Duration := 0.0;
@@ -472,8 +400,8 @@ begin
 
    --  Case 9: an IP literal is not resolved at all. The stalling fake
    --  from case 7 is reinstalled and would hang any dial that
-   --  consulted it; a literal URL must connect regardless, which is
-   --  what proves the short-circuit rather than assuming it.
+   --  consulted it; a literal URL must connect regardless, which
+   --  proves the short-circuit.
    Install_Fake (30_000, 1);
    declare
       C   : AHT.Websocket.Client.Client_Type;

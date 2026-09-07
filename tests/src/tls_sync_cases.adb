@@ -86,7 +86,7 @@ package body TLS_Sync_Cases is
       end;
 
       --  A3: a parked waiter that nobody signals must hit its own
-      --  deadline rather than wait forever.
+      --  deadline.
       Coord.Try_Claim_Or_Arm (Granted);
       if not Granted then
          Fail ("A3: main could not take the claim");
@@ -119,7 +119,7 @@ package body TLS_Sync_Cases is
          Coord.Release_Feeder;
       end;
 
-      --  A4: the wake path the engines actually depend on — a writer
+      --  A4: the wake path the engines depend on: a writer
       --  parked while the reader owns the claim is released by the
       --  reader's Release_Feeder and can then claim the socket itself.
       Coord.Try_Claim_Or_Arm (Granted);

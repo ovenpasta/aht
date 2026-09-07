@@ -1,29 +1,22 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  End-to-end exercise of the user-driven Send_Ping surface against
---  the Python `websockets` echo fixture on 127.0.0.1:8765.
+--  The user-driven Send_Ping surface against the `websockets` echo
+--  fixture on 127.0.0.1:8765. The library auto-replies to a Ping at
+--  the protocol layer and never surfaces it, so a clean round-trip
+--  AFTER a ping proves Send_Ping put a valid masked Ping on the wire
+--  (a malformed control frame closes the connection with 1002).
 --
---  The `websockets` library auto-replies to a Ping with a Pong at the
---  protocol layer and never surfaces the Ping to its echo handler, so
---  these cases lean on two observable facts: (a) a malformed control
---  frame (e.g. unmasked, wrong opcode) would make the server close the
---  connection with 1002, so a clean round-trip *after* a ping proves
---  Send_Ping put a valid masked Ping on the wire; (b) the client's
---  receiver drops inbound Pongs, so they must never show up as messages.
+--  Cases:
+--    1. empty ping, then a text round-trip and Close
+--    2. ping with payload, then a text round-trip
+--    3. ping between two texts: echoes in order, and a follow-up
+--       Receive times out, so the auto-Pong was dropped
 --
---  Three cases:
---    1. Empty ping — Send_Ping with no payload, then a text round-trip
---       still succeeds and Close flips Is_Open to False.
---    2. Ping with payload — Send_Ping ("aht-ping-payload"), then a text
---       round-trip still succeeds (exercises the control-frame payload
---       path through the masking / framing code).
---    3. Ping interleaved with data — Send_Text "before", Send_Ping,
---       Send_Text "after"; the two echoes come back in order and a
---       follow-up Receive times out, proving the server's auto-Pong was
---       dropped (the `Pong_Op => null` branch) rather than delivered as
---       a phantom message, and that the control frame did not corrupt
---       the surrounding data framing.
+--  Covers:
+--    - inbound Pongs are dropped (the Pong_Op => null branch), never
+--      delivered as a message
+--    - a control frame does not corrupt the surrounding data framing
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;

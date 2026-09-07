@@ -1,50 +1,31 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Reconnecting many times over, watching the process rather than the
---  client.
+--  Reconnecting many times over, counting descriptors and threads in
+--  /proc, since Generation counts connections, not resources. Fifty
+--  cycles make a one-per-cycle leak unmistakable. Echo fixture.
+--  Linux-only: it reads /proc/self/fd and /proc/self/task, and SKIPs
+--  elsewhere.
 --
---  Every generation allocates a session, the one transport its
---  discriminant selects — plain or secure, never both — and the file
---  descriptors under it, and every generation is supposed to give all
---  of it back. Nothing in the client's own API can show that
---  it does: Generation counts connections, not resources, and a client
---  that leaked one descriptor per cycle would keep answering every
---  question correctly right up until the process ran out.
+--  Cases:
+--    1. one client, many generations driven by Reconnect, never
+--       closed in between
+--    2. many clients, one generation each
 --
---  So this counts from outside, in /proc. One leaked descriptor is
---  invisible; fifty is unmistakable, and that is the whole reason the
---  cycle count is what it is.
+--  Covers:
+--    - shape 1: the drain-and-redial path and the parameter copying;
+--      the receiver persists, so anything found is per-session
+--    - shape 2: the receiver task is created and terminated every
+--      cycle, so a receiver that never exits shows as thread growth
+--    - the generation counter proves the cycles happened
 --
---  Two shapes, because they leak differently:
+--  Does not cover:
+--    - heap growth, such as a saved-parameter copy that accumulates:
+--      neither counter sees plain memory
 --
---    1. One client, many generations, driven by Reconnect — which is
---       the operation the plan asked to be cycled. The connection is
---       never closed in between: each Reconnect drains the live one
---       and redials from the saved parameters. That covers the
---       drain-and-redial path and the parameter copying that goes
---       with it, neither of which a Connect/Close loop reaches. The
---       receiver task is persistent here — it outlives every session
---       it runs — so anything this finds is per-session: a transport
---       not closed, a session not freed, an fd left behind by
---       reclamation.
---
---       Note what running that path does NOT buy. Reconnect copies
---       the saved parameters on every redial, and a copy that
---       accumulated would be ordinary heap growth — invisible to
---       both counters here, since neither a descriptor nor a thread
---       is involved. The path is exercised, and a leak of anything
---       the OS accounts for is caught; plain memory is not, and this
---       test should not be read as covering it.
---
---    2. Many clients, one generation each. Here the receiver task
---       itself is created and terminated every cycle, so this is the
---       one that would catch a receiver that never exits — which
---       shows up as a thread count that climbs and, eventually, as a
---       process that will not terminate at all.
---
---  Linux-only: it reads /proc/self/fd and /proc/self/task. Elsewhere
---  it SKIPs rather than pretending to check something.
+--  Validated by:
+--    with the receiver's Free backed out, fd growth is 250 across 50
+--    cycles, twenty times the bound.
 
 with Ada.Command_Line;
 with Ada.Directories;
@@ -66,32 +47,16 @@ procedure Test_WS_Reconnect_Leak is
 
    --  Cycles run before the baseline is taken. The first connection
    --  through a backend pulls in whatever that backend allocates once
-   --  and keeps — TLS contexts, the runtime's own bookkeeping — and
+   --  and keeps (TLS contexts, the runtime's own bookkeeping), and
    --  charging that to the measurement would make the baseline
-   --  unrepeatable. Three is more than enough to reach steady state
-   --  while still leaving the count honest.
+   --  unrepeatable.
    Warmup : constant := 3;
 
-   --  What the counts are allowed to move by.
-   --
-   --  Not zero, and not a guess, though not for the reason it might
-   --  look. A session costs about five descriptors — measured, by
-   --  backing out the receiver's Free and watching this test report
-   --  250 across 50 cycles. That figure sets the SCALE, not a
-   --  straggler allowance: both Reconnect and Close finish
-   --  reclamation before they return, so there is no session still
-   --  winding down when a sample is taken, and each reading sees
-   --  exactly the one live connection its counterpart saw.
-   --
-   --  What is left to absorb is ordinary runtime jitter, which is
-   --  small and unrelated to sessions. The bound is set at a couple
-   --  of sessions' worth simply because that is a scale known to be
-   --  well clear of it.
-   --
-   --  What separates the two cases is the factor of Cycles: a leak of
-   --  one session per iteration lands at 250, twenty times this bound.
-   --  There is no plausible reading in which noise reaches that and no
-   --  plausible leak that hides under it.
+   --  What the counts are allowed to move by: runtime jitter, a
+   --  couple of sessions' worth. Both Reconnect and Close finish
+   --  reclamation before returning, so each sample sees exactly one
+   --  live connection. A session costs about five descriptors; a leak
+   --  of one per iteration lands at 250, twenty times this bound.
    Slack : constant := 12;
 
    Failures : Natural := 0;
@@ -105,13 +70,10 @@ procedure Test_WS_Reconnect_Leak is
    function To_String (V : AHT.Bytes.Buffer) return String is
      (AHT.Bytes.To_String (V));
 
-   --  Entries in a /proc directory, minus . and ..
-   --
-   --  The search itself holds a descriptor open while it runs, so the
-   --  count includes one that is not a leak. That is fine and is the
-   --  reason this is only ever compared against another call to
-   --  itself: the bias is identical in the baseline and in the final
-   --  sample, so it cancels.
+   --  Entries in a /proc directory, minus . and ..  The search holds
+   --  a descriptor open while it runs, so the count is biased by one;
+   --  it is only ever compared against another call to itself, so the
+   --  bias cancels.
    function Count_Entries (Path : String) return Natural is
       use Ada.Directories;
       S : Search_Type;
@@ -138,7 +100,7 @@ procedure Test_WS_Reconnect_Leak is
       and then Ada.Directories.Exists ("/proc/self/task"));
 
    --  One full connection: dial, prove it works, tear it down. The
-   --  round-trip matters — a Connect that returned without a usable
+   --  round-trip matters: a Connect that returned without a usable
    --  connection would allocate less, and could hide a leak by never
    --  reaching the code that leaks.
    procedure Round_Trip
@@ -157,7 +119,7 @@ procedure Test_WS_Reconnect_Leak is
    end Round_Trip;
 
    --  One full connection, dialled and torn down. Used by shape 2,
-   --  where the point is that the client itself comes and goes.
+   --  where the client itself comes and goes.
    procedure Cycle
      (What : String;
       C    : in out AHT.Websocket.Client.Client_Type;

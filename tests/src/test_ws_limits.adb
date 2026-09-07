@@ -1,43 +1,31 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Configured ceilings, end to end.
---
---  test_ws_frames pins the decoder's own arithmetic. This pins that
---  the client actually wires it up: that the allowance it passes is
---  what remains of the *logical message*, that the two overrun kinds
---  are reported as the different failures they are, and that the
---  delivery modes mean what they say.
---
---  Against tests/server/server_ws_hostile.py (127.0.0.1:8777), which
---  holds every connection open and keeps draining, so a failure here
---  can only be the client's own limits acting — never the peer going
---  away or stalling.
+--  Configured ceilings, end to end; test_ws_frames pins the decoder's
+--  own arithmetic. This pins that the allowance the client passes is
+--  what remains of the logical message, that the two overrun kinds
+--  are different failures, and that delivery modes mean what they
+--  say. Against server_ws_hostile.py on 8777, which never goes away.
 --
 --  Cases:
---    1. Callback_Only with no callback is refused before dialing.
---       Needs no server at all: nothing should reach the network.
---    2. Configure is refused once a session exists, and accepted
---       again once there is none.
---    3. Callback_Only delivers to the callback, and Receive says so
---       rather than blocking on a queue nothing fills.
---    4. A frame declaring more than the ceiling fails the connection
---       with Message_Too_Big, promptly — the peer sends the header
---       and then nothing, so a client that waited for the body would
---       hang here rather than report.
---    5. A fragment sequence crossing the ceiling fails the same way,
---       which only happens if the allowance is tracked across parts:
---       every individual part here is far below the limit.
---    6. Flooding a client that never drains fails with a *different*
---       diagnosis — backpressure, not size — by message count.
---    7. The same by queued bytes, with the count limit set beyond the
---       entire flood so only the byte budget can be what acted.
---    8. Pull_Only does not fire an installed On_Message.
+--    1. Callback_Only with no callback is refused before dialing
+--    2. Configure is refused while a session exists
+--    3. Callback_Only delivers to the callback; Receive says so
+--    4. a frame declaring more than the ceiling: Message_Too_Big
+--    5. a fragment sequence crossing the ceiling fails the same way
+--    6. flooding a client that never drains: backpressure by count
+--    7. the same by queued bytes, count limit set beyond the flood
+--    8. Pull_Only does not fire an installed On_Message
 --
---  Every overrun case also checks the close code that reached the
---  peer, not just the local diagnostic: swapping 1008 for 1009 in the
---  client is invisible from this side otherwise, and the code is the
---  half of the contract the peer can see.
+--  Covers:
+--    - every overrun case checks the close code that reached the
+--      peer, as the fixture recorded it, not only the local diagnostic
+--    - case 4: the peer sends the header and no body, so a client
+--      that waited for the body hangs instead of reporting
+--    - case 5: every part is far below the limit, so only an
+--      allowance tracked across parts fails it
+--    - case 7: with the count limit unreachable, removing the byte
+--      check leaves nothing to refuse the flood
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Command_Line;
@@ -137,12 +125,10 @@ procedure Test_WS_Limits is
         (Natural'Image (Next_Token), Ada.Strings.Both);
    end New_Token;
 
-   --  What close code actually reached the peer on the connection
-   --  that used this token.
-   --
-   --  The fixture waits for it rather than sampling: our own Close
-   --  returning proves only that WE finished tearing down, not that
-   --  the peer's reader has parsed the frame we sent on the way out.
+   --  What close code reached the peer on the connection that used
+   --  this token. The fixture waits for it: our own Close returning
+   --  proves only that WE finished tearing down, not that the peer's
+   --  reader has parsed the frame we sent on the way out.
    function Observed_Close (Token : String) return String is
       C   : AHT.Websocket.Client.Client_Type;
       Msg : AHT.Websocket.Client.Message_Type;
@@ -159,7 +145,7 @@ procedure Test_WS_Limits is
       when E : others =>
          --  Tear it down even here. A client left open keeps a
          --  receiver parked in Read, and scope exit waits for that
-         --  task — so returning without this would stall until the
+         --  task, so returning without this would stall until the
          --  fixture's hold expires, turning a reported failure into a
          --  very slow one.
          begin
@@ -369,9 +355,9 @@ begin
    end;
 
    --  Case 6: backpressure by message count. The frames are small and
-   --  legal, and the size ceiling is generous — what fails is that
-   --  nothing is draining. The byte budget is deliberately far out of
-   --  reach so this case can only be the count limit acting.
+   --  legal, and the size ceiling is generous; what fails is that
+   --  nothing is draining. The byte budget is far out of reach so
+   --  this case can only be the count limit acting.
    declare
       L : AHT.Websocket.Client.Limits;
    begin
@@ -382,13 +368,9 @@ begin
       Expect_Failure ("inbox-count", "/flood", L, "inbox full", "1008");
    end;
 
-   --  Case 7: backpressure by queued bytes.
-   --
-   --  The count limit is set beyond the whole flood, so it cannot be
-   --  what acts here — only the byte budget can. That matters: with a
-   --  merely large count the byte check could be deleted and the
-   --  count limit would still fire, later, reporting the same thing.
-   --  This way removing it leaves nothing to refuse the flood at all.
+   --  Case 7: backpressure by queued bytes. The count limit is set
+   --  beyond the whole flood, so only the byte budget can act;
+   --  removing the byte check leaves nothing to refuse the flood.
    declare
       L : AHT.Websocket.Client.Limits;
    begin

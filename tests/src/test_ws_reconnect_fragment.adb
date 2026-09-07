@@ -1,44 +1,30 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Reconnecting out of a half-received message.
---
---  A fragmented WebSocket message is spread over several frames, and
---  the decoder holds the parts it has seen until the one with FIN
---  arrives. That accumulator belongs to the connection, not to the
---  client — but it is exactly the kind of state that gets hoisted for
---  convenience, and once it is, a reconnect inherits it: the first
---  message of the new generation arrives with the previous
---  connection's leftovers glued to the front of it.
---
---  The fixture opens a text message with FIN = 0 and then stops,
---  holding the socket open. The client is left mid-message with no
---  way to finish it, which is the state under test. What follows must
---  deliver a clean message and nothing else.
---
---  Carried-over state has two shapes and they fail differently, so
---  both are checked:
---
---    * The reassembly FLAG survives. The next generation's first Text
---      frame then arrives while the decoder still believes a message
---      is open, which is an RFC 6455 §5.4 violation — so the
---      connection is closed and what this test observes is
---      Closed_Error, not a payload. Hoisting the state out of
---      Run_Session produces exactly this, and is how the test was
---      validated.
---    * Only the BUFFER survives. With the flag reset, the leftovers
---      are simply prepended to the next message, and the recognisable
---      payload (STALE-FRAGMENT-) is what names the cause — a length
---      mismatch on its own would not.
+--  Reconnecting out of a half-received message. The decoder holds
+--  fragments until the FIN frame arrives, and that accumulator
+--  belongs to the connection, not the client. The hostile fixture's
+--  fragstall route opens a text message with FIN = 0 and stops,
+--  holding the socket open; what follows must deliver a clean message.
 --
 --  Cases:
---    1. Close, then Connect elsewhere. The new generation's first
---       message must be exactly what the echo peer sent back.
---    2. Reconnect, which redials the stalling fixture — so generation
---       two is mid-fragment too. This is the path case 1 does not
---       reach: Close tears down before the redial, Reconnect drains
---       and redials as one operation, and the reset has to happen
---       there as well.
+--    1. Close, then Connect to the echo peer: the first message is
+--       exactly what the peer sent back
+--    2. Reconnect, which redials the stalling fixture, so generation
+--       two is mid-fragment too; then a second teardown
+--
+--  Covers:
+--    - the reassembly flag surviving: the next Text frame violates
+--      RFC 6455 5.4 and the test observes Closed_Error, not a payload
+--    - only the buffer surviving: the leftovers (STALE-FRAGMENT-) are
+--      prepended to the next message
+--    - the client was holding an incomplete message: a Ping sent
+--      after the fragment is answered, so the fragment was consumed
+--    - case 2 reaches the drain-and-redial path, which case 1 does not
+--
+--  Validated by:
+--    with the reassembly state hoisted out of Run_Session, case 1
+--    reports Closed_Error.
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -56,8 +42,7 @@ procedure Test_WS_Reconnect_Fragment is
    Echo   : constant String := "ws://127.0.0.1:8765/";
 
    --  Tokenised, so the Pong that proves consumption is tied to the
-   --  connection that produced it rather than to whatever happened
-   --  most recently on the fixture.
+   --  connection that produced it.
    function Stall (Token : String) return String is
      ("ws://127.0.0.1:8777/fragstall/" & Token);
 
@@ -76,17 +61,11 @@ procedure Test_WS_Reconnect_Fragment is
    function To_String (V : AHT.Bytes.Buffer) return String is
      (AHT.Bytes.To_String (V));
 
-   --  Ask the fixture whether the connection tagged `Token` produced a
-   --  Pong. It answers on a second, ordinary connection.
-   --
-   --  Q is closed on EVERY path, including the failing ones. Simply
-   --  returning would leave its receiver task parked on a socket this
-   --  fixture holds open for thirty seconds, and Ada waits for
-   --  dependent tasks at scope exit — so a failed report would stall
-   --  the test for half a minute rather than reporting promptly.
-   --  Close is itself wrapped, because by then the connection may
-   --  already be gone and its failure must not displace the original
-   --  diagnosis.
+   --  Ask the fixture whether the connection tagged Token produced a
+   --  Pong, on a second, ordinary connection. Q is closed on every
+   --  path: left open, its receiver parks on a socket the fixture
+   --  holds for thirty seconds and scope exit waits for it. Close is
+   --  itself wrapped so its failure cannot displace the diagnosis.
    procedure Saw_Pong
      (Token : String;
       Seen  : out Boolean;
@@ -136,18 +115,11 @@ procedure Test_WS_Reconnect_Fragment is
          Shut_Down;
    end Saw_Pong;
 
-   --  Confirm the client really is holding an incomplete message.
-   --
-   --  Two things have to be true, and checking only the first is what
-   --  makes this kind of check quietly useless: nothing may be
-   --  delivered (the message has no FIN), AND the fragment must
-   --  actually have been received. A timeout alone cannot tell those
-   --  apart — a fixture that sent nothing at all produces exactly the
-   --  same silence, and then a client that DOES carry reassembly
-   --  state forward would still look clean here.
-   --
-   --  So the fixture sends a Ping after the fragment. Frames are
-   --  processed in order, so the Pong coming back proves the fragment
+   --  Confirm the client is holding an incomplete message: nothing
+   --  is delivered (no FIN) and the fragment was received. A timeout
+   --  alone cannot tell a fixture that sent nothing from a fragment
+   --  consumed, so the fixture sends a Ping after the fragment;
+   --  frames are processed in order, so the Pong proves the fragment
    --  ahead of it was consumed.
    procedure Expect_Held_Incomplete
      (What  : String;
@@ -186,7 +158,7 @@ procedure Test_WS_Reconnect_Fragment is
    end Expect_Held_Incomplete;
 
    --  Round-trip on a connection that is expected to be clean, and
-   --  say precisely what went wrong when it is not.
+   --  say what went wrong when it is not.
    procedure Expect_Clean_Echo
      (What : String;
       C    : in out AHT.Websocket.Client.Client_Type;
@@ -257,8 +229,8 @@ begin
    --  Case 2: Reconnect, which drains and redials in one operation
    --  and lands back on the same stalling fixture. Generation two is
    --  therefore mid-fragment as well, and the reset has to have
-   --  happened on this path too — so after a second teardown the
-   --  clean peer still sees a clean first message.
+   --  happened on this path too, so after a second teardown the clean
+   --  peer still sees a clean first message.
    declare
       C : AHT.Websocket.Client.Client_Type;
    begin
@@ -280,17 +252,11 @@ begin
                & " after Reconnect (expected 2)");
       end if;
 
-      --  Generation two is mid-fragment in its own right: one
-      --  accumulator was discarded and a fresh one started, rather
-      --  than the old one being carried forward and topped up.
-      --
-      --  Deliberately the SAME token as generation one, and safe
-      --  because await_pong consumes its record: the first
-      --  generation's Pong was already taken by the check above, so
-      --  the fixture has nothing left to answer with and a "yes" here
-      --  can only come from a Pong this generation produced. A stale
-      --  answer would report the fragment as consumed when this
-      --  connection had never received one.
+      --  Generation two is mid-fragment in its own right: a fresh
+      --  accumulator, not the old one topped up. Same token as
+      --  generation one: await_pong consumed that record above, so a
+      --  "yes" here can only come from a Pong this generation
+      --  produced.
       Expect_Held_Incomplete ("reconnect", C, "b1");
 
       AHT.Websocket.Client.Close (C);

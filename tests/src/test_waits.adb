@@ -1,37 +1,25 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Check_Selector's timeout contract, without a socket.
+--  Check_Selector's timeout contract, without a socket: Waits.Bounded
+--  never returns GNAT.Sockets.Forever, the sentinel for "no timeout"
+--  that would park a bounded operation forever and skip its Expired
+--  branch. Pure and fixture-free; arithmetic on a subtype bound.
 --
---  The property is one line and cost a Windows hang to learn:
---  GNAT.Sockets.Forever is a sentinel meaning "no timeout at all", not
---  a long duration. A bounded operation handed it parks forever and
---  its Expired branch never runs, so the deadline silently stops
---  existing.
+--  Cases:
+--    Duration'Last handed to a bounded path comes back finite.
+--    Values at or past the finite ceiling, the sentinel included, too.
+--    Ordinary values pass through unchanged.
+--    Zero and negative collapse to Immediate.
 --
---  Pure and fixture-free: it is arithmetic on a subtype bound.
---
---  HALF the fix is covered here, and only half. Waits.Bounded never
---  returning the sentinel is tested below. The other half -- the
---  Expired branches in AHT.Transport.TCP rechecking the absolute
---  deadline and re-parking instead of raising -- is NOT, and
---  reverting either recheck leaves this test green.
---
---  It is deliberately not exercised, which is weaker than
---  unreachable. That branch runs when a remaining budget exceeds
---  Longest_Finite: on Linux that is Duration'Pred (Duration'Last) and
---  nothing can exceed it, but on Windows the ceiling is about 49.7
---  days, so a test that waited that long would get there. Impractical
---  rather than impossible.
---
---  Getting there sooner needs machinery -- an injectable ceiling, a
---  test-specific body, a generic -- and none of it is free: a
---  production knob whose only purpose is letting a test shrink a
---  timeout is the trade this project declined for the entropy source,
---  and the alternatives mean the tested build is not the shipped one.
---  Not worth it here, so that half rests on the structural argument:
---  an expired chunk is not the deadline, and the code asks Clock
---  before deciding.
+--  Does not cover:
+--    - the Expired branches in AHT.Transport.TCP rechecking the
+--      absolute deadline and re-parking instead of raising; reverting
+--      either recheck leaves this test green. That branch runs when a
+--      remaining budget exceeds Longest_Finite: never on Linux
+--      (Duration'Pred (Duration'Last)), after about 49.7 days on
+--      Windows. It rests on the structural argument that an expired
+--      chunk is not the deadline and the code asks Clock first.
 
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
@@ -60,8 +48,8 @@ procedure Test_Waits is
    end Never_Sentinel;
 
 begin
-   --  The case that produced the bug: "no deadline" spelled as
-   --  Duration'Last, handed to a bounded path.
+   --  "No deadline" spelled as Duration'Last, handed to a bounded
+   --  path.
    Never_Sentinel ("duration-last", Duration'Last);
 
    --  Anything at or past the finite ceiling, including the sentinel
@@ -84,12 +72,10 @@ begin
       Fail ("negative: did not map to Immediate");
    end if;
 
-   --  That the ceiling is strictly below the sentinel is what makes
-   --  the checks above non-vacuous. It holds by construction ('Pred),
-   --  so it is an assertion rather than a Fail case. GNAT folds this
-   --  one statically; assertions are runtime checks in general, and
-   --  the default debug test build enables them (-gnata). Release
-   --  does not.
+   --  The checks above are non-vacuous only if the ceiling is strictly
+   --  below the sentinel; 'Pred guarantees it, so this is an assertion,
+   --  not a Fail case. GNAT folds it statically. The debug test build
+   --  enables assertions (-gnata); release does not.
    pragma Assert (W.Longest_Finite < GNAT.Sockets.Forever);
 
    if Failures = 0 then

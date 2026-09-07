@@ -3,29 +3,21 @@
 #  SPDX-License-Identifier: Apache-2.0
 """Mid-session corruption under concurrency.
 
-Listens on 127.0.0.1:8776. Per connection, on ONE thread (an OpenSSL
-connection object is not safe for simultaneous use — using two threads
-here would recreate in the fixture the very hazard the client engine
-exists to avoid):
+Listens on 127.0.0.1:8776. Per connection, on one thread (an OpenSSL
+connection object is not safe for simultaneous use):
 
   1. TLS handshake.
-  2. Send a banner, so the client's reader has something to consume.
-  3. RECEIVE at least one client payload. This is what proves the
-     client's writer is genuinely active alongside its reader; the
-     overlap is then a fact the test can assert, not something inferred
-     from a sleep on either side.
-  4. Send OVERLAP, the marker the test looks for — only after (3), so
-     seeing it means the writer really was running.
-  5. Inject a record whose MAC cannot verify, straight to the fd,
-     bypassing the SSL layer.
-  6. Keep draining (so the client's writer never stalls on
-     backpressure) until the hold expires or the client goes away.
+  2. Send a banner for the client's reader to consume.
+  3. Receive at least one client payload: the client's writer is
+     active alongside its reader, a fact the test can assert on.
+  4. Send OVERLAP, the marker the test looks for, only after (3).
+  5. Inject a record whose MAC cannot verify, straight to the fd.
+  6. Keep draining until the hold expires or the client goes away, so
+     the client's writer never stalls on backpressure.
 
-The hold deliberately outlasts the test's writer bound, so the only
-thing that can make that writer fail is the library poisoning the
-session — never this fixture closing the connection out from under it.
-
-Pinned by test_tls_concurrent_corrupt.
+The hold outlasts the test's writer bound, so only the library
+poisoning the session can make that writer fail. Pinned by
+test_tls_concurrent_corrupt.
 
 Prints `READY tlsconcurrent 127.0.0.1:8776` once listening.
 """
@@ -57,7 +49,7 @@ def handle(conn: socket.socket, ctx: ssl.SSLContext) -> None:
     try:
         tls.sendall(BANNER)
 
-        # Proof of overlap: wait for something the client's WRITER sent.
+        # Wait for something the client's writer sent.
         tls.settimeout(WRITER_WAIT)
         saw_writer = False
         try:
@@ -66,8 +58,8 @@ def handle(conn: socket.socket, ctx: ssl.SSLContext) -> None:
             saw_writer = False
 
         if saw_writer:
-            # Only now — so the marker's presence in the client's read
-            # stream means its writer really was running concurrently.
+            # Sent only now, so the marker in the client's read stream
+            # means its writer was running concurrently.
             tls.sendall(OVERLAP)
         else:
             print(
@@ -75,8 +67,8 @@ def handle(conn: socket.socket, ctx: ssl.SSLContext) -> None:
                 flush=True,
             )
 
-        # Raw fd write: the SSL layer must not frame or protect these
-        # bytes. Loop, since os.write may write short.
+        # Raw fd write, so the SSL layer does not frame these bytes;
+        # os.write may write short.
         written = 0
         while written < len(CORRUPT_RECORD):
             n = os.write(tls.fileno(), CORRUPT_RECORD[written:])
@@ -86,7 +78,7 @@ def handle(conn: socket.socket, ctx: ssl.SSLContext) -> None:
 
         # Keep consuming so the client's writer never blocks on
         # backpressure, and stay open so the client must diagnose the
-        # record itself rather than inferring anything from a close.
+        # record itself.
         tls.settimeout(POLL)
         deadline = time.monotonic() + HOLD
         while time.monotonic() < deadline:
@@ -122,8 +114,7 @@ def main() -> int:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(certfile=cert, keyfile=key)
 
-    # Bind before announcing readiness, so a bind failure exits non-zero
-    # instead of masquerading as a ready fixture.
+    # Bind before printing READY, so a bind failure exits non-zero.
     lsock = socket.create_server((HOST, PORT), reuse_port=False)
     lsock.listen(8)
     print(f"READY tlsconcurrent {HOST}:{PORT}", flush=True)

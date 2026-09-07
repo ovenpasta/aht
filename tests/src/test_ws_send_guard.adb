@@ -1,42 +1,28 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  AHT.Websocket.Send_Guards — the write latch and its scope guard.
+--  AHT.Websocket.Send_Guards: the write latch and its scope guard,
+--  driven on the production types. Self-contained: no sockets, no
+--  fixtures, no client. A failing case leaves a latch permanently
+--  held, so this runs ahead of every fixture-dependent WebSocket test
+--  and a detected leak stops the run.
 --
---  Self-contained: no sockets, no fixtures, and no client. That is
---  deliberate. The guard's correctness argument is about abort, and
---  the interesting cases leave a latch permanently held, which shows
---  up elsewhere as a hang — so they must not be reached through a
---  path that can hang first and hide them. For the same reason this
---  runs ahead of every fixture-dependent WebSocket test.
+--  Cases:
+--    1. ordinary pairing: Take marks held, Finalize gives it back
+--    2. a cancelled acquisition releases nothing
+--    3. an aborted acquirer never leaves the latch held
 --
---  Every wait here is bounded, every task is aborted on the way out,
---  and a detected leak stops the run rather than continuing into a
---  round that would block forever on the latch it just found held.
+--  Covers:
+--    - property 2: a caller aborted while queued still runs Finalize,
+--      which must not free a latch somebody else holds
+--    - property 3 confirms per round, from a counter inside the entry,
+--      that the handover happened, so a cancelled call is not a pass
+--    - every wait is bounded and every task is aborted on the way
+--      out; the runner's per-test cap is the backstop
 --
---  Bounded polling is not the whole story, though: Ada waits for
---  dependent tasks at scope exit, so a task that refuses to terminate
---  blocks this test after it has reported the problem, not before.
---  The aborts are what make termination possible, and the runner's
---  per-test cap is the backstop if they somehow do not take.
---
---  These are the production types. An abort-safety claim tested
---  against a hand-written replica of the protocol is not tested at
---  all: the replica keeps passing while the original rots.
---
---  Three properties:
---
---    1. Ordinary pairing — taking the latch marks it held, and the
---       scope guard's Finalize gives it back.
---    2. A cancelled acquisition releases nothing. A caller aborted
---       while queued still runs its Finalize, and that must not free
---       a latch somebody else is holding. This is what the address
---       key buys, and an unconditional release would fail it.
---    3. An aborted acquirer never leaves the latch held. Each round
---       hands the latch to a queued victim and aborts it, and every
---       round confirms — from a counter inside the entry — that the
---       handover really happened, so a round where the call was
---       cancelled instead cannot be mistaken for a clean pass.
+--  Validated by:
+--    property 2 fails with an unconditional release in Finalize; the
+--    address key is what it checks.
 
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
@@ -229,8 +215,8 @@ begin
                end if;
             end if;
 
-            --  Counted inside Acquire, so this is evidence that the
-            --  handover happened rather than an assumption about it.
+            --  Counted inside Acquire, so this shows the handover
+            --  happened.
             if Took_It then
                if G.Acquisitions > Before then
                   Sampled := Sampled + 1;
@@ -241,12 +227,9 @@ begin
          end;
 
          --  Holder gave the latch away above and its Finalize cannot
-         --  take it back, so anything still held is the victim's.
-         --
-         --  Stop at the first one. A held latch is exactly what the
-         --  next round's Holder.Take would block on forever, so
-         --  carrying on would turn a reported failure into a hung
-         --  suite.
+         --  take it back, so anything still held is the victim's. Stop
+         --  at the first one: the next round's Holder.Take would block
+         --  on it forever.
          if G.Is_Held then
             Leaked := Leaked + 1;
             Fail ("handover: round" & I'Image & " left the latch held"

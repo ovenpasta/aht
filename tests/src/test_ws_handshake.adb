@@ -1,20 +1,43 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  WebSocket handshake-only integration test (commit 1 of the WS
---  client work). Exercises the deterministic protocol foundation:
---  Base64 encoding, the HTTP upgrade request, and the 101 / Upgrade
---  / Connection / Sec-WebSocket-Accept validation. Frame I/O comes
---  in commit 2.
+--  WebSocket handshake: Base64, the HTTP upgrade request, and the
+--  101 / Upgrade / Connection / Sec-WebSocket-Accept validation.
+--  Frame I/O is in test_ws_frames and test_ws_echo. Fixtures: the
+--  echo fixture on 8765, plain HTTP on 8764 (answers 200), HTTPS-only
+--  on 8766 (non-101), and an in-process fake server in this file.
 --
---  Routing:
---    * ws://127.0.0.1:8765/ — the Python `websockets` echo fixture.
---      Successful handshake leaves the transport ready for frames.
---    * http://127.0.0.1:8764/hello — the plain HTTP fixture.
---      Returns 200, not 101 → Handshake_Error.
---    * wss://127.0.0.1:8766/ (Insecure) — TLS dials the HTTPS-only
---      fixture, which answers the upgrade non-101 → Handshake_Error.
---    * http://…/… — refused with Handshake_Error (not a WS URL).
+--  Cases:
+--    1. RFC 4648 base64 test vectors
+--    2. successful handshake against the echo fixture
+--    3. ws:// at a plain HTTP server: Handshake_Error
+--    4. wss:// reaches handshake validation: Handshake_Error on non-101
+--    5. http:// is not a WebSocket URL: Handshake_Error
+--    6. Connect on an already-open client raises
+--    7. Extra_Headers forwarded; Sec-WebSocket-Key not overridable
+--    8. unsolicited Sec-WebSocket-Protocol: Handshake_Error
+--    9. subprotocol not in the offered list: Handshake_Error
+--   10. two Sec-WebSocket-Protocol lines: Handshake_Error
+--   11. offered subprotocol accepted; Selected_Subprotocol matches
+--   12. masked server frame: Receive raises Closed_Error
+--   13. Close's Timeout is honoured against a silent peer
+--   14. close-during-receiver-EOF race: Close bounded at one second
+--
+--  Covers:
+--    - case 14: an unconditional State.Set (Closing) in Close after
+--      the Close frame clobbers the Closed the receiver published
+--    - case 14: Teardown_Pin.Finalize republishes Closed and is on the
+--      path in both orderings, so a clobber fails the bound, no hang
+--
+--  Does not cover:
+--    - case 14 does not distinguish a clobbered Closed from a receiver
+--      that had not published within the Timeout
+--    - case 7 cannot assert the wire; it checks that an override for
+--      Sec-WebSocket-Key is ignored and the handshake succeeds
+--
+--  Validated by:
+--    case 14 with the unconditional transition put back fails at
+--    iteration 1, Close taking the whole 5 s Timeout.
 
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Characters.Handling;
@@ -48,8 +71,8 @@ procedure Test_WS_Handshake is
    --  Re-implementation of Connect's internal Sec-WebSocket-Accept
    --  computation so the fake server can answer with a valid Accept
    --  given the client's randomly-generated Key. The body is
-   --  identical to the one in aht-websocket-client.adb (Hex digest
-   --  → bytes → Base64) by design — these need to agree exactly.
+   --  identical to the one in aht-websocket-client.adb (hex digest
+   --  to bytes to Base64); the two have to agree exactly.
    function Hex_To_Bytes (Hex : String) return AHT.Bytes.Byte_Array is
       function Val (C : Character) return Natural is
         (case C is
@@ -108,17 +131,11 @@ procedure Test_WS_Handshake is
    end Extract_Key;
 
    --  In-process fake WS handshake server. Accepts one connection,
-   --  reads the request, computes the correct Sec-WebSocket-Accept
-   --  for the client's Key, and writes a 101 response whose extra
-   --  header lines come from `Extra` — verbatim, so the test can
-   --  inject a malformed or unsolicited Sec-WebSocket-Protocol and
-   --  watch the client reject the handshake.
-   --
-   --  After the 101 head section, the server optionally writes
-   --  `Post_Bytes` to the wire so tests of the post-handshake
-   --  receiver path (e.g. "what does the client do when the
-   --  server sends a masked frame?") can inject any frame bytes
-   --  they need.
+   --  computes the correct Sec-WebSocket-Accept for the client's Key,
+   --  and writes a 101 whose extra header lines come from `Extra`
+   --  verbatim, so a test can inject a malformed or unsolicited
+   --  Sec-WebSocket-Protocol. `Post_Bytes` is then written to the
+   --  wire, so tests of the receiver path can inject frame bytes.
    task type Fake_Server is
       entry Configure
         (Extra_Headers : String;
@@ -221,7 +238,7 @@ procedure Test_WS_Handshake is
                         Key  : constant String :=
                           Extract_Key (To_String (Req));
                         Acc  : constant String := Compute_Accept (Key);
-                        --  Head section terminates with CRLFCRLF —
+                        --  Head section terminates with CRLFCRLF:
                         --  one CRLF ends the last header line, the
                         --  second CRLF is the empty line.
                         Body_S : constant String :=
@@ -324,7 +341,7 @@ procedure Test_WS_Handshake is
    end URL_For;
 
 begin
-   --  Case 1: RFC 4648 §10 base64 test vectors. Catches off-by-one
+   --  Case 1: RFC 4648 section 10 base64 test vectors. Catches off-by-one
    --  in padding / index math before any networking is involved.
    declare
       type Const_String_Ref is access constant String;
@@ -384,9 +401,8 @@ begin
    end;
 
    --  Case 3: ws:// scheme pointed at a server that doesn't speak
-   --  WebSocket. The HTTP fixture returns 200 OK on /hello;
-   --  Connect must refuse with Handshake_Error rather than treat
-   --  the response as a successful upgrade.
+   --  WebSocket. The HTTP fixture returns 200 OK on /hello; Connect
+   --  must refuse with Handshake_Error.
    declare
       C : AHT.Websocket.Client.Client_Type;
    begin
@@ -406,12 +422,11 @@ begin
       end if;
    end;
 
-   --  Case 4: wss:// now runs a real TLS handshake (split C3). Point
-   --  it at the HTTPS-only fixture on 8766 with Insecure => True so
-   --  the TLS dial succeeds, but the server answers the upgrade with a
-   --  non-101 status → Handshake_Error. This proves the wss:// path
-   --  reaches handshake validation rather than being refused upfront;
-   --  the TLS verify / round-trip behaviour is covered by test_ws_tls.
+   --  Case 4: wss:// runs a real TLS handshake against the HTTPS-only
+   --  fixture on 8766 with Insecure => True; the server answers the
+   --  upgrade with a non-101 status: Handshake_Error. Proves the
+   --  wss:// path reaches handshake validation; TLS verify is covered
+   --  by test_ws_tls.
    declare
       C : AHT.Websocket.Client.Client_Type;
    begin
@@ -427,7 +442,7 @@ begin
       end;
    end;
 
-   --  Case 5: http:// is not a WebSocket URL → Handshake_Error.
+   --  Case 5: http:// is not a WebSocket URL: Handshake_Error.
    declare
       C : AHT.Websocket.Client.Client_Type;
    begin
@@ -443,11 +458,11 @@ begin
       end;
    end;
 
-   --  Case 6: Connect on an already-open Client raises. Not because
-   --  the client is single-use — it is not, since the per-generation
-   --  session work — but because a live connection is never silently
-   --  displaced to make room for a new one. Admission accepts Idle
-   --  and Disconnected; Open is refused, and the caller closes first.
+   --  Case 6: Connect on an already-open Client raises. The client is
+   --  not single-use (sessions are per generation); a live connection
+   --  is never silently displaced to make room for a new one.
+   --  Admission accepts Idle and Disconnected; Open is refused, and
+   --  the caller closes first.
    declare
       C : AHT.Websocket.Client.Client_Type;
    begin
@@ -465,13 +480,11 @@ begin
       AHT.Websocket.Client.Close (C);
    end;
 
-   --  Case 7: Extra_Headers are forwarded but the headers we own
-   --  (Sec-WebSocket-Key etc.) are not overridable. Hard to assert
-   --  on the wire without intercepting, but at minimum verify a
-   --  benign extra header doesn't break the handshake — and that
-   --  passing an override for Sec-WebSocket-Key is silently
-   --  ignored (the handshake succeeds because our internally-
-   --  generated Key is what the server's Accept echoes).
+   --  Case 7: Extra_Headers are forwarded but the headers we own are
+   --  not overridable. A benign extra header must not break the
+   --  handshake, and an override for Sec-WebSocket-Key is ignored:
+   --  the handshake succeeds because the internally generated Key is
+   --  what the server's Accept echoes.
    declare
       C : AHT.Websocket.Client.Client_Type;
       H : AHT.HTTP.Headers.Map;
@@ -495,7 +508,7 @@ begin
    end;
 
    --  Case 8: server returns a Sec-WebSocket-Protocol the client
-   --  did not offer → Handshake_Error. Uses the in-process Fake
+   --  did not offer: Handshake_Error. Uses the in-process Fake
    --  server so we can inject an exact response.
    declare
       Server   : Fake_Server;
@@ -533,7 +546,7 @@ begin
    end;
 
    --  Case 9: server returns a subprotocol that was not in the
-   --  client's offered list → Handshake_Error.
+   --  client's offered list: Handshake_Error.
    declare
       Server   : Fake_Server;
       Port     : AHT.URL.Port_Number;
@@ -567,7 +580,7 @@ begin
    end;
 
    --  Case 10: server returns *two* Sec-WebSocket-Protocol header
-   --  lines — RFC 6455 §4.1 allows at most one → Handshake_Error.
+   --  lines; RFC 6455 4.1 allows at most one: Handshake_Error.
    declare
       Server   : Fake_Server;
       Port     : AHT.URL.Port_Number;
@@ -603,7 +616,7 @@ begin
       end if;
    end;
 
-   --  Case 11: positive subprotocol path — server returns one of
+   --  Case 11: positive subprotocol path. The server returns one of
    --  the offered values; Connect succeeds and
    --  Selected_Subprotocol matches what came back.
    declare
@@ -613,12 +626,11 @@ begin
       C        : AHT.Websocket.Client.Client_Type;
       Headers  : AHT.HTTP.Headers.Map;
    begin
-      --  Held open on purpose. The negotiated subprotocol belongs to
-      --  the connection, so it is only answerable while there is one:
-      --  a fixture that drops the socket the moment it has sent the
-      --  101 leaves the receiver racing to reclaim, and the
-      --  assertion racing the receiver. Holding removes the race
-      --  rather than hiding it behind whichever side usually wins.
+      --  Held open. The negotiated subprotocol belongs to the
+      --  connection, so it is only answerable while there is one: a
+      --  fixture that drops the socket the moment it has sent the 101
+      --  leaves the receiver racing to reclaim, and the assertion
+      --  racing the receiver. Holding removes the race.
       Server.Configure
         (Extra_Headers => "Sec-WebSocket-Protocol: aht.echo.v1",
          Post_Bytes    => AHT.Bytes.Byte_Array'(1 .. 0 => 0),
@@ -657,7 +669,7 @@ begin
    end;
 
    --  Case 12: server sends a masked Text frame after the 101.
-   --  RFC 6455 §5.1 forbids server-side masking, so the receiver
+   --  RFC 6455 5.1 forbids server-side masking, so the receiver
    --  task should reject it and shut the connection. The user
    --  observes that via Receive raising Closed_Error (the
    --  receiver Mark_Closed's the Inbox on its way out).
@@ -703,9 +715,9 @@ begin
          Server.Wait_Done (Run_Err);
 
          --  The receiver should see the masked frame, raise
-         --  Protocol_Error internally, Mark_Closed the Inbox.
-         --  Our Receive then surfaces Closed_Error rather than
-         --  delivering "evil" as a valid message.
+         --  Protocol_Error internally, Mark_Closed the Inbox. Our
+         --  Receive then surfaces Closed_Error, not "evil" as a
+         --  valid message.
          begin
             AHT.Websocket.Client.Receive (C, Msg, Timeout => 1.0);
             Fail ("server-mask: Receive returned without "
@@ -723,7 +735,7 @@ begin
 
    --  Case 13: Close's `Timeout` parameter is honoured. The fake
    --  server completes the handshake and then holds the socket
-   --  silently for 2 s — long enough that the default 5.0 s
+   --  silently for 2 s, long enough that the default 5.0 s
    --  close-echo grace would dominate. With Timeout => 0.1, Close
    --  must return well under 0.5 s via the Abort_Pending fallback
    --  path.
@@ -761,61 +773,12 @@ begin
       end if;
    end;
 
-   --  Case 14: close-during-receiver-EOF race (regression). The fake
-   --  server completes the handshake then immediately drops the socket
-   --  (Hold => 0.0), which gives the receiver a chance to hit EOF and
-   --  reach Closed while Close is still mid-handshake. A chance and not
-   --  a guarantee -- which of the two gets there first is up to the
-   --  scheduler, and is exactly what this case is about.
-   --
-   --  The old Close did an unconditional State.Set (Closing) after
-   --  sending its Close frame, clobbering the Closed the receiver had
-   --  just published — and that publication was the last one the
-   --  receiver of the day would make, so nothing came after it to
-   --  repair the clobber and Wait_Closed (barrier Current = Closed)
-   --  parked forever. That deadlocked ~1-in-5 process runs.
-   --
-   --  Stated as the historical fact it is, because neither half of it
-   --  describes the code this test now runs against: that receiver had
-   --  no Reclaim and set Closed as it wound down, whereas today's
-   --  publishes Closed from Reclaim and a teardown pin can publish it
-   --  too. What survives is the shape — a caller overwriting a Closed
-   --  it did not publish — which is what the loop below is here to
-   --  catch if it comes back.
-   --
-   --  What catches a re-introduced clobber is the one-second bound on
-   --  Close below, not the suite timeout, and it no longer hangs to
-   --  get there: the select around Wait_Closed is bounded by the
-   --  handshake Timeout, and Teardown_Pin.Finalize republishes Closed
-   --  on the way out regardless.
-   --
-   --  Measured, by putting the old unconditional transition back: that
-   --  run failed at iteration 1 with "Close took 5.000736000s" — the
-   --  whole Timeout.
-   --
-   --  That shows the bound doing its job, and no more. It is what the
-   --  intended shape produces — the receiver published Closed, the
-   --  clobber overwrote it, and nothing republished it *inside the
-   --  wait*, which is all the shape needs; Finalize does republish it,
-   --  but not until Close_Handshake has already given up. What the run
-   --  does not do is distinguish that from a receiver which had simply
-   --  not published within those five seconds, since the two look
-   --  identical from out here. So it does not say where the receiver
-   --  was when the bound expired, and nothing here says whether
-   --  Abort_Pending found it in transport I/O or not.
-   --
-   --  What holds either way is structural. Reclamation cannot pass
-   --  Wait_No_Borrowers while the closer holds its teardown pin, so
-   --  Teardown_Pin.Finalize — republishing Closed, then releasing that
-   --  borrow as its last statement — is on the path in both shapes.
-   --  Which is the part that matters here: a re-introduced clobber
-   --  ends in a failed one-second assertion rather than a hung run.
-   --
-   --  Which iteration trips is not fixed either, and that run failing
-   --  at its first says nothing about the next one. Whether the
-   --  receiver's EOF beats the caller's Close is a scheduling
-   --  question — that is the whole point of the case — so the loop is
-   --  here to keep offering the ordering chances to happen.
+   --  Case 14: close-during-receiver-EOF race. The fake server drops
+   --  the socket right after the handshake (Hold => 0.0), so the
+   --  receiver may publish Closed while Close is still mid-handshake;
+   --  the loop keeps offering that ordering. A clobbered Closed parks
+   --  Wait_Closed until the handshake Timeout, which the one-second
+   --  bound reports; Teardown_Pin.Finalize republishes Closed on exit.
    declare
       Iterations : constant := 50;
    begin

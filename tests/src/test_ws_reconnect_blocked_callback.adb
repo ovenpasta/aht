@@ -1,56 +1,27 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Reconnecting while a callback refuses to return.
+--  Reconnecting while a callback refuses to return. Callbacks run on
+--  the receiver task, the only task that can complete a teardown, so
+--  an On_Message that does not return stops what Reconnect waits for.
+--  Echo fixture; the callback blocks on a gate the test opens, with a
+--  bound as backstop.
 --
---  Callbacks run ON the receiver task. That is what makes them cheap,
---  and it is also what makes a blocking one dangerous: the receiver
---  is the only task that can complete a teardown, so an On_Message
---  that will not return is an On_Message that has stopped the one
---  thing a Close or a Reconnect is waiting for.
+--  Cases:
+--    1. Reconnect raises Timeout_Error
+--    2. it did not redial: generation unchanged, still Closing
+--    3. once the callback returns, a later Reconnect joins the
+--       teardown in progress and succeeds
 --
---  The library's answer is that the caller's wait is bounded and the
---  teardown is not abandoned. Reconnect gives up waiting and says so;
---  it does NOT redial, because redialing over a connection that is
---  still being reclaimed would be exactly the silent displacement the
---  design refuses everywhere else. The teardown continues in the
---  background, and whoever asks next joins it rather than starting a
---  second one.
+--  Covers:
+--    - a Reconnect that timed out and redialled anyway satisfies
+--      claim 1 and fails claim 2
+--    - claim 2 is asserted separately, so relaxing both guards (the
+--      failed-drain check and admission) is still caught
 --
---  So there are three claims here, and the middle one is the easiest
---  to lose in a refactor:
---
---    1. Reconnect raises Timeout_Error rather than hanging.
---    2. It did not redial. The generation must NOT have advanced, and
---       the client must still be Closing — not Disconnected, not Open.
---       A Reconnect that timed out and redialled anyway would satisfy
---       claim 1 and be badly wrong.
---    3. Once the callback returns, a later Reconnect joins the
---       teardown already in progress and succeeds. If it started a
---       fresh one instead, this is where a second teardown would race
---       the first.
---
---  The blocking is done with a gate the test opens, not a delay, so
---  the callback is released at a known point rather than a guessed
---  one. The gate has its own bound as a backstop: a regression that
---  left the main task never reaching Release would otherwise hang
---  here rather than reporting.
---
---  Validated by making Reconnect swallow the failed drain and redial
---  anyway. Worth recording what that produced, because it is not what
---  claim 2 predicts: the redial is attempted and ADMISSION refuses
---  it, since Connect dials only from Idle or Disconnected and the
---  client is Closing. So the case fails on claim 1 — Handshake_Error
---  where Timeout_Error was expected — rather than on a generation
---  that advanced.
---
---  That is defence in depth working, and it is why claim 2 is still
---  worth asserting separately. The two guards are independent: one
---  keeps Reconnect from redialing over a teardown it could not
---  finish, the other keeps admission shut while a session is still
---  owned. This case would notice the first one going only because
---  the second one caught what it let through; if both were relaxed,
---  the generation check is what remains.
+--  Validated by:
+--    with Reconnect made to swallow the failed drain and redial, claim
+--    1 fails with Handshake_Error: admission refuses a Closing client.
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -79,7 +50,7 @@ procedure Test_WS_Reconnect_Blocked_Callback is
    --  Holds the receiver inside On_Message until the test lets go.
    protected Gate is
       --  Barrier, so a released gate lets every later callback
-      --  straight through — the connection is used again afterwards
+      --  straight through: the connection is used again afterwards
       --  and must not re-block.
       entry Wait;
       procedure Release;
@@ -110,10 +81,10 @@ procedure Test_WS_Reconnect_Blocked_Callback is
       pragma Unreferenced (Msg);
    begin
       Gate.Note_Entered;
-      --  Timed, purely as a backstop. If the test fails before it
-      --  reaches Release, this returns on its own and the suite gets
-      --  a report instead of a hang — the bound is far longer than
-      --  anything the test legitimately waits for.
+      --  A backstop: if the test fails before it reaches Release,
+      --  this returns on its own and the suite gets a report instead
+      --  of a hang. The bound is far longer than anything the test
+      --  waits for.
       select
          Gate.Wait;
       or
@@ -154,9 +125,8 @@ begin
             return;
       end;
 
-      --  Provoke the callback and wait until the receiver is really
-      --  inside it. Everything below depends on that being true, so
-      --  it is observed rather than assumed.
+      --  Provoke the callback and wait until the receiver is inside
+      --  it; everything below depends on that.
       AHT.Websocket.Client.Send_Text (C, "provoke");
 
       if not Await (Callback_Blocked'Unrestricted_Access, 10.0) then
@@ -195,10 +165,9 @@ begin
                & "over a connection that was still being reclaimed");
       end if;
 
-      --  Claim 2, second half: still Closing, and specifically not
-      --  Disconnected. Configure is the observable: it is legal only
-      --  while fully disconnected, so a client that has really
-      --  finished tearing down would accept it. Refusal here is what
+      --  Claim 2, second half: still Closing, not Disconnected.
+      --  Configure is legal only while fully disconnected, so a client
+      --  that had finished tearing down would accept it. Refusal
       --  distinguishes "teardown continues in the background" from
       --  "teardown was abandoned".
       begin
@@ -220,7 +189,7 @@ begin
       --  can now finish.
       Gate.Release;
 
-      --  Claim 3: the next Reconnect joins it rather than racing it.
+      --  Claim 3: the next Reconnect joins the teardown in progress.
       begin
          AHT.Websocket.Client.Reconnect (C);
       exception

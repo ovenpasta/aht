@@ -1,21 +1,13 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Example 6 — the minimal WebSocket lifecycle.
---
---  A WebSocket connection is long-lived and bidirectional, unlike the
---  one-shot HTTP request/response of the earlier rungs. The four calls
---  here are the whole story for the simple, blocking style:
---    * Connect  — dial the URL and run the RFC 6455 upgrade handshake.
---    * Send_Text — frame and send a text message (masked, per spec).
---    * Receive   — block for the next decoded message off the wire.
---    * Close     — run the closing handshake and tear the socket down.
---  The fixture echoes whatever we send, so what we Receive is our own
---  message coming back.
+--  Example 6: the minimal blocking WebSocket lifecycle against the
+--  echo fixture on :8765. Connect dials the URL and runs the RFC 6455
+--  upgrade; Send_Text frames and sends a masked text message; Receive
+--  blocks for the next decoded message; Close runs the closing
+--  handshake and tears the socket down.
 --
 --  Run:  ./examples/bin/<mode>/ex_06_ws_echo [URL]
---  URL defaults to the bundled echo fixture on :8765; pass any ws://
---  (or wss://) URL to retarget.
 
 with Ada.Command_Line; use Ada.Command_Line;
 with Ada.Exceptions;
@@ -58,9 +50,8 @@ exception
                 & Ada.Exceptions.Exception_Message (E));
       Put_Line ("(is the fixture up? try: bash examples/run_examples.sh)");
       --  If the socket opened before the failure, close it so the
-      --  client's receiver task is torn down (Timeout 0.0 = abort now,
-      --  don't wait for a peer echo). Skipping this leaves the receiver
-      --  blocked on a read and hangs scope exit.
+      --  client's receiver task is torn down (Timeout 0.0 = abort now);
+      --  otherwise scope exit blocks on the receiver's read.
       if AHT.Websocket.Client.Is_Open (C) then
          begin
             AHT.Websocket.Client.Close (C, Timeout => 0.0);

@@ -4,18 +4,16 @@
 --  IP-literal certificate identity, mbedtls backend: connecting to
 --  https://127.0.0.1:8766 with the fixture CA must verify via the
 --  cert's IP:127.0.0.1 SAN. mbedTLS matches iPAddress SANs, so this
---  asserts the same property as the openssl source of this test; the
---  two backends agree here and the DNS-name path stays covered by
---  test_tls ("localhost").
+--  asserts the same property as the openssl source of this test.
 --
---  The round-trip is the point rather than decoration. Connect alone
---  returning without exception would also be true of a build that
---  verified nothing, so the test reads a body back through the
---  verified session before believing it.
+--  Cases:
+--    - verified connect to the IP literal, then a body read through the
+--      session; Connect alone would also pass a build verifying nothing
+--    - Insecure connect to the same endpoint, separating "verification
+--      succeeded" from "verification was skipped"
 --
---  Insecure connects to the same endpoint must still work, which is
---  the half that distinguishes "verification succeeded" from
---  "verification was skipped".
+--  Does not cover:
+--    - the DNS-name path; test_tls ("localhost") covers it
 
 with Ada.Command_Line;
 with Ada.Exceptions;

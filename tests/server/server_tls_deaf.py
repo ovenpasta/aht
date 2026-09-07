@@ -3,22 +3,17 @@
 #  SPDX-License-Identifier: Apache-2.0
 """AHT deaf-TLS test fixture.
 
-Completes the TLS handshake on 127.0.0.1:8769 and then never reads a
-single byte of application data. The listening socket is given a tiny
-SO_RCVBUF (inherited by every accepted socket) so a client streaming a
-large body fills the kernel buffers and parks almost immediately — which
-is exactly what test_tls_timeout's write-poison case needs: the client
-arms a short write deadline, the deadline fires mid-record, and the TLS
-transport must drop the (now record-desynchronised) session instead of
-leaving it reusable.
+Completes the TLS handshake on 127.0.0.1:8769 and then never reads
+application data. The listening socket has a tiny SO_RCVBUF, inherited
+by every accepted socket, so a client streaming a large body parks
+almost at once. test_tls_timeout's write-poison case arms a short
+write deadline, which fires mid-record, and the TLS transport must
+drop the record-desynchronised session. server_stall.py stalls the
+handshake; this fixture stalls the post-handshake write path. Cert and
+key are the pair from scripts/generate_cert.sh; clients connect with
+Insecure => True.
 
-Unlike server_stall.py (which never sends a ServerHello, so it stalls the
-*handshake*), this fixture lets the handshake succeed and only stalls the
-post-handshake *write* path. The cert/key are the self-signed pair from
-scripts/generate_cert.sh; clients connect with Insecure => True.
-
-Prints `READY tlsdeaf 127.0.0.1:8769` once listening so
-tests/run_tests.sh can wait for it instead of racing.
+Prints `READY tlsdeaf 127.0.0.1:8769` once listening.
 """
 
 from __future__ import annotations
@@ -51,28 +46,27 @@ def main() -> int:
 
     lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    #  Tiny receive buffer (inherited by accepted sockets) so the peer's
-    #  large write fills the buffers and parks past its first partial send.
+    #  Tiny receive buffer, inherited by accepted sockets, so the peer's
+    #  large write parks past its first partial send.
     lsock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
     lsock.bind((HOST, PORT))
     lsock.listen(8)
 
     print(f"READY tlsdeaf {HOST}:{PORT}", flush=True)
 
-    #  Keep every accepted (and handshaked) connection alive, never reading
-    #  from it, so the client's write wedges on flow control.
+    #  Keep every handshaked connection alive and unread, so the
+    #  client's write wedges on flow control.
     held: list[ssl.SSLSocket] = []
     try:
         while True:
             conn, _ = lsock.accept()
             try:
-                #  do_handshake_on_connect=True (default) drives the TLS
-                #  handshake to completion here, so the client reaches the
-                #  application-data phase before it starts the big write.
+                #  wrap_socket completes the handshake here, so the
+                #  client reaches application data before the big write.
                 tls = ctx.wrap_socket(conn, server_side=True)
                 held.append(tls)
             except (ssl.SSLError, OSError):
-                #  A client that aborts/handshake-fails is fine; keep serving.
+                #  A client that aborts or fails the handshake is fine.
                 try:
                     conn.close()
                 except OSError:

@@ -5,8 +5,7 @@ with "../aht.gpr";
 
 project Tests is
 
-   --  Common tests plus the per-backend version smoke test
-   --  (test_tls_version has one source per backend directory).
+   --  Common tests plus the per-backend mains under src/<backend>.
    case Aht.TLS_Backend is
       when "mbedtls" =>
          for Source_Dirs use ("src", "src/mbedtls");
@@ -17,14 +16,9 @@ project Tests is
    for Object_Dir  use "obj/" & Aht.Variant;
    for Exec_Dir    use "bin/" & Aht.Variant;
 
-   --  test_ws_send_guard runs first, and deliberately so. It needs no
-   --  fixture, and what it checks -- that an aborted acquirer never
-   --  leaves the write latch held -- shows up everywhere else as a
-   --  hang. The runner walks this list in order, so anything ahead of
-   --  it that hung would stop it running at all, which is the failure
-   --  mode it exists to catch. Nothing goes above it, however
-   --  harmless that thing looks today: the ordering is an invariant,
-   --  not an observation about the current tests.
+   --  The runner walks this list in order. test_ws_send_guard stays
+   --  first: it needs no fixture, and an aborted acquirer leaving the
+   --  write latch held would show up as a hang in every later test.
    for Main use
      ("test_ws_send_guard.adb",
       "test_ws_budgets.adb",

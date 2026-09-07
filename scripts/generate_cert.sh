@@ -2,16 +2,12 @@
 #  Copyright (C) 2026 Aldo Nicolas Bruno
 #  SPDX-License-Identifier: Apache-2.0
 #
-# Generate a self-signed cert + key for the HTTPS/WSS test fixtures.
-# The cert carries SANs for both "localhost" and 127.0.0.1 so mbedTLS
-# hostname verification passes whether a test connects by name or by
-# literal address.
+# Generate a self-signed cert + key for the HTTPS/WSS test fixtures,
+# with SANs for both "localhost" and 127.0.0.1 so verification passes
+# by name or by literal address.
 #
-# Output: tests/server/certs/server.crt, tests/server/certs/server.key
-# (git-ignored — regenerated on every test run).
-#
-# Regenerates unconditionally: a stale cert outliving an SAN/expiry
-# change is a worse failure mode than the ~50 ms openssl costs.
+# Output: tests/server/certs/server.crt and server.key (git-ignored).
+# Regenerates unconditionally on every run. Exit status is openssl's.
 
 set -eu
 

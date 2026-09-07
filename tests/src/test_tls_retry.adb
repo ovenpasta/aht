@@ -13,11 +13,10 @@ with AHT.Transport.TLS;
 with AHT.URL;
 
 --  Failed-Connect retryability (backend-neutral). The TLS transport is
---  single-use only AFTER a successful handshake; a Connect that fails —
---  at the TCP layer, at CA loading, or at certificate verification —
+--  single-use only AFTER a successful handshake; a Connect that fails,
+--  at the TCP layer, at CA loading, or at certificate verification,
 --  must release everything it allocated and leave the SAME object ready
---  for another attempt. Regression test for the embedded-TCP design,
---  whose inner Used latch made any post-TCP failure permanent.
+--  for another attempt.
 --
 --  Uses the HTTPS fixture (tests/server/server_tls.py on
 --  127.0.0.1:8766). Run from the repo root so the CA path resolves.
@@ -109,7 +108,7 @@ begin
    end;
 
    --  Case 2: certificate verification failure (no CA configured for a
-   --  self-signed peer), then success with the right CA — the central
+   --  self-signed peer), then success with the right CA: the central
    --  retryability case: the TCP connect and part of the handshake DID
    --  run before the failure.
    declare
@@ -150,7 +149,7 @@ begin
       T.Close;
    end;
 
-   --  Case 4: single-use is preserved — after a SUCCESSFUL session, a
+   --  Case 4: single-use is preserved: after a SUCCESSFUL session, a
    --  second Connect on the same object must be rejected, even after
    --  Close.
    declare

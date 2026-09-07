@@ -1,50 +1,31 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  Reconnecting a client, by calling Connect again.
---
---  A Client_Type used to be single-use: the receiver was a one-shot
---  task and every per-connection resource was an inline component, so
---  a second Connect had to be refused. This exercises what replaced
---  that — a persistent receiver over heap-owned per-generation
---  sessions — from the outside, where it is visible as "the same
---  object connects again".
---
---  Generation is what makes that observable. It counts *successful*
---  connections, so a case can distinguish "reconnected" from "the
---  call returned", and a failed attempt from one that quietly did
---  nothing.
+--  Reconnecting a client by calling Connect again. A Client_Type is
+--  reusable: a persistent receiver runs over heap-owned per-generation
+--  sessions, and Generation counts successful connections. Fixtures:
+--  echo on 8765, wss on 8768, plain HTTP on 8764, the hostile one on
+--  8777 (oversize header), and a closed port.
 --
 --  Cases:
---    1. After the receiver tore the connection down on its own —
---       not via Close. That path reclaims the session from inside the
---       receiver, which is the harder one to get right, and the
---       client must come back from it as readily as from a graceful
---       close.
---    2. After a failed upgrade that follows a *successful dial*.
---       This is the bug the whole design started from: the transport
---       was already latched by the time the handshake was rejected,
---       so the documented retry died inside it with a misleading
---       error. Generation must still read 0 across the failure.
---    3. After a dial that never connected at all.
---    4. Connect is still refused while a connection is live. Widening
---       admission to Disconnected must not have widened it to Open.
---    6. Reconnect repeats the last connect that WORKED, not the last
---       one attempted.
---    8. Close, Reconnect and Receive refuse to be called from inside
---       a callback, where they would wait on the task making the
---       call; Send_* stay legal there.
---    7. Reconnect displaces a live connection — the one thing Connect
---       refuses to do — draining it first.
+--    1. after the receiver tore the connection down on its own
+--    2. after a failed upgrade following a successful dial;
+--       Generation reads 0 across the failure
+--    3. after a dial that never connected
+--    4. Connect is refused while a connection is live
+--    5. across transport kinds, wss to ws; the subprotocol follows
+--       the connection, not the client
+--    6. Reconnect repeats the last connect that worked, not the last
+--       attempted
+--    7. Reconnect displaces a live connection, draining it first
+--    8. Close, Reconnect and Receive refuse to be called from a
+--       callback; Send_* stay legal there
 --
---    5. Across transport kinds, wss to ws, checking that the
---       subprotocol is a property of the connection rather than of
---       the client — a session carries its own transport variant, so
---       the two generations here are not even the same shape. The
---       subprotocol is checked after Close and after a failed
---       attempt, not just after the next success: "overwritten by
---       whatever connects next" is not the same as "gone with the
---       connection".
+--  Covers:
+--    - case 5 checks the subprotocol after Close and after a failed
+--      attempt, not only after the next success
+--    - case 4: the first connection comes through untouched
+--    - case 7: the generation advances exactly once
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -69,8 +50,7 @@ procedure Test_WS_Reconnect is
    Failures : Natural := 0;
 
    --  Records what the reentrancy callback observed. It runs on the
-   --  receiver task, so it reports through a protected object rather
-   --  than touching Failures.
+   --  receiver task, so it reports through a protected object.
    protected Reentry is
       --  First is True for exactly one caller. The callback sends a
       --  message as part of what it checks, the fixture echoes it,
@@ -78,10 +58,10 @@ procedure Test_WS_Reconnect is
       procedure Claim (First : out Boolean);
       procedure Note (What : String; Ex : String);
       --  Set once the callback has finished ALL of its checks. The
-      --  main task waits on this rather than on "something was
-      --  recorded": the four calls are made one after another, so a
-      --  reader woken by the first would read a partial report, and
-      --  would go on to Close while the callback was still sending.
+      --  main task waits on this, not on "something was recorded":
+      --  a reader woken by the first of the four calls would read a
+      --  partial report and go on to Close while the callback was
+      --  still sending.
       procedure Note_Complete;
       function  Done return Boolean;
       function  Report return String;
@@ -119,7 +99,7 @@ procedure Test_WS_Reconnect is
      (AHT.Bytes.To_String (V));
 
    --  Round-trip a message, so a case proves it has a working
-   --  connection rather than merely a Connect that returned.
+   --  connection, not only a Connect that returned.
    procedure Expect_Echo
      (What : String;
       C    : in out AHT.Websocket.Client.Client_Type;
@@ -170,9 +150,8 @@ procedure Test_WS_Reconnect is
 
 begin
    --  Case 1: the receiver reclaims on its own, then the client
-   --  reconnects. The oversize header is just a convenient way to
-   --  make the receiver — rather than the caller — decide the
-   --  connection is over.
+   --  reconnects. The oversize header makes the receiver, not the
+   --  caller, decide the connection is over.
    declare
       C : AHT.Websocket.Client.Client_Type;
       L : AHT.Websocket.Client.Limits;
@@ -197,13 +176,12 @@ begin
          Fail ("receiver-teardown: the connection never went down");
       end if;
 
-      --  Is_Open goes false the moment admission stops, which is the
-      --  FIRST step of reclamation — the session is not yet freed and
-      --  the client is still Closing. Close joins that teardown and
-      --  returns once it has completed, which is what makes the
-      --  reconfigure below deterministic rather than a race against
-      --  the receiver. Timeout => 0.0 because there is no handshake
-      --  left to wait for; this is a join, not a close.
+      --  Is_Open goes false the moment admission stops, the first step
+      --  of reclamation: the session is not yet freed and the client
+      --  is still Closing. Close joins that teardown and returns once
+      --  it has completed, so the reconfigure below does not race the
+      --  receiver. Timeout => 0.0 because there is no handshake left
+      --  to wait for; this is a join, not a close.
       AHT.Websocket.Client.Close (C, Timeout => 0.0);
 
       --  Between connections, so the limits may be changed again.
@@ -230,9 +208,8 @@ begin
       AHT.Websocket.Client.Close (C);
    end;
 
-   --  Case 2: the bug. The dial succeeds and the upgrade is rejected,
-   --  which used to leave the client's one transport latched and the
-   --  documented retry impossible.
+   --  Case 2: the dial succeeds and the upgrade is rejected. The
+   --  transport is latched by then, and the retry must still work.
    declare
       C : AHT.Websocket.Client.Client_Type;
    begin
@@ -263,9 +240,9 @@ begin
       AHT.Websocket.Client.Close (C);
    end;
 
-   --  Case 3: nothing ever connected, so nothing was latched — but
-   --  the attempt still held admission, and releasing it is what lets
-   --  the next one in.
+   --  Case 3: nothing ever connected, so nothing was latched, but the
+   --  attempt still held admission and must release it for the next
+   --  one.
    declare
       C : AHT.Websocket.Client.Client_Type;
    begin
@@ -313,10 +290,9 @@ begin
       AHT.Websocket.Client.Close (C);
    end;
 
-   --  Case 5: the two generations are not even the same shape — one
-   --  runs over TLS and negotiates a subprotocol, the other does
-   --  neither. The subprotocol has to follow the connection, not the
-   --  client.
+   --  Case 5: the two generations are not the same shape: one runs
+   --  over TLS and negotiates a subprotocol, the other does neither.
+   --  The subprotocol has to follow the connection, not the client.
    declare
       C : AHT.Websocket.Client.Client_Type;
       No_Extras : AHT.HTTP.Headers.Map;
@@ -346,8 +322,8 @@ begin
       Expect_Echo ("across-kinds", C, "secure hello");
       AHT.Websocket.Client.Close (C);
 
-      --  Gone with the connection it belonged to, not merely
-      --  overwritten by whatever connects next.
+      --  Gone with the connection it belonged to, not overwritten by
+      --  whatever connects next.
       if AHT.Websocket.Client.Selected_Subprotocol (C) /= "" then
          Fail ("across-kinds: Selected_Subprotocol = """
                & AHT.Websocket.Client.Selected_Subprotocol (C)
@@ -389,11 +365,8 @@ begin
       AHT.Websocket.Client.Close (C);
    end;
 
-   --  Case 6: Reconnect repeats the last connect that WORKED.
-   --
-   --  A failed attempt in between must not become the thing that gets
-   --  replayed — otherwise "reconnect" would mean "retry whatever I
-   --  last asked for", and a typo would be permanent.
+   --  Case 6: Reconnect repeats the last connect that worked. A failed
+   --  attempt in between is not what gets replayed.
    declare
       C : AHT.Websocket.Client.Client_Type;
       No_Extras : AHT.HTTP.Headers.Map;
@@ -429,8 +402,8 @@ begin
                   & Ada.Exceptions.Exception_Name (E));
       end;
 
-      --  Repeats the wss connect, subprotocol and all — not the
-      --  closed port that was tried more recently.
+      --  Repeats the wss connect, subprotocol and all, not the closed
+      --  port that was tried more recently.
       begin
          AHT.Websocket.Client.Reconnect (C);
       exception
@@ -449,8 +422,8 @@ begin
       AHT.Websocket.Client.Close (C);
    end;
 
-   --  Case 7: Reconnect displaces a LIVE connection, which is the one
-   --  thing Connect refuses to do. It drains first, so the generation
+   --  Case 7: Reconnect displaces a live connection, the one thing
+   --  Connect refuses to do. It drains first, so the generation
    --  advances exactly once.
    declare
       C : AHT.Websocket.Client.Client_Type;
@@ -471,13 +444,10 @@ begin
       AHT.Websocket.Client.Close (C);
    end;
    --  Case 8: the operations that wait for the receiver refuse to be
-   --  called FROM it.
-   --
-   --  Each of these would otherwise wait on the very task making the
-   --  call: Close and Reconnect for a teardown only the receiver can
-   --  complete, Receive for a message only the receiver can deliver.
-   --  Send_* wait for nothing the receiver owes them and stay legal,
-   --  which is what keeps echo-from-On_Message working.
+   --  called from it: Close and Reconnect wait for a teardown only
+   --  the receiver can complete, Receive for a message only the
+   --  receiver can deliver. Send_* wait for nothing the receiver owes
+   --  them and stay legal, so an On_Message may echo.
    declare
       Client_Ref : aliased AHT.Websocket.Client.Client_Type;
 
@@ -522,8 +492,8 @@ begin
                Reentry.Note ("receive", Ada.Exceptions.Exception_Name (E));
          end;
 
-         --  Still legal, and the reason the rule is per-operation
-         --  rather than "no client calls from callbacks".
+         --  Still legal: the rule is per-operation, not "no client
+         --  calls from callbacks".
          begin
             AHT.Websocket.Client.Send_Text (Client_Ref, "echoed back");
             Reentry.Note ("send", "ok");

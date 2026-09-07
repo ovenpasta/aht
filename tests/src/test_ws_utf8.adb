@@ -1,15 +1,15 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
---  RFC 3629 UTF-8 validation — the check a WebSocket endpoint applies
+--  RFC 3629 UTF-8 validation: the check a WebSocket endpoint applies
 --  to inbound text-message payloads (and Close-frame reasons) before
 --  accepting them, failing the connection with code 1007 on ill-formed
---  input (RFC 6455 §8.1).
+--  input (RFC 6455 section 8.1).
 --
 --  No sockets: AHT.Websocket.UTF8.Is_Valid is a pure predicate over a
---  byte sequence. Vectors are drawn from the Autobahn|Testsuite §6
---  cases and Markus Kuhn's UTF-8 stress suite, so a regression here
---  maps straight to an Autobahn §6 failure.
+--  byte sequence. Vectors are drawn from the Autobahn|Testsuite
+--  section 6 cases and Markus Kuhn's UTF-8 stress suite, so a
+--  regression here maps straight to an Autobahn section 6 failure.
 
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
@@ -61,11 +61,12 @@ procedure Test_WS_UTF8 is
    end Expect;
 
 begin
-   --  ---- valid ----------------------------------------------------
+   --  Valid
    Expect ("empty",            "",          True);
-   Expect ("ascii-hello",      "48656c6c6f", True);   -- "Hello"
-   Expect ("nul",              "00",        True);    -- U+0000
-   --  Greek "κόσμε" — the canonical Autobahn §6 valid sequence.
+   Expect ("ascii-hello",      "48656c6c6f", True);   --  "Hello"
+   Expect ("nul",              "00",        True);    --  U+0000
+   --  Greek "kosme" (U+03BA U+1F79 U+03C3 U+03BC U+03B5), the
+   --  canonical Autobahn section 6 valid sequence.
    Expect ("kosme",           "cebae1bdb9cf83cebcceb5", True);
    --  Code-point boundaries (RFC 3629 Table 3-7).
    Expect ("U+007F",           "7f",        True);
@@ -74,36 +75,36 @@ begin
    Expect ("U+0800",           "e0a080",    True);
    Expect ("U+FFFF",           "efbfbf",    True);
    Expect ("U+10000",          "f0908080",  True);
-   Expect ("U+10FFFF-max",     "f48fbfbf",  True);    -- last valid
+   Expect ("U+10FFFF-max",     "f48fbfbf",  True);    --  last valid
 
-   --  ---- invalid: stray / truncated -------------------------------
+   --  Invalid: stray / truncated
    Expect ("lone-cont-80",     "80",        False);
    Expect ("lone-cont-bf",     "bf",        False);
-   Expect ("trunc-2byte",      "c2",        False);   -- needs 1 cont
-   Expect ("trunc-3byte",      "e282",      False);   -- needs 1 more
-   Expect ("trunc-4byte",      "f0908d",    False);   -- needs 1 more
-   Expect ("cont-where-start", "c280bf",    False);   -- extra cont byte
+   Expect ("trunc-2byte",      "c2",        False);   --  needs 1 cont
+   Expect ("trunc-3byte",      "e282",      False);   --  needs 1 more
+   Expect ("trunc-4byte",      "f0908d",    False);   --  needs 1 more
+   Expect ("cont-where-start", "c280bf",    False);   --  extra cont byte
 
-   --  ---- invalid: overlong ----------------------------------------
-   Expect ("overlong-nul-2",   "c080",      False);   -- U+0000 as 2 bytes
-   Expect ("overlong-slash",   "c0af",      False);   -- '/' overlong
+   --  Invalid: overlong
+   Expect ("overlong-nul-2",   "c080",      False);   --  U+0000 as 2 bytes
+   Expect ("overlong-slash",   "c0af",      False);   --  '/' overlong
    Expect ("overlong-nul-3",   "e08080",    False);
    Expect ("overlong-nul-4",   "f0808080",  False);
 
-   --  ---- invalid: surrogates (U+D800 .. U+DFFF) -------------------
+   --  Invalid: surrogates (U+D800 .. U+DFFF)
    Expect ("surrogate-D800",   "eda080",    False);
    Expect ("surrogate-DFFF",   "edbfbf",    False);
 
-   --  ---- invalid: out of range / illegal start bytes -------------
-   Expect ("above-10FFFF",     "f4908080",  False);   -- U+110000
+   --  Invalid: out of range / illegal start bytes
+   Expect ("above-10FFFF",     "f4908080",  False);   --  U+110000
    Expect ("start-f5",         "f5808080",  False);
    Expect ("start-c0",         "c0",        False);
    Expect ("start-c1",         "c1",        False);
    Expect ("start-ff",         "ff",        False);
-   Expect ("five-byte-form",   "f888808080", False);  -- forbidden 5-byte
+   Expect ("five-byte-form",   "f888808080", False);  --  forbidden 5-byte
 
-   --  ---- invalid: the exact Autobahn 6.3.1 payload ---------------
-   --  κόσμε + ED A0 80 (a surrogate) + "edited".
+   --  Invalid: the exact Autobahn 6.3.1 payload, "kosme" + ED A0 80
+   --  (a surrogate) + "edited".
    Expect ("autobahn-6.3.1",
            "cebae1bdb9cf83cebcceb5eda080656469746564", False);
 

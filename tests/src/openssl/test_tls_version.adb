@@ -5,7 +5,7 @@
 --  the backend-neutral test_tls_version main), and the LibreSSL
 --  tripwire: OPENSSL_version_major/minor/patch only exist since
 --  OpenSSL 3.0, so linking this at all already excludes LibreSSL and
---  OpenSSL 1.1 — and the Major >= 3 assertion makes it explicit.
+--  OpenSSL 1.1; the Major >= 3 assertion makes it explicit.
 
 with Ada.Command_Line;
 with Ada.Text_IO; use Ada.Text_IO;
