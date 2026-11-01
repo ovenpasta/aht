@@ -5,10 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Nonblocking TLS and abortive cleanup controls
 
-These Linux real-socket tests qualify `TLS.Try_Read` and
-`TLS.Abortive_Close`; they are not OMS WSS acceptance tests. They derive
-from the five TASK108 files in the OMS `tests/ada-wss/` directory at the
-AHT base `664d5ddeb568626b2f9ff66054c7091894b3b8d4`.
+These Linux real-socket tests exercise `TLS.Try_Read` and
+`TLS.Abortive_Close` against both TLS backends. They cover transport
+behavior, not application-level WebSocket acceptance.
 
 ## Run
 

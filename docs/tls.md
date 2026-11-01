@@ -100,7 +100,7 @@ or waits on selectors. Fatal socket errors poison the transport.
 selectors without trying to send `close_notify`. It is idempotent, even
 after fatal I/O, but **does not promise graceful TLS shutdown**. No other
 operation may be active on the transport during cleanup. Automatic TLS
-finalization now uses this abortive path so scope exit does not wait for
+finalization uses this abortive path so scope exit does not wait for
 network capacity; explicit `TLS.Close` retains its existing best-effort
 graceful semantics and may still wait for output capacity.
 

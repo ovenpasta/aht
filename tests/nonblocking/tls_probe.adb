@@ -11,8 +11,8 @@ with AHT.Transport;
 with AHT.Transport.TLS;
 with AHT.URL;
 
---  A low-level qualification probe, NOT a production WSS transport. Commands
---  come from the test driver on stdin; no Ada receiver task is created.
+--  Commands come from the test driver on stdin. All transport operations
+--  run in this task so timing includes no receiver-task coordination.
 procedure TLS_Probe is
    use Ada.Text_IO;
    use type Ada.Real_Time.Time;
@@ -24,10 +24,10 @@ procedure TLS_Probe is
      AHT.URL.Port_Number'Value (Ada.Command_Line.Argument (2));
 
    function Fill_Send_Buffer (Peer_Port : Interfaces.C.int) return Interfaces.C.int
-     with Import, Convention => C, External_Name => "task108_backpressure";
+      with Import, Convention => C, External_Name => "aht_test_backpressure";
 
    function Available (Peer_Port : Interfaces.C.int) return Interfaces.C.int
-     with Import, Convention => C, External_Name => "task108_available";
+      with Import, Convention => C, External_Name => "aht_test_available";
 
    procedure Emit (Message : String) is
    begin
@@ -120,10 +120,10 @@ begin
             Emit ("CLOSED " & Duration'Image
               (Ada.Real_Time.To_Duration (Ada.Real_Time.Clock - Start)));
             exit;
-          elsif Command = "available" then
-             Emit ("AVAILABLE" & Interfaces.C.int'Image
-               (Available (Interfaces.C.int (Port))));
-          elsif Command = "congest" then
+         elsif Command = "available" then
+            Emit ("AVAILABLE" & Interfaces.C.int'Image
+              (Available (Interfaces.C.int (Port))));
+         elsif Command = "congest" then
             if Fill_Send_Buffer (Interfaces.C.int (Port)) /= 0 then
                raise Program_Error with "could not establish send backpressure";
             end if;
@@ -142,8 +142,7 @@ begin
                     & " connected=" & Boolean'Image (Wire.Is_Connected));
             end;
          else
-            --  Zero means try-without-wait; a positive value measures the
-            --  blocking alternative. No timeout is relabelled as clean EOF.
+            --  Exercise the blocking API separately from Try_Read.
             Wire.Set_Read_Deadline (Duration'Value (Command));
             Start := Ada.Real_Time.Clock;
             begin

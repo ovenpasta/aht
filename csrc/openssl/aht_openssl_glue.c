@@ -35,16 +35,18 @@ aht_openssl_ctx_set_min_proto_version(SSL_CTX *ctx, int version)
 }
 
 /* Borrow, do not consume: a short/nonblocking send must retain its suffix. */
-long aht_openssl_peek_memory(BIO *b, char **data)
+long
+aht_openssl_peek_memory(BIO *b, char **data)
 {
     return BIO_get_mem_data(b, data);
 }
 
 /* Stop SSL_read retrying across control records in one event-loop step.
  * Restore the original mode before returning: blocking Read is unchanged. */
-int aht_openssl_try_read(SSL *ssl, void *data, int len, int *error)
+int
+aht_openssl_try_read(SSL *ssl, void *data, int len, int *error)
 {
-    long mode = SSL_get_mode(ssl);
+    const long mode = SSL_get_mode(ssl);
     SSL_clear_mode(ssl, SSL_MODE_AUTO_RETRY);
     int ret = SSL_read(ssl, data, len);
     *error = ret > 0 ? SSL_ERROR_NONE : SSL_get_error(ssl, ret);

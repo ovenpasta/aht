@@ -67,9 +67,9 @@ package AHT.Transport.TLS is
    type Read_Status is (Idle, Data_Ready, Peer_Closed);
 
    procedure Try_Read
-     (Self : in out TLS_Transport;
-      Data : out AHT.Bytes.Byte_Array;
-      Last : out Natural;
+     (Self   : in out TLS_Transport;
+      Data   : out AHT.Bytes.Byte_Array;
+      Last   : out Natural;
       Status : out Read_Status);
    --  No network waits. At most one 16 KiB socket receive, two TLS
    --  read calls (each at most 16 KiB plaintext), and two 16 KiB
@@ -85,7 +85,7 @@ package AHT.Transport.TLS is
    procedure Abortive_Close (Self : in out TLS_Transport);
    --  Discard TLS state and close socket/selectors without sending
    --  close_notify or waiting for network capacity. Idempotent, also
-   --  after fatal I/O. Does NOT promise graceful TLS shutdown.
+   --  after fatal I/O. Does not promise graceful TLS shutdown.
    --  Same no-concurrent-operation precondition as Close.
 
    overriding procedure Finalize (Self : in out TLS_Transport);

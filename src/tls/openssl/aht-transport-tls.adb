@@ -353,22 +353,16 @@ package body AHT.Transport.TLS is
       end if;
 
       AHT.Openssl.Err.Clear_Error;
-      case Op is
-         when Op_Read  =>
-            if Nonblocking then
-               Ret := AHT.Openssl.Glue.Try_Read (St.SSL, Buf, Len, Err_Class);
-            else
-               Ret := OSSL.Read (St.SSL, Buf, Len);
-            end if;
-         when Op_Write => Ret := OSSL.Write (St.SSL, Buf, Len);
-      end case;
-
       if Nonblocking and then Op = Op_Read then
-         null;  --  The glue captured the class before restoring the mode.
-      elsif Ret > 0 then
-         Err_Class := OSSL.ERROR_NONE;
+         --  Capture the error class before the glue restores AUTO_RETRY.
+         Ret := AHT.Openssl.Glue.Try_Read (St.SSL, Buf, Len, Err_Class);
       else
-         Err_Class := OSSL.Get_Error (St.SSL, Ret);
+         case Op is
+            when Op_Read  => Ret := OSSL.Read (St.SSL, Buf, Len);
+            when Op_Write => Ret := OSSL.Write (St.SSL, Buf, Len);
+         end case;
+         Err_Class := (if Ret > 0 then OSSL.ERROR_NONE
+                       else OSSL.Get_Error (St.SSL, Ret));
       end if;
 
       if Err_Class = OSSL.ERROR_SSL
@@ -400,9 +394,8 @@ package body AHT.Transport.TLS is
    --  Connect
    ---------------------------------------------------------------
 
-   --  Release everything a failed Connect allocated, leaving the
-   --  object retryable. Single-task: no reader exists before Connect
-   --  returns.
+   --  Free complete or partially initialized state without TLS output.
+   --  The caller must have exclusive use of the transport.
    procedure Release_State (Self : in out TLS_Transport) is
       St     : Backend_State_Access renames Self.State;
       Ignore : C.int;
@@ -784,13 +777,13 @@ package body AHT.Transport.TLS is
       Ret, Class : C.int;
       Pending : Natural;
       Ignore : C.long;
-      use type AHT.Transport.TCP.Read_Status;
 
       procedure Try_Drain (Empty : out Boolean) is
          Ptr : System.Address;
          Length : constant C.long :=
            AHT.Openssl.Glue.Peek_Memory (St.WBio, Ptr);
          Sent : Natural;
+         Consumed : C.int;
       begin
          Empty := Length = 0;
          if Length <= 0 then
@@ -803,8 +796,9 @@ package body AHT.Transport.TLS is
          begin
             St.TCP.Try_Write (View, Sent);
             if Sent > 0 then
-               Ret := OBIO.Read (St.WBio, Buf'Address, C.int (Sent));
-               if Ret /= C.int (Sent) then
+               --  Consume only bytes accepted by TCP; retain the suffix.
+               Consumed := OBIO.Read (St.WBio, Buf'Address, C.int (Sent));
+               if Consumed /= C.int (Sent) then
                   raise TLS_Error with "TLS try-read: output BIO mismatch";
                end if;
             end if;
@@ -830,24 +824,19 @@ package body AHT.Transport.TLS is
             C.int (Natural'Min (Data'Length, 16_384)),
             Ada.Real_Time.Time_Last, St.Coord.Abort_Epoch,
             "TLS try-read", Ret, Class, Pending, Nonblocking => True);
-         --  Save the read result: Try_Drain uses its own BIO return code.
-         declare
-            Read_Ret : constant C.int := Ret;
-         begin
-            Try_Drain (Empty);
-            if Read_Ret > 0 then
-               Last := Data'First + Natural (Read_Ret) - 1;
-               Status := Data_Ready;
-               return;
-            elsif Class = OSSL.ERROR_ZERO_RETURN then
-               Status := Peer_Closed;
-               return;
-            elsif Class /= OSSL.ERROR_WANT_READ
-              and then Class /= OSSL.ERROR_WANT_WRITE
-            then
-               raise TLS_Error with "TLS try-read: unexpected engine state";
-            end if;
-         end;
+         Try_Drain (Empty);
+         if Ret > 0 then
+            Last := Data'First + Natural (Ret) - 1;
+            Status := Data_Ready;
+            return;
+         elsif Class = OSSL.ERROR_ZERO_RETURN then
+            Status := Peer_Closed;
+            return;
+         elsif Class /= OSSL.ERROR_WANT_READ
+           and then Class /= OSSL.ERROR_WANT_WRITE
+         then
+            raise TLS_Error with "TLS try-read: unexpected engine state";
+         end if;
          if Step = 2 or else not Empty
            or else Class = OSSL.ERROR_WANT_WRITE
          then
@@ -1028,19 +1017,14 @@ package body AHT.Transport.TLS is
    ---------------------------------------------------------------
 
    overriding procedure Close (Self : in out TLS_Transport) is
-      St     : Backend_State_Access := Self.State;
+      St     : constant Backend_State_Access := Self.State;
       Ignore : C.int;
    begin
       if St = null then
          Self.Connected := False;
          return;
       end if;
-      Self.State := null;
-
-      --  Block 1 (best-effort): SSL_shutdown + final drain, skipped for
-      --  a session that died fatally (OpenSSL forbids shutdown after
-      --  SSL_ERROR_SSL/SYSCALL). Close is single-threaded, so plain
-      --  reads of Engine_Dead are fine.
+      --  OpenSSL forbids shutdown after SSL_ERROR_SSL/SYSCALL.
       begin
          if Self.Connected
            and then not St.Coord.Fatal
@@ -1078,26 +1062,8 @@ package body AHT.Transport.TLS is
       end;
       Self.Connected := False;
 
-      --  Block 2 (best-effort): the socket.
-      begin
-         St.TCP.Close;
-      exception
-         when others => null;
-      end;
-
-      --  Block 3 (unconditional): every free runs even if the blocks
-      --  above failed; Finalize only swallows exceptions after Close
-      --  has unwound, so Close itself must never skip cleanup.
-      if St.SSL /= System.Null_Address then
-         OSSL.Free (St.SSL);          --  frees both transferred BIOs
-         St.SSL := System.Null_Address;
-      end if;
-      if St.Ctx /= System.Null_Address then
-         OSSL.CTX_Free (St.Ctx);
-         St.Ctx := System.Null_Address;
-      end if;
-      Free_TCP (St.TCP);
-      Free_State (St);
+      --  A failed close_notify or drain must not skip resource cleanup.
+      Release_State (Self);
    end Close;
 
    procedure Abortive_Close (Self : in out TLS_Transport) is

@@ -27,7 +27,7 @@ with AHT.Transport.TCP;
 --  mbedTLS backend. Same engine as the openssl body; differences:
 --    * the BIO callbacks move bytes to and from two in-memory queues
 --      (Engine_IO) instead of memory BIOs;
---    * an abrupt TCP EOF is a clean Last = 0, not an error;
+--    * blocking Read accepts abrupt TCP EOF; Try_Read rejects it;
 --    * mbedtls_ssl_set_hostname covers IP literals too (iPAddress
 --      SANs), so there is no separate IP-SAN path;
 --    * no default trust with CA_Path = "";
@@ -455,9 +455,8 @@ package body AHT.Transport.TLS is
    --  Connect
    ---------------------------------------------------------------
 
-   --  Release everything a failed Connect allocated, leaving the
-   --  object retryable. Single-task: no reader exists before Connect
-   --  returns. Idempotent (it nulls Self.State).
+   --  Free complete or partially initialized state without TLS output.
+   --  The caller must have exclusive use of the transport.
    procedure Release_State (Self : in out TLS_Transport) is
       St : Backend_State_Access renames Self.State;
    begin
@@ -796,6 +795,7 @@ package body AHT.Transport.TLS is
          if N > 0 then
             St.TCP.Try_Write (St.IO.Out_Data.To_Array (1, N), Sent);
             if Sent > 0 then
+               --  Keep the unsent suffix in wire order.
                if Sent = St.IO.Out_Data.Length then
                   St.IO.Out_Data.Clear;
                else
@@ -1009,18 +1009,14 @@ package body AHT.Transport.TLS is
    ---------------------------------------------------------------
 
    overriding procedure Close (Self : in out TLS_Transport) is
-      St     : Backend_State_Access := Self.State;
+      St     : constant Backend_State_Access := Self.State;
       Ignore : C.int;
    begin
       if St = null then
          Self.Connected := False;
          return;
       end if;
-      Self.State := null;
-
-      --  Block 1 (best-effort): close_notify + its drain, skipped for
-      --  a session that died fatally. Close is single-threaded, so
-      --  plain state reads are fine.
+      --  Do not send close_notify after a fatal I/O error.
       begin
          if Self.Connected
            and then not St.Coord.Fatal
@@ -1051,38 +1047,8 @@ package body AHT.Transport.TLS is
       end;
       Self.Connected := False;
 
-      --  Block 2 (best-effort): the socket.
-      begin
-         St.TCP.Close;
-      exception
-         when others => null;
-      end;
-
-      --  Block 3 (unconditional): every free runs even if the blocks
-      --  above failed; Finalize only swallows exceptions after Close
-      --  has unwound, so Close itself must never skip cleanup.
-      if St.SSL /= System.Null_Address then
-         AHT.Mbedtls.Glue.SSL_Free (St.SSL);
-         St.SSL := System.Null_Address;
-      end if;
-      if St.Conf /= System.Null_Address then
-         AHT.Mbedtls.Glue.Config_Free (St.Conf);
-         St.Conf := System.Null_Address;
-      end if;
-      if St.CA_Cert /= System.Null_Address then
-         AHT.Mbedtls.Glue.X509_CRT_Free (St.CA_Cert);
-         St.CA_Cert := System.Null_Address;
-      end if;
-      if St.CTR_DRBG /= System.Null_Address then
-         AHT.Mbedtls.Glue.CTR_DRBG_Free (St.CTR_DRBG);
-         St.CTR_DRBG := System.Null_Address;
-      end if;
-      if St.Entropy /= System.Null_Address then
-         AHT.Mbedtls.Glue.Entropy_Free (St.Entropy);
-         St.Entropy := System.Null_Address;
-      end if;
-      Free_TCP (St.TCP);
-      Free_State (St);
+      --  A failed close_notify or drain must not skip resource cleanup.
+      Release_State (Self);
    end Close;
 
    procedure Abortive_Close (Self : in out TLS_Transport) is

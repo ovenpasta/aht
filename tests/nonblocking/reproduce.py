@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026 Zack Boll
 # SPDX-License-Identifier: Apache-2.0
-"""Real-socket AHT-TLS-001 controls; not OMS WSS acceptance.
+"""Real-socket controls for nonblocking TLS reads and abortive cleanup.
 
 Build nonblocking.gpr first. Keys/results go to new external scratch.
-Adapted from the OMS TASK108 pinned-TLS blocker reproducer.
 """
 import argparse
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -23,30 +23,36 @@ class Peer:
     def __init__(self, probe, certs, name="server", host="localhost", ca="ca.pem",
                  maximum_version=None, minimum_version=ssl.TLSVersion.TLSv1_2):
         self.listener = socket.socket()
-        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
-        self.listener.bind(("127.0.0.1", 0))
-        self.listener.listen(1)
-        self.listener.settimeout(2)
-        self.process = subprocess.Popen(
-            [str(probe), host, str(self.listener.getsockname()[1]), str(certs / ca)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        self.pending = b""
-        self.socket, _ = self.listener.accept()
-        self.socket.settimeout(2)
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.minimum_version = minimum_version
-        if maximum_version is not None:
-            context.maximum_version = maximum_version
-        if minimum_version < ssl.TLSVersion.TLSv1_2:
-            # Permit the negative-test peer to offer legacy protocols;
-            # the AHT client must still reject them.
-            context.set_ciphers("ALL:@SECLEVEL=0")
-        self.sni = []
-        context.sni_callback = lambda sock, name, ctx: self.sni.append(name)
-        context.load_cert_chain(certs / f"{name}.pem", certs / f"{name}.key")
-        self.incoming, self.outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
-        self.tls = context.wrap_bio(self.incoming, self.outgoing, server_side=True)
+        self.process = None
+        self.socket = None
+        try:
+            self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            self.listener.bind(("127.0.0.1", 0))
+            self.listener.listen(1)
+            self.listener.settimeout(2)
+            self.process = subprocess.Popen(
+                [str(probe), host, str(self.listener.getsockname()[1]), str(certs / ca)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.pending = b""
+            self.socket, _ = self.listener.accept()
+            self.socket.settimeout(2)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = minimum_version
+            if maximum_version is not None:
+                context.maximum_version = maximum_version
+            if minimum_version < ssl.TLSVersion.TLSv1_2:
+                # Permit the negative-test peer to offer legacy protocols;
+                # the AHT client must still reject them.
+                context.set_ciphers("ALL:@SECLEVEL=0")
+            self.sni = []
+            context.sni_callback = lambda sock, name, ctx: self.sni.append(name)
+            context.load_cert_chain(certs / f"{name}.pem", certs / f"{name}.key")
+            self.incoming, self.outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+            self.tls = context.wrap_bio(self.incoming, self.outgoing, server_side=True)
+        except BaseException:
+            self.close()
+            raise
 
     def flush(self):
         data = self.outgoing.read()
@@ -79,7 +85,9 @@ class Peer:
                 raise TimeoutError("probe output deadline")
             data = os.read(self.process.stdout.fileno(), 65536)
             if not data:
-                raise RuntimeError(f"probe exited: {self.process.poll()}")
+                self.process.wait(timeout=2)
+                detail = self.process.stderr.read().decode()
+                raise RuntimeError(f"probe exited: {self.process.returncode}: {detail}")
             self.pending += data
         line, self.pending = self.pending.split(b"\n", 1)
         return line.decode()
@@ -87,6 +95,38 @@ class Peer:
     def command(self, text, timeout=2):
         self.send_command(text)
         return self.line(timeout)
+
+    def attempt(self):
+        row = self.command("try")
+        assert row.startswith("TRY ") and float(row.split()[-1]) < 0.04, row
+        return row
+
+    def abort(self, command="abort"):
+        row = self.command(command, timeout=0.4)
+        assert row.startswith("ABORTED ") and float(row.split()[1]) < 0.1, row
+        assert row.endswith("connected=FALSE"), row
+        return row
+
+    def expect_exit(self, timeout=2):
+        self.process.wait(timeout=timeout)
+        assert self.process.returncode == 0, (
+            self.process.returncode, self.process.stderr.read().decode())
+
+    def rejected_handshake(self):
+        try:
+            self.handshake()
+        except (ssl.SSLError, EOFError, ConnectionError):
+            pass
+        row = self.line()
+        assert row.startswith("CONNECT_ERROR AHT.TRANSPORT.TLS.TLS_ERROR "), row
+        self.expect_exit()
+        return row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
     def send_command(self, text):
         self.process.stdin.write((text + "\n").encode())
@@ -105,8 +145,11 @@ class Peer:
             assert time.monotonic() < deadline, "ciphertext never queued"
 
     def close(self):
-        self.socket.close()
+        if self.socket is not None:
+            self.socket.close()
         self.listener.close()
+        if self.process is None:
+            return
         if self.process.poll() is None:
             self.process.kill()
         self.process.wait(timeout=2)
@@ -170,27 +213,24 @@ def main():
         results.append(dict(case=name, **values))
         print(name, json.dumps(values), flush=True)
 
-    def connected():
-        peer = Peer(args.probe.resolve(), scratch)
-        peer.handshake()
-        assert peer.line() == "CONNECTED"
-        assert peer.sni == ["localhost"], peer.sni
-        return peer
+    @contextmanager
+    def fixture(handshake=True, **kwargs):
+        with Peer(args.probe.resolve(), scratch, **kwargs) as peer:
+            if handshake:
+                peer.handshake()
+                assert peer.line() == "CONNECTED"
+                host = kwargs.get("host", "localhost")
+                expected_sni = None if host == "127.0.0.1" and args.backend == "openssl" else host
+                assert peer.sni == [expected_sni], peer.sni
+            yield peer
 
-    peer = connected()
-    try:
+    with fixture() as peer:
         # Blocking Read retains its positive-deadline semantics.
         idle = [peer.command("0.05") for _ in range(4)]
         assert all(row.startswith("TIMEOUT ") and float(row.split()[1]) >= 0.04 for row in idle), idle
         record("positive-deadline-idle-waits", observations=idle)
 
-        def attempt():
-            row = peer.command("try")
-            assert row.startswith("TRY "), row
-            assert float(row.split()[-1]) < 0.04, row
-            return row
-
-        idle = [attempt() for _ in range(32)]
+        idle = [peer.attempt() for _ in range(32)]
         assert all(row.startswith("TRY IDLE 0 0 ") for row in idle), idle
         record("nonblocking-idle", observations=idle)
         assert peer.command("empty") == "EMPTY_IDLE"
@@ -200,7 +240,7 @@ def main():
         queued = peer.await_ciphertext()
         rows = []
         for _ in range(32):
-            rows.append(attempt())
+            rows.append(peer.attempt())
             if (rows[-1].startswith("TRY DATA_READY ")
                     and not any(row.startswith("TRY DATA_READY ") for row in rows[:-1])):
                 # The rest of this record must now be inside TLS, not TCP.
@@ -217,12 +257,12 @@ def main():
         assert len(ciphertext) > 6
         peer.socket.sendall(ciphertext[:6])  # record header plus partial body
         assert peer.await_ciphertext() == 6
-        partial = [attempt() for _ in range(8)]
+        partial = [peer.attempt() for _ in range(8)]
         assert all(row.startswith("TRY IDLE 0 0 ") for row in partial), partial
         assert peer.command("available") == "AVAILABLE 0"
         peer.socket.sendall(ciphertext[6:])
         peer.await_ciphertext()
-        resumed = attempt()
+        resumed = peer.attempt()
         assert resumed.startswith("TRY DATA_READY 8 852 "), resumed
         record("partial-record-resumes", partial=partial, resumed=resumed)
 
@@ -234,52 +274,37 @@ def main():
                 break
         assert truncation.startswith("TRY_ERROR AHT.TRANSPORT.TLS.TLS_ERROR "), truncation
         record("truncation-rejected", observation=truncation)
-        closed = peer.command("abort", timeout=0.4)
-        assert closed.startswith("ABORTED ") and float(closed.split()[1]) < 0.1, closed
+        closed = peer.abort()
         record("failed-read-abortive-close", observation=closed)
-    finally:
-        peer.close()
 
-    peer = connected()
-    try:
+    with fixture() as peer:
         assert peer.command("congest", timeout=5) == "CONGESTED"
         before = len(list(Path(f"/proc/{peer.process.pid}/fd").iterdir()))
         # The peer remains connected and never resets or reads the junk.
         start = time.monotonic()
-        closed = peer.command("abort-stay", timeout=0.4)
+        closed = peer.abort("abort-stay")
         elapsed = time.monotonic() - start
-        assert closed.startswith("ABORTED ") and float(closed.split()[1]) < 0.1, closed
-        assert closed.endswith("connected=FALSE"), closed
         after = len(list(Path(f"/proc/{peer.process.pid}/fd").iterdir()))
         assert before - after >= 3, (before, after)
         for _ in range(32):
-            assert peer.command("abort-stay").startswith("ABORTED ")
+            peer.abort("abort-stay")
         assert len(list(Path(f"/proc/{peer.process.pid}/fd").iterdir())) == after
-        assert peer.command("abort").startswith("ABORTED ")
-        peer.process.wait(timeout=2)
-        assert peer.process.returncode == 0
+        peer.abort()
+        peer.expect_exit()
         record("backpressured-abortive-close", seconds=elapsed, observation=closed,
                descriptors_before=before, descriptors_after=after)
-    finally:
-        peer.close()
 
-    peer = connected()
-    try:
+    with fixture() as peer:
         assert peer.command("congest", timeout=5) == "CONGESTED"
         failure = peer.command("write")
         assert failure.startswith("WRITE_ERROR AHT.TRANSPORT.TIMEOUT_ERROR "), failure
         assert 0.04 <= float(failure.split()[2]) < 0.5, failure
         assert failure.endswith("connected=FALSE"), failure
-        closed = peer.command("abort")
-        assert closed.startswith("ABORTED ") and float(closed.split()[1]) < 0.1, closed
-        peer.process.wait(timeout=2)
-        assert peer.process.returncode == 0
+        closed = peer.abort()
+        peer.expect_exit()
         record("failed-write-poisons-and-cleans-up", observation=failure, close=closed)
-    finally:
-        peer.close()
 
-    peer = connected()
-    try:
+    with fixture() as peer:
         peer.tls.write(b"XYZ")
         peer.flush()
         time.sleep(0.05)
@@ -292,20 +317,16 @@ def main():
         # Switching to blocking Read must return the same buffered suffix.
         row = peer.command("0.05")
         assert row.startswith("READ  2 "), row
-        assert peer.command("abort").startswith("ABORTED ")
+        peer.abort()
         record("shifted-index-and-blocking-interoperation", observation=row)
-    finally:
-        peer.close()
 
-    peer = connected()
-    try:
+    with fixture() as peer:
         # Many individual records exercise finite work across event-loop turns.
         for _ in range(256):
             peer.tls.write(b"q")
         peer.flush()
         time.sleep(0.05)
-        rows = [peer.command("try") for _ in range(512)]
-        assert all(row.startswith("TRY ") and float(row.split()[-1]) < 0.04 for row in rows), rows
+        rows = [peer.attempt() for _ in range(512)]
         assert sum(int(row.split()[2]) for row in rows) == 256, rows
         assert sum(int(row.split()[3]) for row in rows) == 256 * 113, rows
         # A maximum-size application record plus TLS overhead exceeds the
@@ -323,12 +344,9 @@ def main():
         assert sum(int(r.split()[2]) for r in rows) == 16_384, rows
         assert sum(int(r.split()[3]) for r in rows) == 16_384 * 90, rows
         record("record-larger-than-receive-budget", observations=rows)
-        assert peer.command("abort").startswith("ABORTED ")
-    finally:
-        peer.close()
+        peer.abort()
 
-    peer = connected()
-    try:
+    with fixture() as peer:
         # A real close_notify, unlike a raw TCP FIN, is clean EOF.
         try:
             peer.tls.unwrap()
@@ -338,60 +356,40 @@ def main():
         time.sleep(0.05)  # allow TCP delayed ACK/Nagle, outside timed operation
         rows = []
         for _ in range(32):
-            row = peer.command("try")
+            row = peer.attempt()
             rows.append(row)
-            assert row.startswith("TRY "), row
-            assert float(row.split()[-1]) < 0.04, row
             if row.startswith("TRY PEER_CLOSED 0 0 "):
                 break
         assert rows[-1].startswith("TRY PEER_CLOSED 0 0 "), rows
         assert peer.command("try").startswith("TRY PEER_CLOSED 0 0 ")
-        assert peer.command("abort").startswith("ABORTED ")
+        peer.abort()
         record("authenticated-clean-shutdown", observations=rows)
-    finally:
-        peer.close()
 
-    peer = Peer(args.probe.resolve(), scratch, name="ip", host="127.0.0.1")
-    try:
-        peer.handshake()
-        assert peer.line() == "CONNECTED"
-        # Preserve existing backend policy: mbedTLS sends numeric SNI.
-        assert peer.sni == ([None] if args.backend == "openssl" else ["127.0.0.1"]), peer.sni
-        assert peer.command("abort").startswith("ABORTED ")
+    with fixture(name="ip", host="127.0.0.1") as peer:
+        peer.abort()
         record("trusted-ip-san", observation="CONNECTED")
-    finally:
-        peer.close()
 
-    peer = Peer(args.probe.resolve(), scratch, maximum_version=ssl.TLSVersion.TLSv1_2)
-    try:
-        peer.handshake()
-        assert peer.line() == "CONNECTED"
+    with fixture(maximum_version=ssl.TLSVersion.TLSv1_2) as peer:
         assert peer.tls.version() == "TLSv1.2"
         peer.tls.write(b"tls12")
         peer.flush()
         time.sleep(0.05)
         for _ in range(32):
-            row = peer.command("try")
-            assert row.startswith("TRY ") and float(row.split()[-1]) < 0.04, row
+            row = peer.attempt()
             if row.startswith("TRY DATA_READY "):
                 break
         assert row.startswith("TRY DATA_READY 5 438 "), row
-        assert peer.command("abort").startswith("ABORTED ")
+        peer.abort()
         record("tls12-nonblocking", observation=row)
-    finally:
-        peer.close()
 
-    peer = connected()
-    try:
+    with fixture() as peer:
         assert peer.command("congest", timeout=5) == "CONGESTED"
         start = time.monotonic()
         assert peer.command("finalize", timeout=0.4) == "FINALIZING"
-        peer.process.wait(timeout=0.4)
+        peer.expect_exit(timeout=0.4)
         elapsed = time.monotonic() - start
-        assert peer.process.returncode == 0 and elapsed < 0.4
+        assert elapsed < 0.4, elapsed
         record("backpressured-automatic-finalization", seconds=elapsed)
-    finally:
-        peer.close()
 
     for case, name, host, ca, reason in [
         ("untrusted", "server", "localhost", "other.pem", "certificate verify failed"),
@@ -399,25 +397,14 @@ def main():
         ("expired", "expired", "localhost", "ca.pem", "certificate has expired"),
         ("wrong-ip-san", "server", "127.0.0.1", "ca.pem", "IP address mismatch"),
     ]:
-        peer = Peer(args.probe.resolve(), scratch, name, host, ca)
-        try:
-            try:
-                peer.handshake()
-            except (ssl.SSLError, EOFError, ConnectionError):
-                pass
-            line = peer.line()
-            assert line.startswith("CONNECT_ERROR AHT.TRANSPORT.TLS.TLS_ERROR "), line
+        with fixture(handshake=False, name=name, host=host, ca=ca) as peer:
+            line = peer.rejected_handshake()
             if args.backend == "openssl":
                 assert reason in line, line
-            peer.process.wait(timeout=2)
-            assert peer.process.returncode == 0
             record(case, observation=line)
-        finally:
-            peer.close()
 
     for case in ["plaintext-on-tls", "stalled-handshake"]:
-        peer = Peer(args.probe.resolve(), scratch)
-        try:
+        with fixture(handshake=False) as peer:
             start = time.monotonic()
             if case == "plaintext-on-tls":
                 peer.socket.sendall(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
@@ -427,29 +414,14 @@ def main():
                 assert "TIMEOUT_ERROR" in line, line
             elapsed = time.monotonic() - start
             assert elapsed < 1.5, elapsed
-            peer.process.wait(timeout=2)
-            assert peer.process.returncode == 0
+            peer.expect_exit()
             record(case, seconds=elapsed, observation=line)
-        finally:
-            peer.close()
 
-    peer = Peer(args.probe.resolve(), scratch,
-                minimum_version=ssl.TLSVersion.TLSv1,
-                maximum_version=ssl.TLSVersion.TLSv1_1)
-    try:
-        try:
-            peer.handshake()
-        except (ssl.SSLError, EOFError, ConnectionError):
-            pass
-        row = peer.line()
-        assert row.startswith("CONNECT_ERROR AHT.TRANSPORT.TLS.TLS_ERROR "), row
-        peer.process.wait(timeout=2)
-        assert peer.process.returncode == 0
+    with fixture(handshake=False, minimum_version=ssl.TLSVersion.TLSv1,
+                 maximum_version=ssl.TLSVersion.TLSv1_1) as peer:
+        row = peer.rejected_handshake()
         record("legacy-tls-rejected", observation=row)
-    finally:
-        peer.close()
 
-    # AHT correction qualification only, not OMS WSS acceptance.
     (scratch / "result.json").write_text(json.dumps(dict(
         disposition="CONTROLS_PASSED", aht=observed, openssl=ssl.OPENSSL_VERSION,
         backend=args.backend, cases=results, wss_acceptance=False), indent=2) + "\n")

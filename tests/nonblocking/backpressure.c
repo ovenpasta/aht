@@ -3,7 +3,7 @@
  * Test-only resource pressure: fill the real TCP send buffer while the peer
  * deliberately does not read. No TLS/backend state or functions are replaced.
  * The junk ciphertext is never processed by the peer; this test measures local
- * cleanup only, not protocol correctness. Linux qualification only. */
+ * cleanup only, not protocol correctness. Requires Linux. */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <string.h>
@@ -27,7 +27,7 @@ static int peer_socket(int port)
 }
 
 /* Observe the queued-input premise without consuming TLS ciphertext. */
-int task108_available(int port)
+int aht_test_available(int port)
 {
     int fd = peer_socket(port), available;
     if (fd < 0 || ioctl(fd, FIONREAD, &available) != 0)
@@ -35,7 +35,7 @@ int task108_available(int port)
     return available;
 }
 
-int task108_backpressure(int port)
+int aht_test_backpressure(int port)
 {
     int fd = peer_socket(port);
     if (fd < 0)
