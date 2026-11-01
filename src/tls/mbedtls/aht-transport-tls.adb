@@ -94,6 +94,8 @@ package body AHT.Transport.TLS is
       Coord      : AHT.TLS_Sync.Coordinator_Type;
 
       Engine_Dead  : Boolean := False;
+      Clean_EOF    : Boolean := False;
+      --  Try_Read's authenticated EOF latch; blocking Read is unchanged.
       Death_Reason : AHT.Bytes.Buffer;
       --  Guarded by SSL_Lock. Latched with the reason on a
       --  session-fatal error, so operations rejected afterwards
@@ -774,6 +776,92 @@ package body AHT.Transport.TLS is
    --  Read / Write
    ---------------------------------------------------------------
 
+   procedure Try_Read
+     (Self : in out TLS_Transport;
+      Data : out AHT.Bytes.Byte_Array;
+      Last : out Natural;
+      Status : out Read_Status)
+   is
+      St : constant Backend_State_Access := Self.State;
+      Buf : AHT.Bytes.Byte_Array (1 .. 16_384);
+      Got : Natural;
+      TCP_Status : AHT.Transport.TCP.Read_Status;
+      Ret : C.int;
+      Pending : Natural;
+
+      procedure Try_Drain (Empty : out Boolean) is
+         N : constant Natural := Natural'Min (St.IO.Out_Data.Length, 16_384);
+         Sent : Natural;
+      begin
+         if N > 0 then
+            St.TCP.Try_Write (St.IO.Out_Data.To_Array (1, N), Sent);
+            if Sent > 0 then
+               if Sent = St.IO.Out_Data.Length then
+                  St.IO.Out_Data.Clear;
+               else
+                  St.IO.Out_Data.Set
+                    (St.IO.Out_Data.To_Array (Sent + 1, St.IO.Out_Data.Length));
+               end if;
+            end if;
+         end if;
+         Empty := St.IO.Out_Data.Is_Empty;
+      end Try_Drain;
+
+      Empty : Boolean;
+   begin
+      Last := 0;
+      Status := Idle;
+      if not Live (Self) then
+         raise Transport_Error with "TLS try-read on closed transport";
+      end if;
+      if Data'Length = 0 then
+         return;
+      end if;
+      if St.Clean_EOF then
+         Status := Peer_Closed;
+         return;
+      end if;
+      for Step in 1 .. 2 loop
+         Engine_Call
+           (St, Op_Read, Data'Address,
+            C.size_t (Natural'Min (Data'Length, 16_384)),
+            Ada.Real_Time.Time_Last, St.Coord.Abort_Epoch,
+            "TLS try-read", Ret, Pending);
+         Try_Drain (Empty);
+         if Ret > 0 then
+            Last := Data'First + Natural (Ret) - 1;
+            Status := Data_Ready;
+            return;
+         elsif Ret = M.ERR_PEER_CLOSE_NOTIFY then
+            St.Clean_EOF := True;
+            Status := Peer_Closed;
+            return;
+         elsif Ret = 0 or else Ret = M.ERR_CONN_EOF then
+            raise TLS_Error with "TLS try-read: truncated TLS stream";
+         elsif Ret /= M.ERR_WANT_READ and then Ret /= M.ERR_WANT_WRITE then
+            Raise_From_Code (Ret, "TLS try-read");
+         end if;
+         if Step = 2 or else not Empty or else Ret = M.ERR_WANT_WRITE then
+            return;
+         end if;
+         St.TCP.Try_Read (Buf, Got, TCP_Status);
+         case TCP_Status is
+            when AHT.Transport.TCP.Idle => return;
+            when AHT.Transport.TCP.Peer_Closed =>
+               St.IO.In_EOF := True;
+               St.Coord.Latch_EOF;
+            when AHT.Transport.TCP.Data_Ready =>
+               St.IO.In_Data.Append (Buf (1 .. Got));
+         end case;
+      end loop;
+   exception
+      when others =>
+         if St /= null then
+            Drop_Connection (St);
+         end if;
+         raise;
+   end Try_Read;
+
    overriding procedure Read
      (Self : in out TLS_Transport;
       Data : out AHT.Bytes.Byte_Array;
@@ -996,6 +1084,21 @@ package body AHT.Transport.TLS is
       Free_TCP (St.TCP);
       Free_State (St);
    end Close;
+
+   procedure Abortive_Close (Self : in out TLS_Transport) is
+   begin
+      Self.Connected := False;
+      Release_State (Self);
+      Self.Has_Read_Deadline := False;
+      Self.Has_Write_Deadline := False;
+   end Abortive_Close;
+
+   overriding procedure Finalize (Self : in out TLS_Transport) is
+   begin
+      Abortive_Close (Self);
+   exception
+      when others => null;
+   end Finalize;
 
    overriding function Is_Connected (Self : TLS_Transport) return Boolean is
      (Live (Self));

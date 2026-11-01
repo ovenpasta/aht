@@ -64,6 +64,34 @@ package AHT.Transport.TLS is
    --  two concurrent writers are not supported (the same restriction
    --  the TCP transport's single-waiter selectors impose).
 
+   type Read_Status is (Idle, Data_Ready, Peer_Closed);
+
+   procedure Try_Read
+     (Self : in out TLS_Transport;
+      Data : out AHT.Bytes.Byte_Array;
+      Last : out Natural;
+      Status : out Read_Status);
+   --  No network waits. At most one 16 KiB socket receive, two TLS
+   --  read calls (each at most 16 KiB plaintext), and two 16 KiB
+   --  nonblocking output attempts. Buffered plaintext is tried first.
+   --  Idle includes incomplete records and output backpressure; retry
+   --  on a later event-loop turn. Last is zero except for Data_Ready,
+   --  when it is the last valid index in Data. Empty Data returns Idle.
+   --  Peer_Closed means authenticated close_notify; raw TCP EOF raises
+   --  TLS_Error, including on mbedTLS. Ignores compound deadlines.
+   --  Exclusive-use precondition: no other operation on this transport
+   --  may run concurrently (including Read/Write). Not enforced.
+
+   procedure Abortive_Close (Self : in out TLS_Transport);
+   --  Discard TLS state and close socket/selectors without sending
+   --  close_notify or waiting for network capacity. Idempotent, also
+   --  after fatal I/O. Does NOT promise graceful TLS shutdown.
+   --  Same no-concurrent-operation precondition as Close.
+
+   overriding procedure Finalize (Self : in out TLS_Transport);
+   --  Abortive_Close, never graceful Close, so scope exit cannot wait
+   --  for a peer to read. Same exclusive lifecycle precondition.
+
    overriding procedure Close (Self : in out TLS_Transport);
    --  Closes: best-effort close_notify (skipped after a fatal error),
    --  then the inner TCP transport, then frees the backend contexts.

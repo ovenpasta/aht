@@ -89,6 +89,26 @@ package AHT.Transport.TCP is
    --  fatal-write case use Poison and defer Close until the reader
    --  has exited.
 
+   type Read_Status is (Idle, Data_Ready, Peer_Closed);
+
+   procedure Try_Read
+     (Self : in out TCP_Transport;
+      Data : out AHT.Bytes.Byte_Array;
+      Last : out Natural;
+      Status : out Read_Status);
+   --  One nonblocking receive, no selector wait; ignores read deadlines.
+   --  Last is an index, zero unless Data_Ready. Empty Data returns Idle.
+   --  Subject to the same single-reader restriction as Read.
+
+   procedure Try_Write
+     (Self : in out TCP_Transport;
+      Data : AHT.Bytes.Byte_Array;
+      Sent : out Natural);
+   --  One nonblocking send, no selector wait; ignores write deadlines.
+   --  Sent is a count (possibly zero), NOT an all-or-error Write. The
+   --  caller retains and retries the unsent suffix in order. Same
+   --  single-writer restriction as Write. Fatal errors poison the socket.
+
    overriding function Is_Connected (Self : TCP_Transport) return Boolean;
 
    overriding procedure Set_Read_Deadline

@@ -32,6 +32,7 @@ project Tests is
       "test_headers.adb",
       "test_dns.adb",
       "test_tcp.adb",
+      "test_tcp_try.adb",
       "test_transport_finalize.adb",
       "test_log.adb",
       "test_http_io.adb",

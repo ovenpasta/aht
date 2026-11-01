@@ -53,5 +53,8 @@ jobs:
       - name: Run integration suite
         run: bash tests/run_tests.sh
 
+      - name: Nonblocking TLS and abortive cleanup controls
+        run: alr exec -- sh tests/nonblocking/run.sh
+
       - name: Run examples
         run: bash examples/run_examples.sh

@@ -333,7 +333,8 @@ package body AHT.Transport.TLS is
       Where     : String;
       Ret       : out C.int;
       Err_Class : out C.int;
-      Pending   : out Natural)
+      Pending   : out Natural;
+      Nonblocking : Boolean := False)
    is
       Fatal_Msg : AHT.Bytes.Buffer;  --  built only on the fatal path
       Is_Fatal  : Boolean := False;
@@ -353,11 +354,18 @@ package body AHT.Transport.TLS is
 
       AHT.Openssl.Err.Clear_Error;
       case Op is
-         when Op_Read  => Ret := OSSL.Read  (St.SSL, Buf, Len);
+         when Op_Read  =>
+            if Nonblocking then
+               Ret := AHT.Openssl.Glue.Try_Read (St.SSL, Buf, Len, Err_Class);
+            else
+               Ret := OSSL.Read (St.SSL, Buf, Len);
+            end if;
          when Op_Write => Ret := OSSL.Write (St.SSL, Buf, Len);
       end case;
 
-      if Ret > 0 then
+      if Nonblocking and then Op = Op_Read then
+         null;  --  The glue captured the class before restoring the mode.
+      elsif Ret > 0 then
          Err_Class := OSSL.ERROR_NONE;
       else
          Err_Class := OSSL.Get_Error (St.SSL, Ret);
@@ -763,6 +771,111 @@ package body AHT.Transport.TLS is
    --  Read / Write
    ---------------------------------------------------------------
 
+   procedure Try_Read
+     (Self : in out TLS_Transport;
+      Data : out AHT.Bytes.Byte_Array;
+      Last : out Natural;
+      Status : out Read_Status)
+   is
+      St : constant Backend_State_Access := Self.State;
+      Buf : AHT.Bytes.Byte_Array (1 .. 16_384);
+      Got : Natural;
+      TCP_Status : AHT.Transport.TCP.Read_Status;
+      Ret, Class : C.int;
+      Pending : Natural;
+      Ignore : C.long;
+      use type AHT.Transport.TCP.Read_Status;
+
+      procedure Try_Drain (Empty : out Boolean) is
+         Ptr : System.Address;
+         Length : constant C.long :=
+           AHT.Openssl.Glue.Peek_Memory (St.WBio, Ptr);
+         Sent : Natural;
+      begin
+         Empty := Length = 0;
+         if Length <= 0 then
+            return;
+         end if;
+         declare
+            N : constant Natural := Natural (C.long'Min (Length, Buf'Length));
+            View : AHT.Bytes.Byte_Array (1 .. N)
+              with Import, Address => Ptr;
+         begin
+            St.TCP.Try_Write (View, Sent);
+            if Sent > 0 then
+               Ret := OBIO.Read (St.WBio, Buf'Address, C.int (Sent));
+               if Ret /= C.int (Sent) then
+                  raise TLS_Error with "TLS try-read: output BIO mismatch";
+               end if;
+            end if;
+         end;
+         Empty := OBIO.Ctrl_Pending (St.WBio) = 0;
+      end Try_Drain;
+
+      Empty : Boolean;
+   begin
+      Last := 0;
+      Status := Idle;
+      if not Live (Self) then
+         raise Transport_Error with "TLS try-read on closed transport";
+      end if;
+      if Data'Length = 0 then
+         return;
+      end if;
+      --  Exclusive use: no lock can be owned by another operation. The
+      --  existing engine wrapper retains its fatal/abort bookkeeping.
+      for Step in 1 .. 2 loop
+         Engine_Call
+           (St, Op_Read, Data'Address,
+            C.int (Natural'Min (Data'Length, 16_384)),
+            Ada.Real_Time.Time_Last, St.Coord.Abort_Epoch,
+            "TLS try-read", Ret, Class, Pending, Nonblocking => True);
+         --  Save the read result: Try_Drain uses its own BIO return code.
+         declare
+            Read_Ret : constant C.int := Ret;
+         begin
+            Try_Drain (Empty);
+            if Read_Ret > 0 then
+               Last := Data'First + Natural (Read_Ret) - 1;
+               Status := Data_Ready;
+               return;
+            elsif Class = OSSL.ERROR_ZERO_RETURN then
+               Status := Peer_Closed;
+               return;
+            elsif Class /= OSSL.ERROR_WANT_READ
+              and then Class /= OSSL.ERROR_WANT_WRITE
+            then
+               raise TLS_Error with "TLS try-read: unexpected engine state";
+            end if;
+         end;
+         if Step = 2 or else not Empty
+           or else Class = OSSL.ERROR_WANT_WRITE
+         then
+            return;
+         end if;
+         if OBIO.Ctrl_Pending (St.RBio) = 0 then
+            St.TCP.Try_Read (Buf, Got, TCP_Status);
+            case TCP_Status is
+               when AHT.Transport.TCP.Idle => return;
+               when AHT.Transport.TCP.Peer_Closed =>
+                  St.Coord.Latch_EOF;
+                  Ignore := AHT.Openssl.Glue.Set_Mem_EOF_Return (St.RBio, 0);
+               when AHT.Transport.TCP.Data_Ready =>
+                  Ret := OBIO.Write (St.RBio, Buf'Address, C.int (Got));
+                  if Ret /= C.int (Got) then
+                     raise TLS_Error with "TLS try-read: input BIO failure";
+                  end if;
+            end case;
+         end if;
+      end loop;
+   exception
+      when others =>
+         if St /= null then
+            Drop_Connection (St);
+         end if;
+         raise;
+   end Try_Read;
+
    overriding procedure Read
      (Self : in out TLS_Transport;
       Data : out AHT.Bytes.Byte_Array;
@@ -986,6 +1099,21 @@ package body AHT.Transport.TLS is
       Free_TCP (St.TCP);
       Free_State (St);
    end Close;
+
+   procedure Abortive_Close (Self : in out TLS_Transport) is
+   begin
+      Self.Connected := False;
+      Release_State (Self);
+      Self.Has_Read_Deadline := False;
+      Self.Has_Write_Deadline := False;
+   end Abortive_Close;
+
+   overriding procedure Finalize (Self : in out TLS_Transport) is
+   begin
+      Abortive_Close (Self);
+   exception
+      when others => null;
+   end Finalize;
 
    overriding function Is_Connected (Self : TLS_Transport) return Boolean is
      (Live (Self));

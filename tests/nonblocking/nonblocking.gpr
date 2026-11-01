@@ -1,0 +1,14 @@
+--  Copyright (C) 2026 Zack Boll
+--  SPDX-License-Identifier: Apache-2.0
+
+with "../../aht.gpr";
+
+project Nonblocking is
+   for Languages use ("Ada", "C");
+   for Source_Dirs use (".");
+   for Object_Dir use "../obj/nonblocking-" & Aht.Variant;
+   for Exec_Dir use "../bin/nonblocking-" & Aht.Variant;
+   for Main use ("tls_probe.adb");
+   package Compiler renames Aht.Compiler;
+   package Binder renames Aht.Binder;
+end Nonblocking;
