@@ -1,4 +1,4 @@
---  Copyright (C) 2026 Aldo Nicolas Bruno
+--  Copyright (C) 2026 Contributors to AHT
 --  SPDX-License-Identifier: Apache-2.0
 
 --  TLS.Try_Read and TLS.Abortive_Close, both backends. Each Try_Read
