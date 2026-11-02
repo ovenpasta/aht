@@ -311,11 +311,8 @@ package body AHT.Transport.TLS is
       Check_Abort (St, Epoch0, Where);
    end Feed;
 
-   --  Feed without waiting, for Try_Read: one TCP.Try_Read under the
-   --  feeder claim. Fed is False when the socket had nothing or when
-   --  the writer task holds the claim; its TCP.Read is about to deliver
-   --  the bytes into RBIO, so Try_Read reports Would_Block and finds
-   --  them on its next call rather than parking on the latch.
+   --  One TCP.Try_Read under the feeder claim; never park on the latch.
+   --  Try_Read's exclusive-I/O precondition keeps the claim uncontended.
    procedure Try_Feed
      (St    : Backend_State_Access;
       Where : String;

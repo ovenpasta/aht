@@ -87,12 +87,14 @@ package AHT.Transport.TLS is
    --  One receive may carry several records while one call returns
    --  one, so call again until Would_Block before waiting for socket
    --  readiness. Ciphertext the engine queues while reading (a
-   --  KeyUpdate reply, an alert) is not sent here; the next Write,
-   --  Read or Close drains it, which is as soon as the protocol
-   --  requires. Set_Read_Deadline and Abort_Pending do not apply:
-   --  there is no wait to bound. Takes the reader role of the
-   --  concurrency contract above: it may run alongside one Write, not
-   --  alongside Read or another Try_Read.
+   --  KeyUpdate reply, an alert) is not sent here; a subsequent
+   --  nonempty Write or Read drains it, or Close attempts to. A peer
+   --  waiting for that output cannot be served by Try_Read alone.
+   --  Set_Read_Deadline and Abort_Pending do not apply.
+   --  Precondition: no concurrent Read, Try_Read or Write. Keep I/O
+   --  ownership through the drain-to-wait interval: another writer
+   --  can feed the TLS input queue without leaving the socket readable.
+   --  Blocking Read and Write retain their concurrency contract above.
 
    procedure Abortive_Close (Self : in out TLS_Transport);
    --  Drops the session without a close_notify: frees the backend

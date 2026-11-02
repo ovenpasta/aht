@@ -102,8 +102,8 @@ package body AHT.Transport.TLS is
       Close_Notified : Boolean := False;
       --  Guarded by SSL_Lock. mbedTLS reports the peer's close_notify
       --  once and then reads on to the TCP EOF behind it, which
-      --  Try_Read must not mistake for truncation; this remembers the
-      --  authenticated close so later Try_Read calls repeat it.
+      --  Try_Read must not mistake for truncation; Engine_Call latches
+      --  it on whichever read saw it so later Try_Read calls repeat it.
    end record;
 
    procedure Free_TCP is new Ada.Unchecked_Deallocation
@@ -388,11 +388,8 @@ package body AHT.Transport.TLS is
       Check_Abort (St, Epoch0, Where);
    end Feed;
 
-   --  Feed without waiting, for Try_Read: one TCP.Try_Read under the
-   --  feeder claim. Fed is False when the socket had nothing or when
-   --  the writer task holds the claim; its TCP.Read is about to deliver
-   --  the bytes into the queue, so Try_Read reports Would_Block and
-   --  finds them on its next call rather than parking on the latch.
+   --  One TCP.Try_Read under the feeder claim; never park on the latch.
+   --  Try_Read's exclusive-I/O precondition keeps the claim uncontended.
    procedure Try_Feed
      (St  : Backend_State_Access;
       Fed : out Boolean)
@@ -474,6 +471,11 @@ package body AHT.Transport.TLS is
          when Op_Read  => Ret := M.Read  (St.SSL, Buf, Len);
          when Op_Write => Ret := M.Write (St.SSL, Buf, Len);
       end case;
+
+      --  Remember close_notify from either read operation.
+      if Op = Op_Read and then Ret = M.ERR_PEER_CLOSE_NOTIFY then
+         St.Close_Notified := True;
+      end if;
 
       --  A negative code that is not one of the "call me again" or
       --  clean-shutdown ones ends the session for good.
@@ -892,10 +894,7 @@ package body AHT.Transport.TLS is
                Status := Data_Ready;
                return;
             elsif Ret = M.ERR_PEER_CLOSE_NOTIFY then
-               St.SSL_Lock.Seize;
-               St.Close_Notified := True;
-               St.SSL_Lock.Release;
-               Status := Peer_Closed;
+               Status := Peer_Closed;  --  Engine_Call latched it
                return;
             elsif Ret = 0 or else Ret = M.ERR_CONN_EOF then
                Latch_Engine_Dead

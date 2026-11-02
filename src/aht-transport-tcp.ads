@@ -100,8 +100,10 @@ package AHT.Transport.TCP is
    --  selector: returns at once with Would_Block when nothing is
    --  queued, Data_Ready with Last the index of the last byte stored,
    --  or Peer_Closed on the stream's end. Last is 0 unless Data_Ready.
-   --  Ignores Set_Read_Deadline (there is no wait to bound) and is
-   --  not interruptible by Abort_Pending. Empty Data: Would_Block.
+   --  Stores at most 16 KiB of a longer Data; the rest of
+   --  the socket's queue waits for the next call. Ignores
+   --  Set_Read_Deadline (there is no wait to bound) and is not
+   --  interruptible by Abort_Pending. Empty Data: Would_Block.
    --  Occupies the reader role of the concurrency contract above.
 
    overriding function Is_Connected (Self : TCP_Transport) return Boolean;

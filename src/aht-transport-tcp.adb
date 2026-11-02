@@ -674,8 +674,9 @@ package body AHT.Transport.TCP is
       Last   : out Natural;
       Status : out Try_Read_Status)
    is
+      Try_Read_Max : constant := 16_384;
       Buffer   : Stream_Element_Array
-        (1 .. Stream_Element_Offset (Data'Length));
+        (1 .. Stream_Element_Offset (Natural'Min (Data'Length, Try_Read_Max)));
       Got_Last : Stream_Element_Offset;
       Count    : Natural;
    begin

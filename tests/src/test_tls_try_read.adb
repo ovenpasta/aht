@@ -224,6 +224,38 @@ begin
          Fail ("fragment: " & Ada.Exceptions.Exception_Name (E) & " — "
                & Ada.Exceptions.Exception_Message (E));
    end;
+   --  Case 2b: Read consumes close_notify; Try_Read must remember it.
+   declare
+      T : TLS_Transport;
+   begin
+      T.Connect ("127.0.0.1", Fragment_Port, Insecure => True);
+      T.Set_Read_Deadline (To_Duration (Patience));
+      T.Write ([1 => 65]);
+      T.Read (Buf, Last);
+      if AHT.Bytes.To_String (Buf (1 .. Last)) /= "FRAGMENTED-RECORD-BANNER"
+      then
+         Fail ("read-then-try: banner mangled — """
+               & AHT.Bytes.To_String (Buf (1 .. Last)) & """");
+      end if;
+      T.Read (Buf, Last);
+      if Last /= 0 then
+         Fail ("read-then-try: expected Last = 0 for close_notify, got"
+               & Last'Image);
+      end if;
+      for I in 1 .. 2 loop
+         Timed_Try_Read (T, Buf, Last, Status, "read-then-try");
+         if Status /= Peer_Closed or else Last /= 0 then
+            Fail ("read-then-try: expected Peer_Closed/0, got "
+                  & Status'Image & Last'Image);
+         end if;
+      end loop;
+      T.Close;
+   exception
+      when E : others =>
+         Fail ("read-then-try: " & Ada.Exceptions.Exception_Name (E) & " — "
+               & Ada.Exceptions.Exception_Message (E));
+   end;
+
    --  Case 3: TCP close without close_notify. The banner arrives,
    --  then the stream ends; that end must be TLS_Error on both
    --  backends (the mbedtls blocking Read reads it as clean EOF, the

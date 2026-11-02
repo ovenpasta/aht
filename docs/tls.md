@@ -179,15 +179,23 @@ promptly, and all network waiting happens in Ada outside the library:
   reading. The inherited `Finalize` still dispatches to `Close`.
 - **Try_Read** is the read loop with the waits removed: one engine
   call on the buffered ciphertext and, if that wanted more, one
-  `TCP.Try_Read` (a single receive on the non-blocking socket, no
-  selector park) under the feeder claim, then one more engine call.
-  When the writer task holds the claim its `TCP.Read` is about to
-  fill the queue, so `Try_Read` reports `Would_Block` instead of
-  parking. Ciphertext the engine queues during the call (a KeyUpdate
-  reply, an alert) stays in the output queue for the next `Write`,
-  `Read` or `Close` to drain. On mbedtls the peer's close_notify is
-  remembered in `Close_Notified`, because `mbedtls_ssl_read` reports
-  it once and then reads on to the TCP EOF behind it.
+  `TCP.Try_Read` (one receive of at most 16 KiB, no selector park)
+  under the feeder claim, then one more engine call. It requires
+  exclusive I/O ownership, including the drain-to-wait interval. A
+  concurrent writer could consume socket data and feed the TLS queue
+  after `Try_Read` returns `Would_Block`, leaving plaintext available
+  without socket readiness. The one-reader-plus-one-writer contract
+  still applies to blocking `Read` and `Write`.
+  Ciphertext queued during `Try_Read` stays pending until a nonempty
+  `Write` or `Read` drains it, or `Close` attempts to. TLS 1.3 KeyUpdate
+  replies can precede the next application write, but a TLS 1.2
+  renegotiation refusal can leave a peer waiting for its alert.
+  `Try_Read` alone does not guarantee output progress; callers needing
+  prompt control replies must use the blocking operations and their
+  deadlines. On mbedtls `Engine_Call` remembers close_notify from
+  either read operation in `Close_Notified`: `mbedtls_ssl_read` reports
+  it once, then reads on to TCP EOF. Blocking `Read` still returns
+  `Last = 0` for either end condition.
 
 The locks and coordinator live in `AHT.TLS_Sync`, shared by both
 bodies and kept separate so that a test can drive the claim, arm,
