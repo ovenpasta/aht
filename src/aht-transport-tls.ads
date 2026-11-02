@@ -64,33 +64,44 @@ package AHT.Transport.TLS is
    --  two concurrent writers are not supported (the same restriction
    --  the TCP transport's single-waiter selectors impose).
 
-   type Read_Status is (Idle, Data_Ready, Peer_Closed);
+   type Try_Read_Status is (Would_Block, Data_Ready, Peer_Closed);
 
    procedure Try_Read
      (Self   : in out TLS_Transport;
       Data   : out AHT.Bytes.Byte_Array;
       Last   : out Natural;
-      Status : out Read_Status);
-   --  No network waits. At most one 16 KiB socket receive, two TLS
-   --  read calls (each at most 16 KiB plaintext), and two 16 KiB
-   --  nonblocking output attempts. Buffered plaintext is tried first.
-   --  Idle includes incomplete records and output backpressure; retry
-   --  on a later event-loop turn. Last is zero except for Data_Ready,
-   --  when it is the last valid index in Data. Empty Data returns Idle.
-   --  Peer_Closed means authenticated close_notify; raw TCP EOF raises
-   --  TLS_Error, including on mbedTLS. Ignores compound deadlines.
-   --  Exclusive-use precondition: no other operation on this transport
-   --  may run concurrently (including Read/Write). Not enforced.
+      Status : out Try_Read_Status);
+   --  Read without waiting for the network, for callers that multiplex
+   --  the connection in their own event loop. Decrypts what the engine
+   --  already holds, taking at most one non-blocking receive from the
+   --  socket when it needs more ciphertext, and returns:
+   --    Data_Ready   plaintext stored in Data, Last its last index;
+   --    Would_Block  no complete record yet (Last = 0); a partial
+   --                 record stays buffered for the next call;
+   --    Peer_Closed  the peer's close_notify (Last = 0); repeats on
+   --                 every later call.
+   --  A TCP EOF without close_notify raises TLS_Error on both
+   --  backends: Peer_Closed is only ever an authenticated close (the
+   --  mbedtls blocking Read is laxer; see docs/tls.md). Errors poison
+   --  the session as they do in Read. Empty Data: Would_Block.
+   --  One receive may carry several records while one call returns
+   --  one, so call again until Would_Block before waiting for socket
+   --  readiness. Ciphertext the engine queues while reading (a
+   --  KeyUpdate reply, an alert) is not sent here; the next Write,
+   --  Read or Close drains it, which is as soon as the protocol
+   --  requires. Set_Read_Deadline and Abort_Pending do not apply:
+   --  there is no wait to bound. Takes the reader role of the
+   --  concurrency contract above: it may run alongside one Write, not
+   --  alongside Read or another Try_Read.
 
    procedure Abortive_Close (Self : in out TLS_Transport);
-   --  Discard TLS state and close socket/selectors without sending
-   --  close_notify or waiting for network capacity. Idempotent, also
-   --  after fatal I/O. Does not promise graceful TLS shutdown.
-   --  Same no-concurrent-operation precondition as Close.
-
-   overriding procedure Finalize (Self : in out TLS_Transport);
-   --  Abortive_Close, never graceful Close, so scope exit cannot wait
-   --  for a peer to read. Same exclusive lifecycle precondition.
+   --  Drops the session without a close_notify: frees the backend
+   --  contexts and closes the inner TCP transport, never writing to
+   --  the socket, so it cannot wait on a peer that has stopped
+   --  reading. The peer sees a truncated stream; use Close where it
+   --  must see an authenticated end. Idempotent, also after a fatal
+   --  error and on a never-connected object. Same precondition as
+   --  Close. Does not change Close or the inherited Finalize.
 
    overriding procedure Close (Self : in out TLS_Transport);
    --  Closes: best-effort close_notify (skipped after a fatal error),

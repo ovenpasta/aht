@@ -81,8 +81,6 @@ package AHT.Transport is
    --  drops its socket or TLS contexts. Never raises: exceptions from
    --  Close are swallowed, since Finalize runs during unwinding.
    --  Relies on every Close being idempotent.
-   --  TLS overrides Finalize with abortive cleanup (no close_notify
-   --  network write); explicit TLS Close retains graceful semantics.
    --  Inherits Close's precondition: no other task is inside any
    --  operation on this transport while it runs. The owners in this
    --  library satisfy it by structure: a standalone transport is used

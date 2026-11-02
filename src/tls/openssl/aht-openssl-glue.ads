@@ -5,24 +5,10 @@ with Interfaces.C;
 with System;
 
 --  Ada view of the C glue in csrc/openssl/aht_openssl_glue.c: the few
---  OpenSSL macro entry points and the bounded-read mode wrapper.
---  Bindings curated from gcc -fdump-ada-spec on the glue source;
---  ctrl numbers come from installed headers, not curated constants.
+--  OpenSSL entry points that are macros over *_ctrl calls, wrapped in
+--  real C functions so their ctrl numbers come from the installed
+--  headers rather than a curated constant.
 package AHT.Openssl.Glue is
-
-   function Try_Read
-     (SSL : System.Address; Data : System.Address; Len : Interfaces.C.int;
-      Error : out Interfaces.C.int)
-      return Interfaces.C.int
-     with Import, Convention => C, External_Name => "aht_openssl_try_read";
-   --  SSL_read with AUTO_RETRY temporarily disabled. Captures SSL_get_error
-   --  immediately, before restoring the original mode.
-
-   function Peek_Memory
-     (B : System.Address; Data : out System.Address) return Interfaces.C.long
-     with Import, Convention => C,
-          External_Name => "aht_openssl_peek_memory";
-   --  Borrow the pending memory-BIO bytes without consuming them.
 
    function Set_TLSext_Host_Name
      (S    : System.Address;

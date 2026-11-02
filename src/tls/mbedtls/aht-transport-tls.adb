@@ -27,7 +27,8 @@ with AHT.Transport.TCP;
 --  mbedTLS backend. Same engine as the openssl body; differences:
 --    * the BIO callbacks move bytes to and from two in-memory queues
 --      (Engine_IO) instead of memory BIOs;
---    * blocking Read accepts abrupt TCP EOF; Try_Read rejects it;
+--    * an abrupt TCP EOF is a clean Last = 0 in Read, not an error
+--      (Try_Read rejects it on both backends);
 --    * mbedtls_ssl_set_hostname covers IP literals too (iPAddress
 --      SANs), so there is no separate IP-SAN path;
 --    * no default trust with CA_Path = "";
@@ -94,12 +95,15 @@ package body AHT.Transport.TLS is
       Coord      : AHT.TLS_Sync.Coordinator_Type;
 
       Engine_Dead  : Boolean := False;
-      Clean_EOF    : Boolean := False;
-      --  Try_Read's authenticated EOF latch; blocking Read is unchanged.
       Death_Reason : AHT.Bytes.Buffer;
       --  Guarded by SSL_Lock. Latched with the reason on a
       --  session-fatal error, so operations rejected afterwards
       --  report what killed the session.
+      Close_Notified : Boolean := False;
+      --  Guarded by SSL_Lock. mbedTLS reports the peer's close_notify
+      --  once and then reads on to the TCP EOF behind it, which
+      --  Try_Read must not mistake for truncation; this remembers the
+      --  authenticated close so later Try_Read calls repeat it.
    end record;
 
    procedure Free_TCP is new Ada.Unchecked_Deallocation
@@ -384,6 +388,55 @@ package body AHT.Transport.TLS is
       Check_Abort (St, Epoch0, Where);
    end Feed;
 
+   --  Feed without waiting, for Try_Read: one TCP.Try_Read under the
+   --  feeder claim. Fed is False when the socket had nothing or when
+   --  the writer task holds the claim; its TCP.Read is about to deliver
+   --  the bytes into the queue, so Try_Read reports Would_Block and
+   --  finds them on its next call rather than parking on the latch.
+   procedure Try_Feed
+     (St  : Backend_State_Access;
+      Fed : out Boolean)
+   is
+      Granted : Boolean;
+   begin
+      Fed := False;
+      St.Coord.Try_Claim_Or_Arm (Granted);
+      if not Granted then
+         St.Coord.Disarm;
+         return;
+      end if;
+
+      begin
+         declare
+            Buf    : AHT.Bytes.Byte_Array (1 .. Chunk_Max);
+            Last   : Natural;
+            Status : AHT.Transport.TCP.Try_Read_Status;
+         begin
+            St.TCP.Try_Read (Buf, Last, Status);
+            case Status is
+               when AHT.Transport.TCP.Would_Block =>
+                  null;
+               when AHT.Transport.TCP.Peer_Closed =>
+                  St.SSL_Lock.Seize;
+                  St.IO.In_EOF := True;
+                  St.SSL_Lock.Release;
+                  St.Coord.Latch_EOF;
+                  Fed := True;
+               when AHT.Transport.TCP.Data_Ready =>
+                  St.SSL_Lock.Seize;
+                  St.IO.In_Data.Append (Buf (1 .. Last));
+                  St.SSL_Lock.Release;
+                  Fed := True;
+            end case;
+         end;
+      exception
+         when others =>
+            St.Coord.Release_Feeder;
+            raise;
+      end;
+      St.Coord.Release_Feeder;
+   end Try_Feed;
+
    ---------------------------------------------------------------
    --  Phase A: one engine call under SSL_Lock
    ---------------------------------------------------------------
@@ -455,8 +508,11 @@ package body AHT.Transport.TLS is
    --  Connect
    ---------------------------------------------------------------
 
-   --  Free complete or partially initialized state without TLS output.
-   --  The caller must have exclusive use of the transport.
+   --  Release everything allocated without touching the wire: the
+   --  cleanup of a failed Connect (leaving the object retryable) and
+   --  the whole of Abortive_Close. Caller guarantees no other task is
+   --  inside an operation on this transport. Idempotent (it nulls
+   --  Self.State).
    procedure Release_State (Self : in out TLS_Transport) is
       St : Backend_State_Access renames Self.State;
    begin
@@ -775,91 +831,90 @@ package body AHT.Transport.TLS is
    --  Read / Write
    ---------------------------------------------------------------
 
+   --  Read's loop with the waits taken out: at most two engine calls,
+   --  one on what the inbound queue already holds and, if that wanted
+   --  more, one after a single non-blocking feed. mbedtls_ssl_read
+   --  itself steps over the control records queued ahead of
+   --  application data, so Would_Block means no complete application
+   --  record is buffered. Ciphertext the call queues for output is
+   --  left for the next draining operation (Send_CB never pushes back,
+   --  so WANT_WRITE is not expected; it reads as Would_Block). Unlike
+   --  Read, the stream ending without close_notify (Ret = 0 /
+   --  CONN_EOF) is an error here: Peer_Closed must mean an
+   --  authenticated close on both backends.
    procedure Try_Read
-     (Self : in out TLS_Transport;
-      Data : out AHT.Bytes.Byte_Array;
-      Last : out Natural;
-      Status : out Read_Status)
+     (Self   : in out TLS_Transport;
+      Data   : out AHT.Bytes.Byte_Array;
+      Last   : out Natural;
+      Status : out Try_Read_Status)
    is
-      St : constant Backend_State_Access := Self.State;
-      Buf : AHT.Bytes.Byte_Array (1 .. 16_384);
-      Got : Natural;
-      TCP_Status : AHT.Transport.TCP.Read_Status;
-      Ret : C.int;
-      Pending : Natural;
-
-      procedure Try_Drain (Empty : out Boolean) is
-         N : constant Natural := Natural'Min (St.IO.Out_Data.Length, 16_384);
-         Sent : Natural;
-      begin
-         if N > 0 then
-            St.TCP.Try_Write (St.IO.Out_Data.To_Array (1, N), Sent);
-            if Sent > 0 then
-               --  Keep the unsent suffix in wire order.
-               if Sent = St.IO.Out_Data.Length then
-                  St.IO.Out_Data.Clear;
-               else
-                  St.IO.Out_Data.Set
-                    (St.IO.Out_Data.To_Array (Sent + 1, St.IO.Out_Data.Length));
-               end if;
-            end if;
-         end if;
-         Empty := St.IO.Out_Data.Is_Empty;
-      end Try_Drain;
-
-      Empty : Boolean;
+      St : Backend_State_Access;
    begin
-      Last := 0;
-      Status := Idle;
-      if not Live (Self) then
-         raise Transport_Error with "TLS try-read on closed transport";
-      end if;
+      Last   := 0;
+      Status := Would_Block;
       if Data'Length = 0 then
          return;
       end if;
-      if St.Clean_EOF then
+      if not Live (Self) then
+         raise AHT.Transport.Transport_Error
+           with "TLS read on closed transport";
+      end if;
+      St := Self.State;
+
+      St.SSL_Lock.Seize;
+      if St.Close_Notified then
+         St.SSL_Lock.Release;
          Status := Peer_Closed;
          return;
       end if;
-      for Step in 1 .. 2 loop
-         Engine_Call
-           (St, Op_Read, Data'Address,
-            C.size_t (Natural'Min (Data'Length, 16_384)),
-            Ada.Real_Time.Time_Last, St.Coord.Abort_Epoch,
-            "TLS try-read", Ret, Pending);
-         Try_Drain (Empty);
-         if Ret > 0 then
-            Last := Data'First + Natural (Ret) - 1;
-            Status := Data_Ready;
-            return;
-         elsif Ret = M.ERR_PEER_CLOSE_NOTIFY then
-            St.Clean_EOF := True;
-            Status := Peer_Closed;
-            return;
-         elsif Ret = 0 or else Ret = M.ERR_CONN_EOF then
-            raise TLS_Error with "TLS try-read: truncated TLS stream";
-         elsif Ret /= M.ERR_WANT_READ and then Ret /= M.ERR_WANT_WRITE then
-            Raise_From_Code (Ret, "TLS try-read");
-         end if;
-         if Step = 2 or else not Empty or else Ret = M.ERR_WANT_WRITE then
-            return;
-         end if;
-         St.TCP.Try_Read (Buf, Got, TCP_Status);
-         case TCP_Status is
-            when AHT.Transport.TCP.Idle => return;
-            when AHT.Transport.TCP.Peer_Closed =>
-               St.IO.In_EOF := True;
-               St.Coord.Latch_EOF;
-            when AHT.Transport.TCP.Data_Ready =>
-               St.IO.In_Data.Append (Buf (1 .. Got));
-         end case;
-      end loop;
-   exception
-      when others =>
-         if St /= null then
-            Drop_Connection (St);
-         end if;
-         raise;
+      St.SSL_Lock.Release;
+
+      declare
+         Epoch0  : constant Epoch_Type := St.Coord.Abort_Epoch;
+         Ret     : C.int;
+         Pending : Natural;
+         Fed     : Boolean := False;
+      begin
+         loop
+            Engine_Call
+              (St, Op_Read, Data'Address, C.size_t (Data'Length),
+               Ada.Real_Time.Time_Last, Epoch0, "TLS try-read",
+               Ret, Pending);
+
+            if Ret > 0 then
+               --  As in Read: a fatal latched by the writer forbids
+               --  reporting success on this session.
+               if St.Coord.Fatal then
+                  raise TLS_Error
+                    with "TLS try-read: session failed concurrently";
+               end if;
+               Last   := Data'First + Natural (Ret) - 1;
+               Status := Data_Ready;
+               return;
+            elsif Ret = M.ERR_PEER_CLOSE_NOTIFY then
+               St.SSL_Lock.Seize;
+               St.Close_Notified := True;
+               St.SSL_Lock.Release;
+               Status := Peer_Closed;
+               return;
+            elsif Ret = 0 or else Ret = M.ERR_CONN_EOF then
+               Latch_Engine_Dead
+                 (St, "TLS try-read: stream ended without close_notify");
+               Drop_Connection (St);
+               raise TLS_Error
+                 with "TLS try-read: stream ended without close_notify";
+            elsif Ret = M.ERR_WANT_READ then
+               exit when Fed;
+               Try_Feed (St, Fed);
+               exit when not Fed;
+            elsif Ret = M.ERR_WANT_WRITE then
+               exit;  --  the next draining operation ships it
+            else
+               Drop_Connection (St);
+               Raise_From_Code (Ret, "TLS try-read");
+            end if;
+         end loop;
+      end;
    end Try_Read;
 
    overriding procedure Read
@@ -1009,14 +1064,18 @@ package body AHT.Transport.TLS is
    ---------------------------------------------------------------
 
    overriding procedure Close (Self : in out TLS_Transport) is
-      St     : constant Backend_State_Access := Self.State;
+      St     : Backend_State_Access := Self.State;
       Ignore : C.int;
    begin
       if St = null then
          Self.Connected := False;
          return;
       end if;
-      --  Do not send close_notify after a fatal I/O error.
+      Self.State := null;
+
+      --  Block 1 (best-effort): close_notify + its drain, skipped for
+      --  a session that died fatally. Close is single-threaded, so
+      --  plain state reads are fine.
       begin
          if Self.Connected
            and then not St.Coord.Fatal
@@ -1047,24 +1106,49 @@ package body AHT.Transport.TLS is
       end;
       Self.Connected := False;
 
-      --  A failed close_notify or drain must not skip resource cleanup.
-      Release_State (Self);
+      --  Block 2 (best-effort): the socket.
+      begin
+         St.TCP.Close;
+      exception
+         when others => null;
+      end;
+
+      --  Block 3 (unconditional): every free runs even if the blocks
+      --  above failed; Finalize only swallows exceptions after Close
+      --  has unwound, so Close itself must never skip cleanup.
+      if St.SSL /= System.Null_Address then
+         AHT.Mbedtls.Glue.SSL_Free (St.SSL);
+         St.SSL := System.Null_Address;
+      end if;
+      if St.Conf /= System.Null_Address then
+         AHT.Mbedtls.Glue.Config_Free (St.Conf);
+         St.Conf := System.Null_Address;
+      end if;
+      if St.CA_Cert /= System.Null_Address then
+         AHT.Mbedtls.Glue.X509_CRT_Free (St.CA_Cert);
+         St.CA_Cert := System.Null_Address;
+      end if;
+      if St.CTR_DRBG /= System.Null_Address then
+         AHT.Mbedtls.Glue.CTR_DRBG_Free (St.CTR_DRBG);
+         St.CTR_DRBG := System.Null_Address;
+      end if;
+      if St.Entropy /= System.Null_Address then
+         AHT.Mbedtls.Glue.Entropy_Free (St.Entropy);
+         St.Entropy := System.Null_Address;
+      end if;
+      Free_TCP (St.TCP);
+      Free_State (St);
    end Close;
 
    procedure Abortive_Close (Self : in out TLS_Transport) is
    begin
+      --  Close without its block 1: no close_notify, no drain, so no
+      --  TCP.Write that could park on a full send buffer. Release_State
+      --  does the rest (TCP.Close and every context free) and nulls
+      --  State, which makes a second call a no-op.
       Self.Connected := False;
       Release_State (Self);
-      Self.Has_Read_Deadline := False;
-      Self.Has_Write_Deadline := False;
    end Abortive_Close;
-
-   overriding procedure Finalize (Self : in out TLS_Transport) is
-   begin
-      Abortive_Close (Self);
-   exception
-      when others => null;
-   end Finalize;
 
    overriding function Is_Connected (Self : TLS_Transport) return Boolean is
      (Live (Self));

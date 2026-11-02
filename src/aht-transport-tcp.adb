@@ -668,6 +668,44 @@ package body AHT.Transport.TCP is
         (Self, Data, Last, Deadline /= Time_Last, Deadline);
    end Read;
 
+   procedure Try_Read
+     (Self   : in out TCP_Transport;
+      Data   : out AHT.Bytes.Byte_Array;
+      Last   : out Natural;
+      Status : out Try_Read_Status)
+   is
+      Buffer   : Stream_Element_Array
+        (1 .. Stream_Element_Offset (Data'Length));
+      Got_Last : Stream_Element_Offset;
+      Count    : Natural;
+   begin
+      Last   := 0;
+      Status := Would_Block;
+      if Data'Length = 0 then
+         return;
+      end if;
+      if not Self.Connected then
+         raise Transport_Error with "TCP read on closed transport";
+      end if;
+      --  Connect put the socket in non-blocking mode, so this is the
+      --  receive Read_Bounded performs after its selector wake, minus
+      --  the park: EAGAIN is the "nothing yet" answer, not an error.
+      Receive_Socket (Self.Socket, Buffer, Got_Last);
+      if Got_Last < Buffer'First then
+         Status := Peer_Closed;
+      else
+         From_SEA (Buffer, Buffer'First, Got_Last, Data, Count);
+         Last   := Data'First + Count - 1;
+         Status := Data_Ready;
+      end if;
+   exception
+      when E : Socket_Error =>
+         if Resolve_Exception (E) /= Resource_Temporarily_Unavailable then
+            raise Transport_Error with
+              "TCP read failed: " & Ada.Exceptions.Exception_Message (E);
+         end if;
+   end Try_Read;
+
    overriding procedure Close (Self : in out TCP_Transport) is
    begin
       --  Guard on the FD, not Connected: a poisoned transport has already
@@ -711,74 +749,6 @@ package body AHT.Transport.TCP is
       Self.Has_Deadline := False;
       Self.Has_Write_Deadline := False;
    end Close;
-
-   procedure Try_Read
-     (Self : in out TCP_Transport;
-      Data : out AHT.Bytes.Byte_Array;
-      Last : out Natural;
-      Status : out Read_Status)
-   is
-      Buffer : Stream_Element_Array
-        (1 .. Stream_Element_Offset (Natural'Min (Data'Length, 16_384)));
-      Got : Stream_Element_Offset;
-      Count : Natural;
-   begin
-      Last := 0;
-      Status := Idle;
-      if not Self.Connected then
-         raise Transport_Error with "TCP try-read on closed transport";
-      end if;
-      if Data'Length = 0 then
-         return;
-      end if;
-      Receive_Socket (Self.Socket, Buffer, Got);
-      if Got < Buffer'First then
-         Status := Peer_Closed;
-      else
-         From_SEA (Buffer, Buffer'First, Got, Data, Count);
-         Last := Data'First + Count - 1;
-         Status := Data_Ready;
-      end if;
-   exception
-      when E : Socket_Error =>
-         if Resolve_Exception (E) /= Resource_Temporarily_Unavailable then
-            Poison (Self);
-            raise Transport_Error with
-              "TCP try-read failed: " & Ada.Exceptions.Exception_Message (E);
-         end if;
-   end Try_Read;
-
-   procedure Try_Write
-     (Self : in out TCP_Transport;
-      Data : AHT.Bytes.Byte_Array;
-      Sent : out Natural)
-   is
-      N : constant Natural := Natural'Min (Data'Length, 16_384);
-      Buffer : Stream_Element_Array (1 .. Stream_Element_Offset (N));
-      Last : Stream_Element_Offset;
-   begin
-      Sent := 0;
-      if not Self.Connected then
-         raise Transport_Error with "TCP try-write on closed transport";
-      end if;
-      if N = 0 then
-         return;
-      end if;
-      To_SEA (Data (Data'First .. Data'First + N - 1), Buffer);
-      Send_Socket (Self.Socket, Buffer, Last);
-      if Last < Buffer'First then
-         Poison (Self);
-         raise Transport_Error with "TCP try-write made no progress";
-      end if;
-      Sent := Natural (Last);
-   exception
-      when E : Socket_Error =>
-         if Resolve_Exception (E) /= Resource_Temporarily_Unavailable then
-            Poison (Self);
-            raise Transport_Error with
-              "TCP try-write failed: " & Ada.Exceptions.Exception_Message (E);
-         end if;
-   end Try_Write;
 
    overriding function Is_Connected (Self : TCP_Transport) return Boolean is
      (Self.Connected);

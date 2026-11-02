@@ -63,54 +63,6 @@ The openssl backend requires OpenSSL 3: the bindings import 3.0-only
 symbols (a link-time failure on LibreSSL or 1.1), and `Connect`
 checks `OPENSSL_version_major >= 3` at runtime.
 
-## Nonblocking reads and abortive cleanup
-
-`TLS.Try_Read (Data, Last, Status)` is an **exclusive-use** event-loop
-operation: do not run any other operation on that transport concurrently.
-It does not change the existing blocking `Read` or its reader/writer
-concurrency contract. It ignores the compound read/write deadlines.
-
-* `Data_Ready`: `Last` is the index of the last plaintext byte in `Data`.
-* `Idle`: no plaintext yet, including incomplete records or output
-  backpressure. `Last = 0`; call again on a later event-loop turn.
-* `Peer_Closed`: authenticated TLS `close_notify`, `Last = 0`.
-* Abrupt TCP EOF raises `TLS_Error` in this new operation on **both**
-  backends. The legacy blocking mbedTLS `Read` policy is unchanged.
-* An empty destination returns `Idle` without engine/socket work.
-
-Each invocation makes at most **two TLS read calls**, capped at 16 KiB
-plaintext each, **one nonblocking socket receive** capped at 16 KiB, and
-**two nonblocking output attempts**, each capped at 16 KiB. No selectors,
-positive timeouts, receiving tasks, or record-completion waits are used.
-These are work bounds, not a hard realtime scheduling guarantee. Buffered
-plaintext is attempted before reading the socket. OpenSSL's AUTO_RETRY
-mode is temporarily disabled for each nonblocking engine read, preventing
-an internal retry loop across control records; the original mode is
-restored so blocking calls retain their behavior. Buffered ciphertext is
-processed before receiving more. Unsent TLS output stays queued, in order;
-switching back to blocking `Read`/`Write` drains the same queue.
-
-`TCP.Try_Read` and `TCP.Try_Write` expose the corresponding single-syscall
-nonblocking primitives (16 KiB maximum). `Try_Write` returns a **count**
-of accepted bytes, possibly zero, rather than the all-or-error `Write`
-contract. The caller retains the unsent suffix. Neither consults deadlines
-or waits on selectors. Fatal socket errors poison the transport.
-
-`TLS.Abortive_Close` discards TLS state and releases the TCP socket and
-selectors without trying to send `close_notify`. It is idempotent, even
-after fatal I/O, but **does not promise graceful TLS shutdown**. No other
-operation may be active on the transport during cleanup. Automatic TLS
-finalization uses this abortive path so scope exit does not wait for
-network capacity; explicit `TLS.Close` retains its existing best-effort
-graceful semantics and may still wait for output capacity.
-
-Certificate-chain validation, DNS/IP identity checks, SNI, trust loading,
-and protocol restrictions are unchanged: the new APIs do not bypass
-`Connect` or introduce a verification fallback.
-
-Linux real-socket controls and reproduction instructions are in
-[`tests/nonblocking/README.md`](../tests/nonblocking/README.md).
-
 ## Behavioral differences
 
 The public contract (`aht-transport-tls.ads`) is shared. The two
@@ -134,7 +86,9 @@ backends differ in these policies:
 - **Abrupt TCP EOF (no close_notify).** openssl raises `TLS_Error`:
   HTTP supports EOF-framed bodies, so a silent truncation would be a
   data-integrity hole (`SSL_OP_IGNORE_UNEXPECTED_EOF` is never set).
-  mbedtls reports a clean EOF (`Last = 0`).
+  mbedtls reports a clean EOF (`Last = 0`) from `Read`. `Try_Read`
+  raises `TLS_Error` on both: its `Peer_Closed` is always an
+  authenticated close_notify.
 - **Protocol versions.** openssl: TLS 1.2 minimum, TLS 1.3 active,
   renegotiation disabled. mbedtls: TLS 1.2 only;
   `MBEDTLS_SSL_PROTO_TLS1_3` is compiled out (see *Configuration of
@@ -219,7 +173,21 @@ promptly, and all network waiting happens in Ada outside the library:
   (skipped after a fatal error) and `TCP.Close` run in separate
   best-effort blocks, then every context is freed unconditionally.
   `Close` is idempotent, and a failed `Connect` has already released
-  everything.
+  everything. **Abortive_Close** is the same without the first block:
+  it releases the same state as a failed `Connect` does and never
+  writes to the socket, so it cannot wait on a peer that has stopped
+  reading. The inherited `Finalize` still dispatches to `Close`.
+- **Try_Read** is the read loop with the waits removed: one engine
+  call on the buffered ciphertext and, if that wanted more, one
+  `TCP.Try_Read` (a single receive on the non-blocking socket, no
+  selector park) under the feeder claim, then one more engine call.
+  When the writer task holds the claim its `TCP.Read` is about to
+  fill the queue, so `Try_Read` reports `Would_Block` instead of
+  parking. Ciphertext the engine queues during the call (a KeyUpdate
+  reply, an alert) stays in the output queue for the next `Write`,
+  `Read` or `Close` to drain. On mbedtls the peer's close_notify is
+  remembered in `Close_Notified`, because `mbedtls_ssl_read` reports
+  it once and then reads on to the TCP EOF behind it.
 
 The locks and coordinator live in `AHT.TLS_Sync`, shared by both
 bodies and kept separate so that a test can drive the claim, arm,
@@ -379,5 +347,5 @@ because its context structs have configuration-dependent sizes
 (`csrc/mbedtls/aht_mbedtls_glue.c`). OpenSSL handles are already
 opaque pointers, so its glue (`csrc/openssl/aht_openssl_glue.c`) only
 wraps the macro-defined entry points (SNI, minimum protocol version,
-`BIO_set_mem_eof_return`, memory-BIO peek), the bounded-read mode wrapper,
-and CA-PEM loading. Macro values come from the installed headers.
+`BIO_set_mem_eof_return`) so that their ctrl numbers come from the
+installed headers.
