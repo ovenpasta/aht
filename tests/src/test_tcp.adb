@@ -1992,6 +1992,97 @@ begin
       Check_Server_Runtime ("reconnect (echo server)", Echo_RT);
    end;
 
+   --  Case 17: Try_Read bounds each receive even with a larger Data.
+   --  Check the byte count and contents, then the idle and EOF results.
+   declare
+      use type AHT.Bytes.Octet;
+      use type AHT.Transport.TCP.Try_Read_Status;
+      Listener : Socket_Type := No_Socket;
+      Peer     : Socket_Type := No_Socket;
+      From     : Sock_Addr_Type;
+      Bind_To  : Sock_Addr_Type;
+      T        : AHT.Transport.TCP.TCP_Transport;
+      Receive_Max : constant := 16_384;
+      Total    : constant := 3 * Receive_Max + 7;
+      Sent     : constant Stream_Element_Array
+        (1 .. Stream_Element_Offset (Total)) := [others => 16#42#];
+      Sent_Last : Stream_Element_Offset;
+      Big      : Byte_Array_Access :=
+        new AHT.Bytes.Byte_Array'(7 .. 2 * Total + 6 => 0);
+      Last     : Natural;
+      Status   : AHT.Transport.TCP.Try_Read_Status;
+      Got      : Natural := 0;
+      Calls    : Natural := 0;
+   begin
+      Create_Socket (Listener, Family_Inet, Socket_Stream);
+      Bind_To.Addr := Inet_Addr ("127.0.0.1");
+      Bind_To.Port := 0;
+      Bind_Socket (Listener, Bind_To);
+      Listen_Socket (Listener, 1);
+      T.Connect
+        ("127.0.0.1",
+         AHT.URL.Port_Number (Get_Socket_Name (Listener).Port));
+      Accept_Socket (Listener, Peer, From);
+
+      T.Try_Read (Big.all, Last, Status);
+      if Status /= AHT.Transport.TCP.Would_Block or else Last /= 0 then
+         Fail ("try-read: idle peer gave " & Status'Image & Last'Image);
+      end if;
+
+      Send_Socket (Peer, Sent, Sent_Last);
+      if Sent_Last /= Sent'Last then
+         Fail ("try-read: short send" & Sent_Last'Image);
+      end if;
+      for I in 1 .. 1000 loop
+         T.Try_Read (Big.all, Last, Status);
+         case Status is
+            when AHT.Transport.TCP.Data_Ready =>
+               Calls := Calls + 1;
+               if Last - Big'First + 1 > Receive_Max then
+                  Fail ("try-read: receive exceeded 16 KiB");
+               end if;
+               for B of Big (Big'First .. Last) loop
+                  if B /= 16#42# then
+                     Fail ("try-read: data mangled");
+                     exit;
+                  end if;
+               end loop;
+               Got := Got + Last - Big'First + 1;
+            when AHT.Transport.TCP.Would_Block =>
+               delay 0.005;
+            when AHT.Transport.TCP.Peer_Closed =>
+               Fail ("try-read: Peer_Closed before the FIN");
+               exit;
+         end case;
+         exit when Got >= Total;
+      end loop;
+      if Got /= Total then
+         Fail ("try-read: got" & Got'Image & " of" & Total'Image
+               & " bytes in" & Calls'Image & " calls");
+      end if;
+
+      Close_Peer_Quietly (Peer);
+      for I in 1 .. 1000 loop
+         T.Try_Read (Big.all, Last, Status);
+         exit when Status /= AHT.Transport.TCP.Would_Block;
+         delay 0.005;
+      end loop;
+      if Status /= AHT.Transport.TCP.Peer_Closed or else Last /= 0 then
+         Fail ("try-read: after the FIN got " & Status'Image & Last'Image);
+      end if;
+      Close_Quietly (T);
+      Close_Peer_Quietly (Listener);
+      Free (Big);
+   exception
+      when E : others =>
+         Fail ("try-read: " & Ada.Exceptions.Exception_Name (E) & " — "
+               & Ada.Exceptions.Exception_Message (E));
+         Close_Quietly (T);
+         Close_Peer_Quietly (Peer);
+         Close_Peer_Quietly (Listener);
+         Free (Big);
+   end;
+
    if Failures = 0 then
       Put_Line ("test_tcp: OK");
       Ada.Command_Line.Set_Exit_Status (0);

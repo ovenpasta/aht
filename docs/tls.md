@@ -86,7 +86,9 @@ backends differ in these policies:
 - **Abrupt TCP EOF (no close_notify).** openssl raises `TLS_Error`:
   HTTP supports EOF-framed bodies, so a silent truncation would be a
   data-integrity hole (`SSL_OP_IGNORE_UNEXPECTED_EOF` is never set).
-  mbedtls reports a clean EOF (`Last = 0`).
+  mbedtls reports a clean EOF (`Last = 0`) from `Read`. `Try_Read`
+  raises `TLS_Error` on both: its `Peer_Closed` is always an
+  authenticated close_notify.
 - **Protocol versions.** openssl: TLS 1.2 minimum, TLS 1.3 active,
   renegotiation disabled. mbedtls: TLS 1.2 only;
   `MBEDTLS_SSL_PROTO_TLS1_3` is compiled out (see *Configuration of
@@ -171,7 +173,29 @@ promptly, and all network waiting happens in Ada outside the library:
   (skipped after a fatal error) and `TCP.Close` run in separate
   best-effort blocks, then every context is freed unconditionally.
   `Close` is idempotent, and a failed `Connect` has already released
-  everything.
+  everything. **Abortive_Close** is the same without the first block:
+  it releases the same state as a failed `Connect` does and never
+  writes to the socket, so it cannot wait on a peer that has stopped
+  reading. The inherited `Finalize` still dispatches to `Close`.
+- **Try_Read** is the read loop with the waits removed: one engine
+  call on the buffered ciphertext and, if that wanted more, one
+  `TCP.Try_Read` (one receive of at most 16 KiB, no selector park)
+  under the feeder claim, then one more engine call. It requires
+  exclusive I/O ownership, including the drain-to-wait interval. A
+  concurrent writer could consume socket data and feed the TLS queue
+  after `Try_Read` returns `Would_Block`, leaving plaintext available
+  without socket readiness. The one-reader-plus-one-writer contract
+  still applies to blocking `Read` and `Write`.
+  Ciphertext queued during `Try_Read` stays pending until a nonempty
+  `Write` or `Read` drains it, or `Close` attempts to. TLS 1.3 KeyUpdate
+  replies can precede the next application write, but a TLS 1.2
+  renegotiation refusal can leave a peer waiting for its alert.
+  `Try_Read` alone does not guarantee output progress; callers needing
+  prompt control replies must use the blocking operations and their
+  deadlines. On mbedtls `Engine_Call` remembers close_notify from
+  either read operation in `Close_Notified`: `mbedtls_ssl_read` reports
+  it once, then reads on to TCP EOF. Blocking `Read` still returns
+  `Last = 0` for either end condition.
 
 The locks and coordinator live in `AHT.TLS_Sync`, shared by both
 bodies and kept separate so that a test can drive the claim, arm,

@@ -668,6 +668,45 @@ package body AHT.Transport.TCP is
         (Self, Data, Last, Deadline /= Time_Last, Deadline);
    end Read;
 
+   procedure Try_Read
+     (Self   : in out TCP_Transport;
+      Data   : out AHT.Bytes.Byte_Array;
+      Last   : out Natural;
+      Status : out Try_Read_Status)
+   is
+      Try_Read_Max : constant := 16_384;
+      Buffer   : Stream_Element_Array
+        (1 .. Stream_Element_Offset (Natural'Min (Data'Length, Try_Read_Max)));
+      Got_Last : Stream_Element_Offset;
+      Count    : Natural;
+   begin
+      Last   := 0;
+      Status := Would_Block;
+      if Data'Length = 0 then
+         return;
+      end if;
+      if not Self.Connected then
+         raise Transport_Error with "TCP read on closed transport";
+      end if;
+      --  Connect put the socket in non-blocking mode, so this is the
+      --  receive Read_Bounded performs after its selector wake, minus
+      --  the park: EAGAIN is the "nothing yet" answer, not an error.
+      Receive_Socket (Self.Socket, Buffer, Got_Last);
+      if Got_Last < Buffer'First then
+         Status := Peer_Closed;
+      else
+         From_SEA (Buffer, Buffer'First, Got_Last, Data, Count);
+         Last   := Data'First + Count - 1;
+         Status := Data_Ready;
+      end if;
+   exception
+      when E : Socket_Error =>
+         if Resolve_Exception (E) /= Resource_Temporarily_Unavailable then
+            raise Transport_Error with
+              "TCP read failed: " & Ada.Exceptions.Exception_Message (E);
+         end if;
+   end Try_Read;
+
    overriding procedure Close (Self : in out TCP_Transport) is
    begin
       --  Guard on the FD, not Connected: a poisoned transport has already

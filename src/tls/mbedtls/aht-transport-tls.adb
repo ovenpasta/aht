@@ -27,7 +27,8 @@ with AHT.Transport.TCP;
 --  mbedTLS backend. Same engine as the openssl body; differences:
 --    * the BIO callbacks move bytes to and from two in-memory queues
 --      (Engine_IO) instead of memory BIOs;
---    * an abrupt TCP EOF is a clean Last = 0, not an error;
+--    * an abrupt TCP EOF is a clean Last = 0 in Read, not an error
+--      (Try_Read rejects it on both backends);
 --    * mbedtls_ssl_set_hostname covers IP literals too (iPAddress
 --      SANs), so there is no separate IP-SAN path;
 --    * no default trust with CA_Path = "";
@@ -98,6 +99,11 @@ package body AHT.Transport.TLS is
       --  Guarded by SSL_Lock. Latched with the reason on a
       --  session-fatal error, so operations rejected afterwards
       --  report what killed the session.
+      Close_Notified : Boolean := False;
+      --  Guarded by SSL_Lock. mbedTLS reports the peer's close_notify
+      --  once and then reads on to the TCP EOF behind it, which
+      --  Try_Read must not mistake for truncation; Engine_Call latches
+      --  it on whichever read saw it so later Try_Read calls repeat it.
    end record;
 
    procedure Free_TCP is new Ada.Unchecked_Deallocation
@@ -382,6 +388,52 @@ package body AHT.Transport.TLS is
       Check_Abort (St, Epoch0, Where);
    end Feed;
 
+   --  One TCP.Try_Read under the feeder claim; never park on the latch.
+   --  Try_Read's exclusive-I/O precondition keeps the claim uncontended.
+   procedure Try_Feed
+     (St  : Backend_State_Access;
+      Fed : out Boolean)
+   is
+      Granted : Boolean;
+   begin
+      Fed := False;
+      St.Coord.Try_Claim_Or_Arm (Granted);
+      if not Granted then
+         St.Coord.Disarm;
+         return;
+      end if;
+
+      begin
+         declare
+            Buf    : AHT.Bytes.Byte_Array (1 .. Chunk_Max);
+            Last   : Natural;
+            Status : AHT.Transport.TCP.Try_Read_Status;
+         begin
+            St.TCP.Try_Read (Buf, Last, Status);
+            case Status is
+               when AHT.Transport.TCP.Would_Block =>
+                  null;
+               when AHT.Transport.TCP.Peer_Closed =>
+                  St.SSL_Lock.Seize;
+                  St.IO.In_EOF := True;
+                  St.SSL_Lock.Release;
+                  St.Coord.Latch_EOF;
+                  Fed := True;
+               when AHT.Transport.TCP.Data_Ready =>
+                  St.SSL_Lock.Seize;
+                  St.IO.In_Data.Append (Buf (1 .. Last));
+                  St.SSL_Lock.Release;
+                  Fed := True;
+            end case;
+         end;
+      exception
+         when others =>
+            St.Coord.Release_Feeder;
+            raise;
+      end;
+      St.Coord.Release_Feeder;
+   end Try_Feed;
+
    ---------------------------------------------------------------
    --  Phase A: one engine call under SSL_Lock
    ---------------------------------------------------------------
@@ -420,6 +472,11 @@ package body AHT.Transport.TLS is
          when Op_Write => Ret := M.Write (St.SSL, Buf, Len);
       end case;
 
+      --  Remember close_notify from either read operation.
+      if Op = Op_Read and then Ret = M.ERR_PEER_CLOSE_NOTIFY then
+         St.Close_Notified := True;
+      end if;
+
       --  A negative code that is not one of the "call me again" or
       --  clean-shutdown ones ends the session for good.
       if Ret < 0
@@ -453,9 +510,11 @@ package body AHT.Transport.TLS is
    --  Connect
    ---------------------------------------------------------------
 
-   --  Release everything a failed Connect allocated, leaving the
-   --  object retryable. Single-task: no reader exists before Connect
-   --  returns. Idempotent (it nulls Self.State).
+   --  Release everything allocated without touching the wire: the
+   --  cleanup of a failed Connect (leaving the object retryable) and
+   --  the whole of Abortive_Close. Caller guarantees no other task is
+   --  inside an operation on this transport. Idempotent (it nulls
+   --  Self.State).
    procedure Release_State (Self : in out TLS_Transport) is
       St : Backend_State_Access renames Self.State;
    begin
@@ -774,6 +833,89 @@ package body AHT.Transport.TLS is
    --  Read / Write
    ---------------------------------------------------------------
 
+   --  Read's loop with the waits taken out: at most two engine calls,
+   --  one on what the inbound queue already holds and, if that wanted
+   --  more, one after a single non-blocking feed. mbedtls_ssl_read
+   --  itself steps over the control records queued ahead of
+   --  application data, so Would_Block means no complete application
+   --  record is buffered. Ciphertext the call queues for output is
+   --  left for the next draining operation (Send_CB never pushes back,
+   --  so WANT_WRITE is not expected; it reads as Would_Block). Unlike
+   --  Read, the stream ending without close_notify (Ret = 0 /
+   --  CONN_EOF) is an error here: Peer_Closed must mean an
+   --  authenticated close on both backends.
+   procedure Try_Read
+     (Self   : in out TLS_Transport;
+      Data   : out AHT.Bytes.Byte_Array;
+      Last   : out Natural;
+      Status : out Try_Read_Status)
+   is
+      St : Backend_State_Access;
+   begin
+      Last   := 0;
+      Status := Would_Block;
+      if Data'Length = 0 then
+         return;
+      end if;
+      if not Live (Self) then
+         raise AHT.Transport.Transport_Error
+           with "TLS read on closed transport";
+      end if;
+      St := Self.State;
+
+      St.SSL_Lock.Seize;
+      if St.Close_Notified then
+         St.SSL_Lock.Release;
+         Status := Peer_Closed;
+         return;
+      end if;
+      St.SSL_Lock.Release;
+
+      declare
+         Epoch0  : constant Epoch_Type := St.Coord.Abort_Epoch;
+         Ret     : C.int;
+         Pending : Natural;
+         Fed     : Boolean := False;
+      begin
+         loop
+            Engine_Call
+              (St, Op_Read, Data'Address, C.size_t (Data'Length),
+               Ada.Real_Time.Time_Last, Epoch0, "TLS try-read",
+               Ret, Pending);
+
+            if Ret > 0 then
+               --  As in Read: a fatal latched by the writer forbids
+               --  reporting success on this session.
+               if St.Coord.Fatal then
+                  raise TLS_Error
+                    with "TLS try-read: session failed concurrently";
+               end if;
+               Last   := Data'First + Natural (Ret) - 1;
+               Status := Data_Ready;
+               return;
+            elsif Ret = M.ERR_PEER_CLOSE_NOTIFY then
+               Status := Peer_Closed;  --  Engine_Call latched it
+               return;
+            elsif Ret = 0 or else Ret = M.ERR_CONN_EOF then
+               Latch_Engine_Dead
+                 (St, "TLS try-read: stream ended without close_notify");
+               Drop_Connection (St);
+               raise TLS_Error
+                 with "TLS try-read: stream ended without close_notify";
+            elsif Ret = M.ERR_WANT_READ then
+               exit when Fed;
+               Try_Feed (St, Fed);
+               exit when not Fed;
+            elsif Ret = M.ERR_WANT_WRITE then
+               exit;  --  the next draining operation ships it
+            else
+               Drop_Connection (St);
+               Raise_From_Code (Ret, "TLS try-read");
+            end if;
+         end loop;
+      end;
+   end Try_Read;
+
    overriding procedure Read
      (Self : in out TLS_Transport;
       Data : out AHT.Bytes.Byte_Array;
@@ -996,6 +1138,16 @@ package body AHT.Transport.TLS is
       Free_TCP (St.TCP);
       Free_State (St);
    end Close;
+
+   procedure Abortive_Close (Self : in out TLS_Transport) is
+   begin
+      --  Close without its block 1: no close_notify, no drain, so no
+      --  TCP.Write that could park on a full send buffer. Release_State
+      --  does the rest (TCP.Close and every context free) and nulls
+      --  State, which makes a second call a no-op.
+      Self.Connected := False;
+      Release_State (Self);
+   end Abortive_Close;
 
    overriding function Is_Connected (Self : TLS_Transport) return Boolean is
      (Live (Self));

@@ -64,6 +64,47 @@ package AHT.Transport.TLS is
    --  two concurrent writers are not supported (the same restriction
    --  the TCP transport's single-waiter selectors impose).
 
+   type Try_Read_Status is (Would_Block, Data_Ready, Peer_Closed);
+
+   procedure Try_Read
+     (Self   : in out TLS_Transport;
+      Data   : out AHT.Bytes.Byte_Array;
+      Last   : out Natural;
+      Status : out Try_Read_Status);
+   --  Read without waiting for the network, for callers that multiplex
+   --  the connection in their own event loop. Decrypts what the engine
+   --  already holds, taking at most one non-blocking receive from the
+   --  socket when it needs more ciphertext, and returns:
+   --    Data_Ready   plaintext stored in Data, Last its last index;
+   --    Would_Block  no complete record yet (Last = 0); a partial
+   --                 record stays buffered for the next call;
+   --    Peer_Closed  the peer's close_notify (Last = 0); repeats on
+   --                 every later call.
+   --  A TCP EOF without close_notify raises TLS_Error on both
+   --  backends: Peer_Closed is only ever an authenticated close (the
+   --  mbedtls blocking Read is laxer; see docs/tls.md). Errors poison
+   --  the session as they do in Read. Empty Data: Would_Block.
+   --  One receive may carry several records while one call returns
+   --  one, so call again until Would_Block before waiting for socket
+   --  readiness. Ciphertext the engine queues while reading (a
+   --  KeyUpdate reply, an alert) is not sent here; a subsequent
+   --  nonempty Write or Read drains it, or Close attempts to. A peer
+   --  waiting for that output cannot be served by Try_Read alone.
+   --  Set_Read_Deadline and Abort_Pending do not apply.
+   --  Precondition: no concurrent Read, Try_Read or Write. Keep I/O
+   --  ownership through the drain-to-wait interval: another writer
+   --  can feed the TLS input queue without leaving the socket readable.
+   --  Blocking Read and Write retain their concurrency contract above.
+
+   procedure Abortive_Close (Self : in out TLS_Transport);
+   --  Drops the session without a close_notify: frees the backend
+   --  contexts and closes the inner TCP transport, never writing to
+   --  the socket, so it cannot wait on a peer that has stopped
+   --  reading. The peer sees a truncated stream; use Close where it
+   --  must see an authenticated end. Idempotent, also after a fatal
+   --  error and on a never-connected object. Same precondition as
+   --  Close. Does not change Close or the inherited Finalize.
+
    overriding procedure Close (Self : in out TLS_Transport);
    --  Closes: best-effort close_notify (skipped after a fatal error),
    --  then the inner TCP transport, then frees the backend contexts.

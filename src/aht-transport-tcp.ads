@@ -89,6 +89,23 @@ package AHT.Transport.TCP is
    --  fatal-write case use Poison and defer Close until the reader
    --  has exited.
 
+   type Try_Read_Status is (Would_Block, Data_Ready, Peer_Closed);
+
+   procedure Try_Read
+     (Self   : in out TCP_Transport;
+      Data   : out AHT.Bytes.Byte_Array;
+      Last   : out Natural;
+      Status : out Try_Read_Status);
+   --  One receive on the non-blocking socket, without parking on the
+   --  selector: returns at once with Would_Block when nothing is
+   --  queued, Data_Ready with Last the index of the last byte stored,
+   --  or Peer_Closed on the stream's end. Last is 0 unless Data_Ready.
+   --  Stores at most 16 KiB of a longer Data; the rest of
+   --  the socket's queue waits for the next call. Ignores
+   --  Set_Read_Deadline (there is no wait to bound) and is not
+   --  interruptible by Abort_Pending. Empty Data: Would_Block.
+   --  Occupies the reader role of the concurrency contract above.
+
    overriding function Is_Connected (Self : TCP_Transport) return Boolean;
 
    overriding procedure Set_Read_Deadline

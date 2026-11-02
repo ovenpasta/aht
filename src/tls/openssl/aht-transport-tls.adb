@@ -311,6 +311,64 @@ package body AHT.Transport.TLS is
       Check_Abort (St, Epoch0, Where);
    end Feed;
 
+   --  One TCP.Try_Read under the feeder claim; never park on the latch.
+   --  Try_Read's exclusive-I/O precondition keeps the claim uncontended.
+   procedure Try_Feed
+     (St    : Backend_State_Access;
+      Where : String;
+      Fed   : out Boolean)
+   is
+      Granted : Boolean;
+   begin
+      Fed := False;
+      St.Coord.Try_Claim_Or_Arm (Granted);
+      if not Granted then
+         St.Coord.Disarm;
+         return;
+      end if;
+
+      begin
+         declare
+            Buf    : AHT.Bytes.Byte_Array (1 .. Chunk_Max);
+            Last   : Natural;
+            Status : AHT.Transport.TCP.Try_Read_Status;
+            Ignore : C.long;
+         begin
+            St.TCP.Try_Read (Buf, Last, Status);
+            case Status is
+               when AHT.Transport.TCP.Would_Block =>
+                  null;
+               when AHT.Transport.TCP.Peer_Closed =>
+                  --  As in Feed: hard EOF on RBIO so the next engine
+                  --  call classifies the end of the stream.
+                  St.SSL_Lock.Seize;
+                  Ignore := AHT.Openssl.Glue.Set_Mem_EOF_Return (St.RBio, 0);
+                  St.SSL_Lock.Release;
+                  St.Coord.Latch_EOF;
+                  Fed := True;
+               when AHT.Transport.TCP.Data_Ready =>
+                  St.SSL_Lock.Seize;
+                  declare
+                     Wrote : constant C.int :=
+                       OBIO.Write (St.RBio, Buf'Address, C.int (Last));
+                  begin
+                     St.SSL_Lock.Release;
+                     if Wrote /= C.int (Last) then
+                        raise TLS_Error
+                          with Where & ": BIO_write to input BIO failed";
+                     end if;
+                  end;
+                  Fed := True;
+            end case;
+         end;
+      exception
+         when others =>
+            St.Coord.Release_Feeder;
+            raise;
+      end;
+      St.Coord.Release_Feeder;
+   end Try_Feed;
+
    ---------------------------------------------------------------
    --  Phase A: one engine call under SSL_Lock
    ---------------------------------------------------------------
@@ -392,9 +450,10 @@ package body AHT.Transport.TLS is
    --  Connect
    ---------------------------------------------------------------
 
-   --  Release everything a failed Connect allocated, leaving the
-   --  object retryable. Single-task: no reader exists before Connect
-   --  returns.
+   --  Release everything allocated without touching the wire: the
+   --  cleanup of a failed Connect (leaving the object retryable) and
+   --  the whole of Abortive_Close. Caller guarantees no other task is
+   --  inside an operation on this transport.
    procedure Release_State (Self : in out TLS_Transport) is
       St     : Backend_State_Access renames Self.State;
       Ignore : C.int;
@@ -763,6 +822,81 @@ package body AHT.Transport.TLS is
    --  Read / Write
    ---------------------------------------------------------------
 
+   --  Read's loop with the waits taken out: at most two engine calls,
+   --  one on what RBIO already holds and, if that wanted more, one
+   --  after a single non-blocking feed. SSL_MODE_AUTO_RETRY (OpenSSL's
+   --  default) is what makes one SSL_read step over the control
+   --  records queued ahead of application data (session tickets,
+   --  KeyUpdate), so a call returns Would_Block only when RBIO truly
+   --  holds no complete application record. Ciphertext queued in WBIO
+   --  by that engine call is left for the next draining operation; a
+   --  memory BIO never pushes back, so WANT_WRITE cannot occur.
+   procedure Try_Read
+     (Self   : in out TLS_Transport;
+      Data   : out AHT.Bytes.Byte_Array;
+      Last   : out Natural;
+      Status : out Try_Read_Status)
+   is
+      St : Backend_State_Access;
+   begin
+      Last   := 0;
+      Status := Would_Block;
+      if Data'Length = 0 then
+         return;
+      end if;
+      if not Live (Self) then
+         raise AHT.Transport.Transport_Error
+           with "TLS read on closed transport";
+      end if;
+      St := Self.State;
+
+      declare
+         Epoch0  : constant Epoch_Type := St.Coord.Abort_Epoch;
+         Ret     : C.int;
+         Class   : C.int;
+         Pending : Natural;
+         Fed     : Boolean := False;
+      begin
+         loop
+            Engine_Call
+              (St, Op_Read, Data'Address, C.int (Data'Length),
+               Ada.Real_Time.Time_Last, Epoch0, "TLS try-read",
+               Ret, Class, Pending);
+
+            if Ret > 0 then
+               --  As in Read: a fatal latched by the writer forbids
+               --  reporting success on this session.
+               if St.Coord.Fatal then
+                  raise TLS_Error
+                    with "TLS try-read: session failed concurrently";
+               end if;
+               Last   := Data'First + Natural (Ret) - 1;
+               Status := Data_Ready;
+               return;
+            elsif Class = OSSL.ERROR_ZERO_RETURN then
+               --  close_notify. OpenSSL latches the received shutdown,
+               --  so every later call lands here again. A TCP EOF
+               --  without it is SSL_ERROR_SSL (unexpected EOF) inside
+               --  Engine_Call, hence TLS_Error, never Peer_Closed.
+               Status := Peer_Closed;
+               return;
+            elsif Class = OSSL.ERROR_WANT_READ then
+               exit when Fed;
+               Try_Feed (St, "TLS try-read", Fed);
+               exit when not Fed;
+            else
+               Latch_Engine_Dead
+                 (St, "TLS try-read: unexpected engine state (class"
+                  & C.int'Image (Class) & ")");
+               Drop_Connection (St);
+               raise TLS_Error
+                 with "TLS try-read: unexpected engine state (class"
+                   & C.int'Image (Class) & ")";
+            end if;
+         end loop;
+      end;
+   end Try_Read;
+
    overriding procedure Read
      (Self : in out TLS_Transport;
       Data : out AHT.Bytes.Byte_Array;
@@ -986,6 +1120,16 @@ package body AHT.Transport.TLS is
       Free_TCP (St.TCP);
       Free_State (St);
    end Close;
+
+   procedure Abortive_Close (Self : in out TLS_Transport) is
+   begin
+      --  Close without its block 1: no SSL_shutdown, no drain, so no
+      --  TCP.Write that could park on a full send buffer. Release_State
+      --  does the rest (TCP.Close, SSL_free, SSL_CTX_free) and nulls
+      --  State, which makes a second call a no-op.
+      Self.Connected := False;
+      Release_State (Self);
+   end Abortive_Close;
 
    overriding function Is_Connected (Self : TLS_Transport) return Boolean is
      (Live (Self));
