@@ -928,6 +928,14 @@ package body AHT.Transport.TLS is
       --  a session that died fatally (OpenSSL forbids shutdown after
       --  SSL_ERROR_SSL/SYSCALL). Close is single-threaded, so plain
       --  reads of Engine_Dead are fine.
+      --  The drain never waits: each chunk goes to TCP.Try_Write once
+      --  and the rest is abandoned when the send buffer is full, so a
+      --  peer that has stopped reading cannot hold Close, whatever the
+      --  deadlines. No test reaches that state here: through the public
+      --  API it depends on kernel buffer sizing, because a Write that
+      --  runs into a full buffer parks and its deadline poisons the
+      --  session. The bound rests on Try_Write never parking, which
+      --  test_tcp checks against a full buffer.
       begin
          if Self.Connected
            and then not St.Coord.Fatal
@@ -955,7 +963,12 @@ package body AHT.Transport.TLS is
                            C.int (C.size_t'Min (Pending, Chunk_Max)));
                      end;
                      exit when Got <= 0;
-                     St.TCP.Write (Buf (1 .. Natural (Got)));
+                     declare
+                        Sent : Natural;
+                     begin
+                        St.TCP.Try_Write (Buf (1 .. Natural (Got)), Sent);
+                        exit when Sent < Natural (Got);
+                     end;
                   end loop;
                end;
             end if;

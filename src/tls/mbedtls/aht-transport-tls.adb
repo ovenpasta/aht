@@ -932,7 +932,8 @@ package body AHT.Transport.TLS is
 
       --  Block 1 (best-effort): close_notify + its drain, skipped for
       --  a session that died fatally. Close is single-threaded, so
-      --  plain state reads are fine.
+      --  plain state reads are fine. The drain never waits; see the
+      --  openssl body's Close for the argument and what is tested.
       begin
          if Self.Connected
            and then not St.Coord.Fatal
@@ -954,7 +955,12 @@ package body AHT.Transport.TLS is
                      St.IO.Out_Data.Set
                        (St.IO.Out_Data.To_Array (N + 1, Pending));
                   end if;
-                  St.TCP.Write (Slice);
+                  declare
+                     Sent : Natural;
+                  begin
+                     St.TCP.Try_Write (Slice, Sent);
+                     exit when Sent < Slice'Length;
+                  end;
                end;
             end loop;
          end if;

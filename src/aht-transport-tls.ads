@@ -67,7 +67,10 @@ package AHT.Transport.TLS is
    overriding procedure Close (Self : in out TLS_Transport);
    --  Closes: best-effort close_notify (skipped after a fatal error),
    --  then the inner TCP transport, then frees the backend contexts.
-   --  Idempotent.
+   --  Idempotent. Never waits on the network: close_notify is sent
+   --  only as far as the socket's send buffer accepts it at once, so
+   --  a peer that has stopped reading gets a truncated stream rather
+   --  than holding Close. The deadlines do not apply.
    --  Precondition: no other task is inside any operation on this
    --  transport, Is_Connected and the deadline setters included; they
    --  dereference the state Close frees. Not enforced. For the

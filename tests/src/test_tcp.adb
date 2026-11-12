@@ -598,6 +598,123 @@ procedure Test_TCP is
    Payload : constant AHT.Bytes.Byte_Array :=
                AHT.Bytes.From_String ("ping");
 
+   --  Case 17's peer. Accepts one client and reads nothing until Drain
+   --  is called, so the client's send buffer can fill; then reads to
+   --  EOF and reports how many bytes arrived and whether every one was
+   --  Sink_Fill. The entries are always called in order, Get_Port,
+   --  Drain, Wait_Done, including when the client side failed.
+   Sink_Fill : constant Stream_Element := 16#42#;
+
+   task type Gated_Sink is
+      entry Get_Port
+        (P   : out AHT.URL.Port_Number;
+         Err : out Unbounded_String);
+      entry Drain;
+      entry Wait_Done
+        (Count       : out Long_Long_Integer;
+         Intact      : out Boolean;
+         Runtime_Err : out Unbounded_String);
+   end Gated_Sink;
+
+   task body Gated_Sink is
+      Server        : Socket_Type := No_Socket;
+      Client        : Socket_Type := No_Socket;
+      Peer          : Sock_Addr_Type;
+      Bind_To       : Sock_Addr_Type;
+      Bound         : Port_Type := 0;
+      Setup_Error   : Unbounded_String;
+      Runtime_Error : Unbounded_String;
+      Got           : Long_Long_Integer := 0;
+      All_Fill      : Boolean := True;
+   begin
+      begin
+         Create_Socket (Server, Family_Inet, Socket_Stream);
+         Set_Socket_Option
+           (Server, Socket_Level, (Name => Reuse_Address, Enabled => True));
+         Bind_To.Addr := Inet_Addr ("127.0.0.1");
+         Bind_To.Port := 0;
+         Bind_Socket (Server, Bind_To);
+         Listen_Socket (Server, 1);
+         Bound := Get_Socket_Name (Server).Port;
+      exception
+         when E : others =>
+            Setup_Error := To_Unbounded_String
+              ("Gated_Sink setup: " & Ada.Exceptions.Exception_Message (E));
+      end;
+
+      accept Get_Port
+        (P   : out AHT.URL.Port_Number;
+         Err : out Unbounded_String)
+      do
+         P := (if Length (Setup_Error) > 0 then 1
+               else AHT.URL.Port_Number (Bound));
+         Err := Setup_Error;
+      end Get_Port;
+
+      if Length (Setup_Error) = 0 then
+         declare
+            Selector : Selector_Type;
+            R_Set    : Socket_Set_Type;
+            W_Set    : Socket_Set_Type;
+            Status   : Selector_Status;
+         begin
+            Create_Selector (Selector);
+            Set (R_Set, Server);
+            --  Bounded so a client that never connects cannot park
+            --  the task here.
+            Check_Selector (Selector, R_Set, W_Set, Status, Timeout => 2.0);
+            Close_Selector (Selector);
+            if Status = Completed then
+               Accept_Socket (Server, Client, Peer);
+            else
+               Runtime_Error := To_Unbounded_String
+                 ("accept timed out (no client connected within 2s)");
+            end if;
+         exception
+            when E : others =>
+               Runtime_Error := To_Unbounded_String
+                 ("Gated_Sink accept: "
+                  & Ada.Exceptions.Exception_Message (E));
+         end;
+      end if;
+
+      accept Drain;
+
+      if Client /= No_Socket then
+         declare
+            Buf  : Stream_Element_Array (1 .. 65_536);
+            Last : Stream_Element_Offset;
+         begin
+            loop
+               Receive_Socket (Client, Buf, Last);
+               exit when Last < Buf'First;
+               for J in Buf'First .. Last loop
+                  if Buf (J) /= Sink_Fill then
+                     All_Fill := False;
+                  end if;
+               end loop;
+               Got := Got + Long_Long_Integer (Last - Buf'First + 1);
+            end loop;
+         exception
+            when E : others =>
+               Runtime_Error := To_Unbounded_String
+                 ("Gated_Sink read: " & Ada.Exceptions.Exception_Message (E));
+         end;
+      end if;
+      Close_Peer_Quietly (Client);
+      Close_Peer_Quietly (Server);
+
+      accept Wait_Done
+        (Count       : out Long_Long_Integer;
+         Intact      : out Boolean;
+         Runtime_Err : out Unbounded_String)
+      do
+         Count       := Got;
+         Intact      := All_Fill;
+         Runtime_Err := Runtime_Error;
+      end Wait_Done;
+   end Gated_Sink;
+
    type Byte_Array_Access is access AHT.Bytes.Byte_Array;
    procedure Free is
      new Ada.Unchecked_Deallocation
@@ -1990,6 +2107,94 @@ begin
       Echo.Wait_Done (Echo_RT);
       Check_Server_Runtime ("reconnect (deaf server)", Deaf_RT);
       Check_Server_Runtime ("reconnect (echo server)", Echo_RT);
+   end;
+
+   --  Case 17: Try_Write never parks. A Gated_Sink holds its reads
+   --  until released, so the client's send buffer fills, and Try_Write
+   --  reporting Sent = 0 is the observed fact that it has; a Try_Write
+   --  that parked there would hang the test, and the runner's cap
+   --  reports it. The short count must leave the transport usable, and
+   --  the sink, released after Close, must count exactly the bytes
+   --  reported sent. Each write spans several of Try_Write's 64 KiB
+   --  windows, so a call the kernel takes past one window exercises
+   --  the summing across windows; that a call did so is not asserted,
+   --  since it depends on kernel buffer sizing.
+   declare
+      Sink       : Gated_Sink;
+      Sink_Port  : AHT.URL.Port_Number;
+      Setup_Err  : Unbounded_String;
+      Sink_Err   : Unbounded_String;
+      Arrived    : Long_Long_Integer;
+      Intact     : Boolean;
+      T          : AHT.Transport.TCP.TCP_Transport;
+      Payload    : Byte_Array_Access :=
+        new AHT.Bytes.Byte_Array'
+          (1 .. 3 * 65_536 + 7 => AHT.Bytes.Octet (Sink_Fill));
+      Sent       : Natural;
+      Reported   : Long_Long_Integer := 0;
+      Saw_Full   : Boolean := False;
+   begin
+      Sink.Get_Port (Sink_Port, Setup_Err);
+      if Length (Setup_Err) > 0 then
+         Fail ("try-write: sink setup — " & To_String (Setup_Err));
+      else
+         begin
+            T.Connect ("127.0.0.1", Sink_Port);
+
+            T.Try_Write (Payload (1 .. 0), Sent);
+            if Sent /= 0 then
+               Fail ("try-write: empty Data reported" & Sent'Image);
+            end if;
+
+            --  The attempt cap is a liveness backstop: kernel buffers
+            --  hold a few MiB, a small fraction of 4096 payloads.
+            for Attempt in 1 .. 4096 loop
+               T.Try_Write (Payload.all, Sent);
+               Reported := Reported + Long_Long_Integer (Sent);
+               if Sent = 0 then
+                  Saw_Full := True;
+                  exit;
+               end if;
+            end loop;
+            if not Saw_Full then
+               Fail ("try-write: no Sent = 0 after" & Reported'Image
+                     & " bytes");
+            elsif Reported = 0 then
+               Fail ("try-write: an empty send buffer accepted nothing");
+            end if;
+            if not T.Is_Connected then
+               Fail ("try-write: a full send buffer poisoned the transport");
+            end if;
+
+            T.Close;
+            begin
+               T.Try_Write (Payload (1 .. 1), Sent);
+               Fail ("try-write: a closed transport accepted a write");
+            exception
+               when AHT.Transport.Transport_Error => null;  --  expected
+            end;
+         exception
+            when E : others =>
+               Fail ("try-write: " & Ada.Exceptions.Exception_Name (E)
+                     & " — " & Ada.Exceptions.Exception_Message (E));
+               Close_Quietly (T);
+         end;
+      end if;
+
+      Sink.Drain;
+      Sink.Wait_Done (Arrived, Intact, Sink_Err);
+      if Length (Sink_Err) > 0 then
+         Fail ("try-write: sink — " & To_String (Sink_Err));
+      elsif Length (Setup_Err) = 0 then
+         if Arrived /= Reported then
+            Fail ("try-write: sink counted" & Arrived'Image & " bytes,"
+                  & Reported'Image & " reported sent");
+         end if;
+         if not Intact then
+            Fail ("try-write: sink received bytes other than the payload");
+         end if;
+      end if;
+      Free (Payload);
    end;
 
    if Failures = 0 then

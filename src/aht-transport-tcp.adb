@@ -668,6 +668,61 @@ package body AHT.Transport.TCP is
         (Self, Data, Last, Deadline /= Time_Last, Deadline);
    end Read;
 
+   procedure Try_Write
+     (Self : in out TCP_Transport;
+      Data : AHT.Bytes.Byte_Array;
+      Sent : out Natural)
+   is
+      --  A fixed window, as in Write_Bounded, keeps the stack footprint
+      --  independent of Data'Length.
+      Window_Max : constant := 65_536;
+      Buffer     : Stream_Element_Array (1 .. Window_Max);
+      Pos        : Natural := Data'First;
+      Last       : Stream_Element_Offset;
+   begin
+      Sent := 0;
+      if Data'Length = 0 then
+         return;
+      end if;
+      if not Self.Connected then
+         raise Transport_Error with "TCP write on closed transport";
+      end if;
+      while Pos <= Data'Last loop
+         declare
+            Window : constant Natural :=
+              Natural'Min (Window_Max, Data'Last - Pos + 1);
+            Slice  : Stream_Element_Array renames
+              Buffer (1 .. Stream_Element_Offset (Window));
+            Took   : Natural;
+         begin
+            To_SEA (Data (Pos .. Pos + Window - 1), Slice);
+            --  The socket is non-blocking: with the send buffer full
+            --  this raises EAGAIN, which the handler turns into a
+            --  return with Sent counting the earlier windows.
+            Send_Socket (Self.Socket, Slice, Last);
+            if Last < Slice'First then
+               --  Zero accepted without EAGAIN is GNAT's closed-peer
+               --  signal, as in Write_Bounded.
+               Poison (Self);
+               raise Transport_Error
+                 with "TCP write: peer closed connection";
+            end if;
+            Took := Natural (Last - Slice'First + 1);
+            Sent := Sent + Took;
+            exit when Took < Window;
+            Pos := Pos + Window;
+         end;
+      end loop;
+   exception
+      when E : Socket_Error =>
+         if Resolve_Exception (E) = Resource_Temporarily_Unavailable then
+            return;
+         end if;
+         Poison (Self);
+         raise Transport_Error with
+           "TCP write failed: " & Ada.Exceptions.Exception_Message (E);
+   end Try_Write;
+
    overriding procedure Close (Self : in out TCP_Transport) is
    begin
       --  Guard on the FD, not Connected: a poisoned transport has already

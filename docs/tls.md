@@ -171,7 +171,11 @@ promptly, and all network waiting happens in Ada outside the library:
   (skipped after a fatal error) and `TCP.Close` run in separate
   best-effort blocks, then every context is freed unconditionally.
   `Close` is idempotent, and a failed `Connect` has already released
-  everything.
+  everything. The drain is the one network step no deadline bounds,
+  because it never waits: each chunk goes to `TCP.Try_Write` once, and
+  whatever the send buffer cannot take at that moment is abandoned. A
+  peer that has stopped reading therefore sees the stream end without
+  close_notify instead of holding `Close`.
 
 The locks and coordinator live in `AHT.TLS_Sync`, shared by both
 bodies and kept separate so that a test can drive the claim, arm,

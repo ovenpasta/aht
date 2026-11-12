@@ -183,6 +183,13 @@ instant and ignore the compound deadlines; everything else, including
 use them to bound a wait performed on behalf of the other direction's
 operation by that operation's deadline.
 
+`Try_Write` is `Write`'s window loop with no park: it sends window by
+window until the data is done or the kernel takes less than it was
+offered, reports how many leading bytes were accepted (0 when the send
+buffer is full), and poisons only on a real send error. A short count leaves the stream's
+integrity to the caller. The TLS backends' `Close` uses it for
+close_notify so that closing never waits on the peer.
+
 `Abort_Pending` calls `Abort_Selector` on both selectors, so a `Read`
 or `Write` parked in `Check_Selector` returns `Aborted` and raises
 `Aborted_Error`.
@@ -282,7 +289,8 @@ Handshake_Deadline, CA_PEM, Resolve_Timeout)`:
 - `Insecure => True` skips certificate verification.
 
 `Close` is a best-effort close_notify (skipped when the session died
-of a fatal error), then `TCP.Close`, then unconditional freeing of
+of a fatal error, and sent only as far as the send buffer accepts it
+without waiting), then `TCP.Close`, then unconditional freeing of
 the backend contexts; idempotent. Its precondition is the TCP one
 extended to the whole object: `Close` frees the state that
 `Is_Connected`, the deadline setters and `Abort_Pending` dereference,

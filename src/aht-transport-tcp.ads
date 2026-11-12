@@ -79,6 +79,23 @@ package AHT.Transport.TCP is
    --  Time_Last means unbounded, as it does for the TLS handshake
    --  deadline that uses these overloads. Used by the TLS backends.
 
+   procedure Try_Write
+     (Self : in out TCP_Transport;
+      Data : AHT.Bytes.Byte_Array;
+      Sent : out Natural);
+   --  Sends on the non-blocking socket without ever parking on the
+   --  selector, stopping at the end of Data or at the first send the
+   --  kernel does not take in full: Sent is the number of leading
+   --  bytes of Data accepted, 0 when the send buffer has no room, and
+   --  Sent < Data'Length means the buffer filled. A short count is
+   --  not an error and does not poison: the caller owns the unsent tail and decides whether
+   --  the stream is still usable. Ignores the write deadlines and
+   --  Abort_Pending, since there is no wait for either to bound.
+   --  Raises Transport_Error, after poisoning as Write does, on a
+   --  closed transport, a closed peer or any send error other than
+   --  would-block. Occupies the writer role of the concurrency
+   --  contract. Used by the TLS backends' Close.
+
    overriding procedure Close (Self : in out TCP_Transport);
    --  Closes the socket and both selectors and clears the deadlines.
    --  Idempotent; safe on a clean or poisoned object.
