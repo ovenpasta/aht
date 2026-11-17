@@ -9,7 +9,14 @@
 --  Cases:
 --    /status/204, /status/418: status passthrough; non-2xx not raised.
 --    /bytes/256: Content-Length framing round-trips.
---    /redirect/1: a 3xx surfaces raw with Location; no auto-follow.
+--    /redirect/1: with the default Max_Redirects (0) a 3xx surfaces
+--      raw with Location.
+--    /redirect/3, /absolute-redirect/2, /relative-redirect/2: followed
+--      to /get with Max_Redirects set; /redirect-to with 307 keeps a
+--      POST and its body, with 303 turns it into a GET.
+--    /gzip, /deflate: decoded with Max_Decoded_Bytes set; the JSON they carry
+--      says which coding the server applied.
+--    Two GETs through one Pool leave one idle connection.
 --    /get: JSON content-type on a vanilla GET.
 --    POST /post: a buffered request body reaches the peer.
 
@@ -17,10 +24,12 @@ with Ada.Command_Line;
 with Ada.Environment_Variables;
 with Ada.Exceptions;
 with Ada.Strings.Fixed;
+with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Text_IO; use Ada.Text_IO;
 
 with AHT.Bytes;
 with AHT.HTTP.Client;
+with AHT.HTTP.Connection_Pools;
 with AHT.HTTP.Methods;
 with AHT.HTTP.Request;
 with AHT.HTTP.Response;
@@ -38,6 +47,18 @@ procedure Test_HTTPbin is
 
    Base : constant String :=
      Ada.Environment_Variables.Value ("AHT_HTTPBIN_URL", "");
+
+   function "+" (S : String) return Unbounded_String
+     renames To_Unbounded_String;
+
+   Follow_Paths : constant array (1 .. 3) of Unbounded_String :=
+     [+"/redirect/3", +"/absolute-redirect/2", +"/relative-redirect/2"];
+
+   type Code_List is array (Positive range <>) of Positive;
+   Redirect_Codes : constant Code_List := [303, 307];
+
+   Codings : constant array (1 .. 2) of Unbounded_String :=
+     [+"gzip", +"deflate"];
 
    --  GET Path and assert the status equals Want.
    procedure Check_Status (Title, Path : String; Want : Integer) is
@@ -88,7 +109,7 @@ begin
                & " — " & Ada.Exceptions.Exception_Message (E));
    end;
 
-   --  A redirect is delivered raw (AHT does not auto-follow): a 3xx
+   --  With Max_Redirects left at 0 a redirect is delivered raw: a 3xx
    --  status plus a non-empty Location header.
    declare
       C    : AHT.HTTP.Client.Client_Type;
@@ -107,6 +128,107 @@ begin
    exception
       when E : others =>
          Fail ("redirect: raised " & Ada.Exceptions.Exception_Name (E)
+               & " — " & Ada.Exceptions.Exception_Message (E));
+   end;
+
+   --  Followed redirects end at /get.
+   for P of Follow_Paths loop
+      declare
+         Path : constant String := To_String (P);
+         C    : AHT.HTTP.Client.Client_Type;
+         Resp : AHT.HTTP.Response.Response_Type;
+      begin
+         C.Max_Redirects := 5;
+         Resp := AHT.HTTP.Client.Get (C, Base & Path);
+         if Resp.Status /= 200
+           or else To_String (Resp.Final_URL.Path) /= "/get"
+         then
+            Fail (Path & ": status" & Resp.Status'Image
+                  & ", ended at " & AHT.URL.To_String (Resp.Final_URL));
+         end if;
+      exception
+         when E : others =>
+            Fail (Path & ": raised " & Ada.Exceptions.Exception_Name (E)
+                  & " — " & Ada.Exceptions.Exception_Message (E));
+      end;
+   end loop;
+
+   --  /redirect-to: 307 keeps the POST and its body, 303 does not.
+   for Code of Redirect_Codes loop
+      declare
+         C    : AHT.HTTP.Client.Client_Type;
+         Req  : AHT.HTTP.Request.Request_Type;
+         Resp : AHT.HTTP.Response.Response_Type;
+         Img  : constant String :=
+           Ada.Strings.Fixed.Trim (Code'Image, Ada.Strings.Both);
+         Want : constant String := (if Code = 307 then "/post" else "/get");
+      begin
+         C.Max_Redirects := 1;
+         Req.Method := AHT.HTTP.Methods.POST;
+         Req.Target := AHT.URL.Parse
+           (Base & "/redirect-to?url=" & Want & "&status_code=" & Img);
+         Req.Headers.Set ("content-type", "text/plain");
+         Req.Set_Body ("redirected payload");
+         AHT.HTTP.Client.Send (C, Req, Resp);
+         if Resp.Status /= 200 then
+            Fail ("redirect-to " & Img & ": status" & Resp.Status'Image);
+         elsif Code = 307
+           and then Ada.Strings.Fixed.Index
+                      (Resp.Body_Text, "redirected payload") = 0
+         then
+            Fail ("redirect-to 307: body lost: " & Resp.Body_Text);
+         end if;
+      exception
+         when E : others =>
+            Fail ("redirect-to " & Img & ": raised "
+                  & Ada.Exceptions.Exception_Name (E)
+                  & " — " & Ada.Exceptions.Exception_Message (E));
+      end;
+   end loop;
+
+   --  Content codings, as go-httpbin applies them.
+   for Name of Codings loop
+      declare
+         Coding : constant String := To_String (Name);
+         C      : AHT.HTTP.Client.Client_Type;
+         Resp   : AHT.HTTP.Response.Response_Type;
+         Flag   : constant String :=
+           (if Coding = "gzip" then """gzipped""" else """deflated""");
+      begin
+         C.Max_Decoded_Bytes := 1_000_000;
+         Resp := AHT.HTTP.Client.Get (C, Base & "/" & Coding);
+         if Resp.Status /= 200 or else not Resp.Decoded
+           or else Ada.Strings.Fixed.Index (Resp.Body_Text, Flag) = 0
+         then
+            Fail ("/" & Coding & ": status" & Resp.Status'Image
+                  & ", decoded " & Resp.Decoded'Image & ": "
+                  & Resp.Body_Text);
+         end if;
+      exception
+         when E : others =>
+            Fail ("/" & Coding & ": raised "
+                  & Ada.Exceptions.Exception_Name (E)
+                  & " — " & Ada.Exceptions.Exception_Message (E));
+      end;
+   end loop;
+
+   --  Keep-alive: go-httpbin keeps HTTP/1.1 connections open.
+   declare
+      C    : AHT.HTTP.Client.Client_Type;
+      Resp : AHT.HTTP.Response.Response_Type;
+   begin
+      C.Pool := AHT.HTTP.Connection_Pools.Create;
+      Resp := AHT.HTTP.Client.Get (C, Base & "/get");
+      Resp := AHT.HTTP.Client.Get (C, Base & "/bytes/64");
+      if Resp.Status /= 200
+        or else AHT.HTTP.Connection_Pools.Idle_Count (C.Pool) /= 1
+      then
+         Fail ("keep-alive: status" & Resp.Status'Image & ", idle"
+               & AHT.HTTP.Connection_Pools.Idle_Count (C.Pool)'Image);
+      end if;
+   exception
+      when E : others =>
+         Fail ("keep-alive: raised " & Ada.Exceptions.Exception_Name (E)
                & " — " & Ada.Exceptions.Exception_Message (E));
    end;
 

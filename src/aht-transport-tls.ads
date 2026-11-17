@@ -78,6 +78,15 @@ package AHT.Transport.TLS is
    --  reclaim waits until the reader has exited.
 
    overriding function Is_Connected (Self : TLS_Transport) return Boolean;
+
+   overriding function Peer_Quiet (Self : TLS_Transport) return Boolean;
+   --  Quiet when the session is live, no end of stream is latched, the
+   --  engine holds nothing unread (ciphertext not yet processed, or
+   --  plaintext decrypted and not yet returned) and the inner TCP is
+   --  quiet. A
+   --  record arriving between requests (a close_notify, a late
+   --  session ticket) makes it not quiet; the cost of that is one
+   --  connection not reused.
    --  True after a successful Connect until Close, except that a
    --  session poisoned by a fatal Read/Write reports False (via a
    --  task-safe latch, so a reader may query it while a writer fails).

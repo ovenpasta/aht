@@ -80,6 +80,31 @@ idempotent and safe to call when nothing is pending.
 The default bodies are no-ops, so an implementation that cannot
 enforce them leaves `Read` and `Write` blocking.
 
+### Idle probe
+
+```ada
+function Peer_Quiet (Self : Transport_Type) return Boolean is (False);
+```
+
+True when the transport is connected and nothing from the peer waits
+to be read: no data, no end of stream, no error. It never blocks and
+consumes nothing. It is for a connection parked between requests,
+where anything from the peer, usually its close, means the connection
+cannot carry the next request cleanly; the HTTP connection pool calls
+it before reusing one. False when an implementation cannot tell, which
+is the default. Same precondition as `Close`: no other task inside the
+transport.
+
+- TCP peeks one byte on the non-blocking socket: quiet only when the
+  receive would block.
+- TLS is quiet when the session is live, no end of stream is latched,
+  the engine holds nothing unread (ciphertext not yet processed, or
+  plaintext decrypted and not yet returned by `Read`) and the inner
+  TCP is quiet. A
+  record arriving between requests (a `close_notify`, a late session
+  ticket) makes it not quiet, at the cost of one connection not
+  reused.
+
 ### Finalize
 
 `Finalize` dispatches to the concrete `Close`, so a transport that

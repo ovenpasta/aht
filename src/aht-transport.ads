@@ -47,6 +47,16 @@ package AHT.Transport is
 
    function Is_Connected (Self : Transport_Type) return Boolean is abstract;
 
+   function Peer_Quiet (Self : Transport_Type) return Boolean is (False);
+   --  True when the transport is connected and nothing from the peer
+   --  is waiting to be read: no data, no end of stream, no error.
+   --  Never blocks and consumes nothing. Meant for a connection parked
+   --  between requests, where anything at all from the peer (most
+   --  often its close) means the connection cannot carry the next
+   --  request cleanly. False when the implementation cannot tell,
+   --  which is the default. Same precondition as Close: no other task
+   --  is inside any operation on this transport.
+
    --  Optional read-side deadline / cancel hooks. The default bodies
    --  are no-ops, so implementations that can't enforce them do
    --  nothing and Read blocks indefinitely.

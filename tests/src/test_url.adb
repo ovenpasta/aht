@@ -2,6 +2,7 @@
 --  SPDX-License-Identifier: Apache-2.0
 
 with Ada.Command_Line;
+with Ada.Exceptions;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Text_IO;           use Ada.Text_IO;
 
@@ -101,7 +102,120 @@ procedure Test_URL is
          null;
    end Case_Invalid;
 
+   --  RFC 3986 sec. 5.4: every normal and abnormal example whose
+   --  result is an http URL (5.4.1 "g:h" names another scheme).
+   procedure Case_Resolve_RFC_Examples is
+      Base : constant AHT.URL.URL_Type :=
+        AHT.URL.Parse ("http://a/b/c/d;p?q");
+
+      procedure Expect (Ref, Want : String) is
+      begin
+         declare
+            Got : constant String :=
+              AHT.URL.To_String (AHT.URL.Resolve (Base, Ref));
+         begin
+            Check (Got = Want,
+                   "resolve """ & Ref & """ = " & Got & ", want " & Want);
+         end;
+      exception
+         when E : others =>
+            Check (False, "resolve """ & Ref & """ raised "
+                   & Ada.Exceptions.Exception_Name (E));
+      end Expect;
+   begin
+      Expect ("g",             "http://a/b/c/g");
+      Expect ("./g",           "http://a/b/c/g");
+      Expect ("g/",            "http://a/b/c/g/");
+      Expect ("/g",            "http://a/g");
+      Expect ("//g",           "http://g/");
+      Expect ("?y",            "http://a/b/c/d;p?y");
+      Expect ("g?y",           "http://a/b/c/g?y");
+      Expect ("#s",            "http://a/b/c/d;p?q#s");
+      Expect ("g#s",           "http://a/b/c/g#s");
+      Expect ("g?y#s",         "http://a/b/c/g?y#s");
+      Expect (";x",            "http://a/b/c/;x");
+      Expect ("g;x",           "http://a/b/c/g;x");
+      Expect ("g;x?y#s",       "http://a/b/c/g;x?y#s");
+      Expect ("",              "http://a/b/c/d;p?q");
+      Expect (".",             "http://a/b/c/");
+      Expect ("./",            "http://a/b/c/");
+      Expect ("..",            "http://a/b/");
+      Expect ("../",           "http://a/b/");
+      Expect ("../g",          "http://a/b/g");
+      Expect ("../..",         "http://a/");
+      Expect ("../../",        "http://a/");
+      Expect ("../../g",       "http://a/g");
+      Expect ("../../../g",    "http://a/g");
+      Expect ("../../../../g", "http://a/g");
+      Expect ("/./g",          "http://a/g");
+      Expect ("/../g",         "http://a/g");
+      Expect ("g.",            "http://a/b/c/g.");
+      Expect (".g",            "http://a/b/c/.g");
+      Expect ("g..",           "http://a/b/c/g..");
+      Expect ("..g",           "http://a/b/c/..g");
+      Expect ("./../g",        "http://a/b/g");
+      Expect ("./g/.",         "http://a/b/c/g/");
+      Expect ("g/./h",         "http://a/b/c/g/h");
+      Expect ("g/../h",        "http://a/b/c/h");
+      Expect ("g;x=1/./y",     "http://a/b/c/g;x=1/y");
+      Expect ("g;x=1/../y",    "http://a/b/c/y");
+      Expect ("g?y/./x",       "http://a/b/c/g?y/./x");
+      Expect ("g?y/../x",      "http://a/b/c/g?y/../x");
+      Expect ("g#s/./x",       "http://a/b/c/g#s/./x");
+      Expect ("g#s/../x",      "http://a/b/c/g#s/../x");
+   end Case_Resolve_RFC_Examples;
+
+   procedure Case_Resolve_Other is
+      Base : constant AHT.URL.URL_Type :=
+        AHT.URL.Parse ("https://[::1]:8443/dir/page?x=1#top");
+      R    : AHT.URL.URL_Type;
+   begin
+      --  Absolute: nothing of Base survives, dot segments still go.
+      R := AHT.URL.Resolve (Base, "HTTP://Other.example:81/a/./b/../c");
+      Check (R.Scheme = AHT.URL.HTTP, "absolute: scheme");
+      Check (To_String (R.Host) = "Other.example", "absolute: host");
+      Check (R.Port = 81, "absolute: port");
+      Check (To_String (R.Path) = "/a/c", "absolute: path");
+
+      --  Scheme-relative keeps Base's scheme only.
+      R := AHT.URL.Resolve (Base, "//cdn.example/x");
+      Check (R.Scheme = AHT.URL.HTTPS and then R.Port = 443
+             and then To_String (R.Host) = "cdn.example",
+             "scheme-relative: " & AHT.URL.To_String (R));
+
+      --  Relative: Base's IPv6 authority, Base's fragment dropped.
+      R := AHT.URL.Resolve (Base, "next");
+      Check (AHT.URL.To_String (R) = "https://[::1]:8443/dir/next",
+             "relative on IPv6 base: " & AHT.URL.To_String (R));
+
+      --  Unsafe bytes are escaped, existing escapes kept.
+      R := AHT.URL.Resolve (Base, "/a b/" & Character'Val (16#C3#)
+                            & Character'Val (16#BC#) & "%41?q=<1>");
+      Check (AHT.URL.Request_Target (R) = "/a%20b/%C3%BC%41?q=%3C1%3E",
+             "escaping: " & AHT.URL.Request_Target (R));
+
+      --  An unsafe byte in the host is refused, not escaped.
+      begin
+         R := AHT.URL.Resolve
+           (Base, "http://b" & Character'Val (16#C3#)
+                  & Character'Val (16#BC#) & "cher.example/");
+         Check (False, "non-ASCII host did not raise");
+      exception
+         when AHT.URL.Parse_Error => null;
+      end;
+
+      --  A scheme without "//" is not something this client can follow.
+      begin
+         R := AHT.URL.Resolve (Base, "mailto:someone@example.com");
+         Check (False, "mailto: did not raise");
+      exception
+         when AHT.URL.Parse_Error => null;
+      end;
+   end Case_Resolve_Other;
+
 begin
+   Case_Resolve_RFC_Examples;
+   Case_Resolve_Other;
    Case_Basic_HTTP;
    Case_HTTPS_Custom_Port;
    Case_WS_No_Path;

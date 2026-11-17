@@ -6,10 +6,12 @@ with Ada.Streams;
 with Ada.Strings.Unbounded;
 
 with AHT.Bytes;
+with AHT.HTTP.Connection_Pools;
 with AHT.HTTP.Headers;
 with AHT.HTTP.Request;
 with AHT.HTTP.Response;
 with AHT.Transport;
+with AHT.URL;
 
 package AHT.HTTP.Client is
 
@@ -70,6 +72,45 @@ package AHT.HTTP.Client is
       Handshake_Deadline : Phase_Bound := Inherit;
       Write_Deadline     : Phase_Bound := Inherit;
       Read_Deadline      : Phase_Bound := Inherit;
+
+      --  Redirects. A 301, 302, 303, 307 or 308 response with a
+      --  Location header is followed, up to Max_Redirects times per
+      --  Send; one more raises Redirect_Error. 0, the default, returns
+      --  every 3xx as it came. A followed redirect's body is read and
+      --  discarded, never handed to a Sink. 303, and 301 or 302 after
+      --  a POST, continue as a GET without the body; other cases keep
+      --  the method and body. A streaming upload cannot be replayed,
+      --  so a redirect that would need its body is returned as it
+      --  came. Authorization, Proxy-Authorization and Cookie are not
+      --  sent to a scheme, host or port other than the request's own.
+      --  An https to http redirect raises Redirect_Error unless
+      --  Allow_Redirect_Downgrade is set. Each hop is bounded and
+      --  cancelled like a request of its own.
+      Max_Redirects            : Natural := 0;
+      Allow_Redirect_Downgrade : Boolean := False;
+
+      --  Content decoding. When set, requests that do not name an
+      --  Accept-Encoding (in Req.Headers or Default_Headers) send
+      --  "gzip, deflate", and a response coded with one of those is
+      --  decompressed as described for Response.Read_Streaming's
+      --  Max_Decoded: Resp.Decoded is set and the coding headers
+      --  removed. The field is both the switch and the bound: 0, the
+      --  default, leaves bodies as received; N decodes, and a body
+      --  that would decode to more than N bytes raises Protocol_Error.
+      --  Decoding cannot be had without choosing a bound.
+      Max_Decoded_Bytes : AHT.HTTP.Response.Decode_Limit :=
+        AHT.HTTP.Response.No_Decoding;
+
+      --  Keep-alive. With a pool (Connection_Pools.Create), requests
+      --  default to Connection: keep-alive, take an idle connection
+      --  to the same endpoint from the pool when one is still quiet
+      --  (Transport.Peer_Quiet), and return the connection after a
+      --  response that ended at a framing boundary and allows reuse
+      --  (Response.Read_Streaming's Persistent) unless either side
+      --  sent Connection: close or the Send was cancelled. Copies of
+      --  the Client_Type, the snapshot Send_Async takes included,
+      --  share the pool. Default: no pool, one connection per Send.
+      Pool : AHT.HTTP.Connection_Pools.Pool_Ref;
    end record;
 
    --  Cross-task cancel for an in-flight Send. Cancel from any task
@@ -91,14 +132,18 @@ package AHT.HTTP.Client is
      (Self : in out Client_Type;
       Req  : AHT.HTTP.Request.Request_Type;
       Resp : out AHT.HTTP.Response.Response_Type);
-   --  Synchronous single-request round trip on a fresh transport (no
-   --  keep-alive), so tasks may share one Client_Type without
+   --  Synchronous round trip, plus the redirects Max_Redirects allows.
+   --  Without a Pool every hop dials a fresh transport and closes it;
+   --  with one it borrows and returns connections as described at
+   --  Pool. Either way tasks may share one Client_Type without
    --  locking. HTTP dials AHT.Transport.TCP; HTTPS dials
    --  AHT.Transport.TLS with Self.CA_Path, Self.CA_PEM and
-   --  Self.Insecure; WS / WSS raise HTTP_Error.
+   --  Self.Insecure; WS / WSS raise HTTP_Error. Resp.Final_URL is the
+   --  URL of the response returned.
    --
    --  Headers the caller did not set are filled in: Host from the
-   --  URL, User-Agent from Self.User_Agent, Connection: close, and
+   --  URL, User-Agent from Self.User_Agent, Connection (close, or
+   --  keep-alive with a Pool), Accept-Encoding with Max_Decoded_Bytes, and
    --  each Self.Default_Headers name absent from Req.Headers.
    --
    --  Interim 1xx responses are discarded; the first non-1xx is
@@ -108,14 +153,22 @@ package AHT.HTTP.Client is
    --
    --  Raises HTTP_Error, Protocol_Error, Transport_Error,
    --  Timeout_Error or Aborted_Error for malformed wire, transport
-   --  failure, deadline expiry or cancel; https:// also raises
-   --  AHT.Transport.TLS.TLS_Error on a TLS failure. The transport is
-   --  closed on every exit path.
+   --  failure, deadline expiry or cancel, and Redirect_Error as
+   --  described at Max_Redirects; https:// also raises
+   --  AHT.Transport.TLS.TLS_Error on a TLS failure. A transport that
+   --  raised is closed, never pooled.
    --
    --  Retry safety: with a write deadline armed or a Cancel fired,
    --  Timeout_Error / Aborted_Error can be raised with some request
    --  bytes already at the peer; a blind retry of a non-idempotent
-   --  request may duplicate a side effect.
+   --  request may duplicate a side effect. The one retry the client
+   --  makes itself: when a connection taken from the Pool fails with
+   --  Transport_Error, Protocol_Error or TLS_Error before a status
+   --  line came back on it, a GET, HEAD, PUT, DELETE or OPTIONS with
+   --  a buffered body is sent once more on a fresh connection. The
+   --  peer may have closed the idle connection as the request went
+   --  out; those methods are safe to repeat (RFC 9110 sec. 9.2.2). A
+   --  peer that answers, however badly, is not asked twice.
 
    procedure Send
      (Self   : in out Client_Type;
@@ -140,7 +193,7 @@ package AHT.HTTP.Client is
    --  contract). Sink may raise; the exception propagates and the
    --  transport is closed. Sink must not call Send on the same
    --  Client_Type. Sink is never called for a 1xx, including the
-   --  terminal 101.
+   --  terminal 101, nor with the body of a redirect that is followed.
 
    procedure Send_Streaming
      (Self   : in out Client_Type;
@@ -199,6 +252,13 @@ package AHT.HTTP.Client is
    --  Streaming upload with cross-task cancel. Cancel is observed at
    --  the transport (a parked write is broken via Abort_Pending) and
    --  before each Read_Chunk, never during one.
+
+   function Pool_Endpoint
+     (Self : Client_Type;
+      URL  : AHT.URL.URL_Type) return AHT.HTTP.Connection_Pools.Endpoint;
+   --  The pool key under which Send parks and looks up connections for
+   --  URL: its scheme, host and port, and for https the trust settings
+   --  of Self (CA_Path, CA_PEM, Insecure).
 
    function Get
      (Self : in out Client_Type;

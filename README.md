@@ -21,7 +21,11 @@ Every Ada unit lives under the `AHT.*` namespace.
   `OPTIONS`, chunked transfer decoding, streaming downloads (push
   callback or straight to an `Ada.Streams` stream), streaming uploads
   (fixed-length or chunked, O(1) memory), async requests with
-  cross-task cancellation.
+  cross-task cancellation. Opt-in per client: redirect following
+  (`Max_Redirects`), `gzip` / `deflate` response decoding
+  (`Max_Decoded_Bytes`, a streaming decoder in pure Ada) and keep-alive
+  through a shared connection pool (`Pool`); see
+  [`docs/http.md`](docs/http.md).
 - **WebSocket client**: `ws://` and `wss://`, text + binary,
   fragmentation reassembly, auto ping/pong, clean close handshake,
   blocking `Receive` or push callbacks; exercised against the
@@ -35,9 +39,8 @@ Every Ada unit lives under the `AHT.*` namespace.
 - **Contracts**: public APIs carry Ada 2012/2022 contracts (subtype
   predicates, `Type_Invariant`, `Pre`/`Post`).
 
-Not (yet) offered: HTTP/2, connection keep-alive (each request runs
-`Connection: close`), redirect following, response compression
-(`Transfer-Encoding` other than `chunked` is rejected), trailer
+Not (yet) offered: HTTP/2, `br` and `zstd` content codings,
+`Transfer-Encoding` other than `chunked` (rejected), trailer
 surfacing, streaming + async combined.
 
 ## Quick start

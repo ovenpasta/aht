@@ -1003,6 +1003,15 @@ package body AHT.Transport.TLS is
    overriding function Is_Connected (Self : TLS_Transport) return Boolean is
      (Live (Self));
 
+   --  No lock: the precondition puts no other task in the transport,
+   --  so nothing else touches RBIO.
+   overriding function Peer_Quiet (Self : TLS_Transport) return Boolean is
+     (Live (Self)
+      and then not Self.State.Coord.EOF
+      and then OBIO.Ctrl_Pending (Self.State.RBio) = 0
+      and then OSSL.Has_Pending (Self.State.SSL) = 0
+      and then Self.State.TCP.Peer_Quiet);
+
    overriding procedure Set_Read_Deadline
      (Self     : in out TLS_Transport;
       Deadline : Duration)

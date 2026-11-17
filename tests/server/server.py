@@ -16,6 +16,26 @@ integration tests in tests/src/test_http_*.adb hit:
     GET  /protected  -> 401 without Authorization header,
                         200 echoing the header value otherwise
     POST /echo       -> 200 echoing the request body and Content-Type
+    GET  /coded/<variant>[?framing=length|chunked|eof][&chunk=N]
+                     -> 200 with the variant's compressed body and its
+                        Content-Encoding (see CODED below), framed by
+                        Content-Length (default), chunks of N bytes,
+                        or EOF
+    GET  /coded/<variant>?plain
+                     -> 200 with the variant's decoded bytes, no coding
+    GET  /coded-partial
+                     -> 206 with a gzip Content-Encoding and a gzip body
+    GET  /accept-encoding
+                     -> 200 echoing the request's Accept-Encoding, or
+                        "<none>" when it sent none
+    ANY  /r/<status>?to=<location>
+                     -> <status> with Location: <location> and a
+                        non-empty body, for every method
+    GET  /r/loop?n=<k>
+                     -> 302 to /r/loop?n=<k+1>
+    ANY  /inspect    -> 200 describing the request: method, body
+                        length and the Host, Authorization, Cookie,
+                        Content-Type and Accept-Encoding headers
 
 Every response carries `Connection: close`, so the client sees a
 clean EOF after each one.
@@ -25,10 +45,15 @@ Prints `READY http 127.0.0.1:8764` once listening.
 
 from __future__ import annotations
 
+import gzip
 import http.server
+import random
 import socketserver
+import struct
 import sys
 import time
+import urllib.parse
+import zlib
 
 HOST = "127.0.0.1"
 HTTP_PORT = 8764
@@ -37,6 +62,72 @@ HTTP_PORT = 8764
 #  brackets it: a 1 s read deadline must trip on this route and a 6 s
 #  one must not. Each handler runs on its own thread.
 SLOW_DELAY = 3.0
+
+
+def _raw_deflate(data: bytes, level: int = 6) -> bytes:
+    co = zlib.compressobj(level, zlib.DEFLATED, -15)
+    return co.compress(data) + co.flush()
+
+
+def _gzip_all_fields(data: bytes) -> bytes:
+    """A gzip member with FEXTRA, FNAME, FCOMMENT and FHCRC set, which
+    gzip.compress never writes."""
+    flags = 0x02 | 0x04 | 0x08 | 0x10
+    head = b"\x1f\x8b\x08" + bytes([flags]) + struct.pack("<I", 0) + b"\x00\xff"
+    extra = b"AB\x02\x00hi"
+    head += struct.pack("<H", len(extra)) + extra
+    head += b"name.txt\x00" + b"a comment\x00"
+    head += struct.pack("<H", zlib.crc32(head) & 0xFFFF)
+    return (head + _raw_deflate(data)
+            + struct.pack("<II", zlib.crc32(data), len(data) & 0xFFFFFFFF))
+
+
+#  Plain bodies chosen to reach every DEFLATE block type and the far end
+#  of the window. TEXT compresses into dynamic-Huffman blocks; RANDOM is
+#  incompressible, so level 6 emits stored blocks; SMALL is short enough
+#  for a fixed-Huffman block. MIXED repeats a 20 000-byte random segment
+#  32 000 bytes after its start (a back-reference near the 32 KiB limit)
+#  and contains a run that compresses to an overlapping distance-2 copy.
+_TEXT = b"".join(
+    f"line {i}: the quick brown fox jumps over the lazy dog {i * i % 97}\n"
+    .encode("ascii") for i in range(5000))
+_RANDOM = random.Random(1).randbytes(100_000)
+_SEGMENT = random.Random(2).randbytes(20_000)
+_MIXED = (_TEXT[:40_000] + _SEGMENT + _RANDOM[:12_000] + _SEGMENT
+          + b"ab" * 5000 + _TEXT[:2000])
+_SMALL = b"hello, hello, hello world\n"
+
+#  name -> (Content-Encoding, wire body, decoded body)
+CODED = {
+    "gzip-text": ("gzip", gzip.compress(_TEXT, mtime=0), _TEXT),
+    "gzip-random": ("gzip", gzip.compress(_RANDOM, mtime=0), _RANDOM),
+    "gzip-small": ("gzip", gzip.compress(_SMALL, mtime=0), _SMALL),
+    "gzip-mixed": ("gzip", gzip.compress(_MIXED, mtime=0), _MIXED),
+    "gzip-empty": ("gzip", gzip.compress(b"", mtime=0), b""),
+    "gzip-fields": ("gzip", _gzip_all_fields(_TEXT[:5000]), _TEXT[:5000]),
+    "gzip-multi": ("gzip",
+                   gzip.compress(_TEXT[:3000], mtime=0)
+                   + gzip.compress(_SMALL, mtime=0),
+                   _TEXT[:3000] + _SMALL),
+    "gzip-x": ("x-gzip", gzip.compress(_SMALL, mtime=0), _SMALL),
+    "gzip-level0": ("gzip", gzip.compress(_TEXT[:70_000], 0, mtime=0),
+                    _TEXT[:70_000]),
+    "zlib-text": ("deflate", zlib.compress(_TEXT), _TEXT),
+    "zlib-mixed": ("deflate", zlib.compress(_MIXED, 9), _MIXED),
+    "raw-text": ("deflate", _raw_deflate(_TEXT), _TEXT),
+    "raw-mixed": ("deflate", _raw_deflate(_MIXED, 1), _MIXED),
+    "raw-level0": ("deflate", _raw_deflate(_TEXT[:70_000], 0),
+                   _TEXT[:70_000]),
+    #  An encoding the client does not implement: delivered as is.
+    "br-opaque": ("br", b"\x0b\x02\x80hello\x03", b"\x0b\x02\x80hello\x03"),
+    #  Content-Encoding: identity is no coding at all.
+    "identity": ("identity", _SMALL, _SMALL),
+    #  gzip-small with its CRC-32 flipped.
+    "gzip-bad-crc": ("gzip",
+                     (lambda w: w[:-8] + bytes([w[-8] ^ 1]) + w[-7:])(
+                         gzip.compress(_SMALL, mtime=0)),
+                     b""),
+}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -59,8 +150,97 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if body:
             self.wfile.write(body)
 
+    def _send_coded(self, name: str, query: dict[str, list[str]]) -> None:
+        if name not in CODED:
+            self._send_fixed(404, b"no such variant\n", "text/plain")
+            return
+        encoding, wire, plain = CODED[name]
+        if "plain" in query:
+            self._send_fixed(200, plain, "application/octet-stream")
+            return
+        framing = query.get("framing", ["length"])[0]
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Encoding", encoding)
+        self.send_header("Connection", "close")
+        if framing == "chunked":
+            size = int(query.get("chunk", ["4096"])[0])
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for i in range(0, len(wire), size):
+                piece = wire[i:i + size]
+                self.wfile.write(f"{len(piece):x}\r\n".encode("ascii"))
+                self.wfile.write(piece + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        elif framing == "eof":
+            self.end_headers()
+            self.wfile.write(wire)
+            self.close_connection = True
+        else:
+            self.send_header("Content-Length", str(len(wire)))
+            self.end_headers()
+            self.wfile.write(wire)
+
+    def _redirect_or_inspect(self) -> bool:
+        """The routes every method shares. False if the path is not
+        one of them."""
+        url = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(url.query, keep_blank_values=True)
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        received = self.rfile.read(length) if length > 0 else b""
+        if url.path.startswith("/r/") and url.path[3:].isdigit():
+            self._send_fixed(int(url.path[3:]), b"redirect body, not for you\n",
+                             "text/plain",
+                             extra_headers=(("Location", query["to"][0]),))
+            return True
+        if url.path == "/r/loop":
+            n = int(query.get("n", ["0"])[0])
+            self._send_fixed(302, b"loop\n", "text/plain",
+                             extra_headers=(("Location", f"/r/loop?n={n + 1}"),))
+            return True
+        if url.path == "/inspect":
+            lines = [f"method={self.command}", f"body={len(received)}"]
+            for name in ("Host", "Authorization", "Cookie", "Content-Type",
+                         "Accept-Encoding"):
+                lines.append(f"{name.lower()}={self.headers.get(name, '-')}")
+            self._send_fixed(200, ("\n".join(lines) + "\n").encode("latin-1"),
+                             "text/plain")
+            return True
+        return False
+
+    def do_PUT(self):  # noqa: N802
+        if not self._redirect_or_inspect():
+            self._send_fixed(404, b"not found\n", "text/plain")
+
+    def do_DELETE(self):  # noqa: N802
+        if not self._redirect_or_inspect():
+            self._send_fixed(404, b"not found\n", "text/plain")
+
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
-        if self.path == "/hello":
+        url = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(url.query, keep_blank_values=True)
+
+        if self._redirect_or_inspect():
+            pass
+
+        elif url.path.startswith("/coded/"):
+            self._send_coded(url.path[len("/coded/"):], query)
+
+        elif url.path == "/coded-partial":
+            body = gzip.compress(_TEXT, mtime=0)[:100]
+            self._send_fixed(206, body, "application/octet-stream",
+                             extra_headers=(
+                                 ("Content-Encoding", "gzip"),
+                                 ("Content-Range",
+                                  f"bytes 0-99/{len(body)}"),
+                             ))
+
+        elif url.path == "/accept-encoding":
+            value = self.headers.get("Accept-Encoding")
+            self._send_fixed(200, (value or "<none>").encode("latin-1"),
+                             "text/plain")
+
+        elif self.path == "/hello":
             self._send_fixed(200, b"hello, world\n", "text/plain")
 
         elif self.path == "/slow":
@@ -128,7 +308,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_HEAD(self):  # noqa: N802
         # HEAD mirrors GET /hello's headers, Content-Length included,
         # with no body; the client must return an empty Body_B.
-        if self.path == "/hello":
+        if self.path.startswith("/r/"):
+            #  A HEAD redirect carries no body.
+            url = urllib.parse.urlsplit(self.path)
+            query = urllib.parse.parse_qs(url.query)
+            self.send_response(int(url.path[3:]))
+            self.send_header("Location", query["to"][0])
+            self.send_header("Content-Length", "27")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif self.path == "/hello":
             body = b"hello, world\n"
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
@@ -143,6 +332,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):  # noqa: N802
+        if self.path != "/echo" and self._redirect_or_inspect():
+            return
         if self.path == "/echo":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""

@@ -99,6 +99,13 @@ package AHT.Mbedtls.SSL is
       Len : Interfaces.C.size_t) return Interfaces.C.int
      with Import, Convention => C, External_Name => "mbedtls_ssl_read";
 
+   function Check_Pending (SSL : System.Address) return Interfaces.C.int
+     with Import, Convention => C,
+          External_Name => "mbedtls_ssl_check_pending";
+   --  Non-zero when the context holds data not yet returned by Read:
+   --  decrypted application data, or further records already in its
+   --  input buffer.
+
    function Write
      (SSL : System.Address;
       Buf : System.Address;

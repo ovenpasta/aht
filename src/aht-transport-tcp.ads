@@ -108,6 +108,10 @@ package AHT.Transport.TCP is
 
    overriding function Is_Connected (Self : TCP_Transport) return Boolean;
 
+   overriding function Peer_Quiet (Self : TCP_Transport) return Boolean;
+   --  A non-blocking peek of one byte: quiet when the receive would
+   --  block. A pending byte, a FIN or a socket error is not quiet.
+
    overriding procedure Set_Read_Deadline
      (Self     : in out TCP_Transport;
       Deadline : Duration);

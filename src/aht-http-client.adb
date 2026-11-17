@@ -1,18 +1,22 @@
 --  Copyright (C) 2026 Aldo Nicolas Bruno
 --  SPDX-License-Identifier: Apache-2.0
 
+with Ada.Characters.Handling;
+with Ada.Finalization;
 with Ada.Strings;
 with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 
 with AHT.HTTP.Methods;
+with AHT.HTTP.Status;
 with AHT.Transport.TCP;
 with AHT.Transport.TLS;
-with AHT.URL;
 
 package body AHT.HTTP.Client is
 
    use type AHT.Transport.Transport_Access;
+   use type AHT.HTTP.Methods.Method_Type;
+   use type AHT.URL.Scheme_Kind;
 
    function Seconds (S : Duration) return Phase_Bound is
      ((Inherited => False, Limit => S));
@@ -44,16 +48,58 @@ package body AHT.HTTP.Client is
             (AHT.URL.Port_Number'Image (U.Port), Ada.Strings.Both);
    end Host_Header;
 
-   --  Merges Self.Default_Headers and the auto-set Host / User-Agent
-   --  / Connection onto Working: request beats defaults, defaults
-   --  beat auto. A default name absent from Req.Headers is copied
-   --  with all its values; Host, User-Agent and Connection are set
-   --  only if still absent, so a request's Connection: Upgrade is
-   --  preserved.
+   function Lower (S : String) return String
+     renames Ada.Characters.Handling.To_Lower;
+
+   --  True when some value of header Name lists Token among its
+   --  comma-separated elements (case-insensitive).
+   function Lists_Token
+     (H : AHT.HTTP.Headers.Map; Name, Token : String) return Boolean is
+   begin
+      for V of H.Values (Name) loop
+         declare
+            L     : constant String := Lower (V);
+            First : Positive := L'First;
+         begin
+            loop
+               declare
+                  Comma : constant Natural :=
+                    Ada.Strings.Fixed.Index (L (First .. L'Last), ",");
+                  Stop  : constant Natural :=
+                    (if Comma = 0 then L'Last else Comma - 1);
+               begin
+                  if Ada.Strings.Fixed.Trim
+                       (L (First .. Stop), Ada.Strings.Both) = Token
+                  then
+                     return True;
+                  end if;
+                  exit when Comma = 0;
+                  First := Comma + 1;
+               end;
+            end loop;
+         end;
+      end loop;
+      return False;
+   end Lists_Token;
+
+   function Same_Origin (A, B : AHT.URL.URL_Type) return Boolean is
+     (A.Scheme = B.Scheme
+      and then Lower (To_String (A.Host)) = Lower (To_String (B.Host))
+      and then A.Port = B.Port);
+
+   --  Merges Self.Default_Headers and the auto-set headers onto
+   --  Working: request beats defaults, defaults beat auto. A default
+   --  name absent from Req.Headers is copied with all its values;
+   --  Host, User-Agent, Connection and (when decoding)
+   --  Accept-Encoding are set only if still absent, so a request's
+   --  Connection: Upgrade is preserved. Strip_Credentials then
+   --  removes what must not follow a redirect to another origin,
+   --  whichever source set it.
    procedure Merge_Headers
-     (Self    : Client_Type;
-      Req     : AHT.HTTP.Request.Request_Type;
-      Working : in out AHT.HTTP.Request.Request_Type)
+     (Self              : Client_Type;
+      Req               : AHT.HTTP.Request.Request_Type;
+      Working           : in out AHT.HTTP.Request.Request_Type;
+      Strip_Credentials : Boolean)
    is
       procedure Add_If_Req_Absent (Name, Value : String) is
       begin
@@ -71,7 +117,21 @@ package body AHT.HTTP.Client is
          Working.Headers.Set ("user-agent", To_String (Self.User_Agent));
       end if;
       if not Working.Headers.Contains ("connection") then
-         Working.Headers.Set ("connection", "close");
+         Working.Headers.Set
+           ("connection",
+            (if AHT.HTTP.Connection_Pools.Is_Null (Self.Pool)
+             then "close" else "keep-alive"));
+      end if;
+      if Self.Max_Decoded_Bytes not in AHT.HTTP.Response.No_Decoding
+        and then not Working.Headers.Contains ("accept-encoding")
+      then
+         Working.Headers.Set ("accept-encoding", "gzip, deflate");
+      end if;
+
+      if Strip_Credentials then
+         Working.Headers.Remove ("authorization");
+         Working.Headers.Remove ("proxy-authorization");
+         Working.Headers.Remove ("cookie");
       end if;
    end Merge_Headers;
 
@@ -80,20 +140,28 @@ package body AHT.HTTP.Client is
    --  101 is terminal, leaving post-header bytes buffered for the
    --  next layer. Source, when non-null, streams the request body via
    --  Write_Streaming with Cancel as the between-window abort check.
+   --  Persistent is the final response's.
    procedure Wire_Round_Trip
-     (Self    : Client_Type;
-      Working : AHT.HTTP.Request.Request_Type;
-      Method  : AHT.HTTP.Methods.Method_Type;
-      T       : in out AHT.Transport.Transport_Type'Class;
-      Resp    : out AHT.HTTP.Response.Response_Type;
-      Sink    : not null access
+     (Self       : Client_Type;
+      Working    : AHT.HTTP.Request.Request_Type;
+      Method     : AHT.HTTP.Methods.Method_Type;
+      T          : in out AHT.Transport.Transport_Type'Class;
+      Resp       : out AHT.HTTP.Response.Response_Type;
+      Sink       : not null access
         procedure (Chunk : AHT.Bytes.Byte_Array);
-      Source  : access AHT.HTTP.Request.Body_Source'Class := null;
-      Cancel  : access Cancel_State := null)
+      Source     : access AHT.HTTP.Request.Body_Source'Class;
+      Cancel     : access Cancel_State;
+      Persistent : out Boolean;
+      Head_Read  : access Boolean)
    is
       function Aborted return Boolean is
         (Cancel /= null and then Cancel.Was_Cancelled);
    begin
+      --  A pooled transport carries the previous exchange's deadlines;
+      --  start from none. Duration'Last clears.
+      T.Set_Read_Deadline (Duration'Last);
+      T.Set_Write_Deadline (Duration'Last);
+
       if Source /= null then
          --  Streaming upload only: a parked Write raises
          --  Timeout_Error instead of hanging. The deadline bites only
@@ -130,26 +198,131 @@ package body AHT.HTTP.Client is
 
       loop
          AHT.HTTP.Response.Read_Streaming
-           (Resp, T, Sink => Sink, Method => Method);
+           (Resp, T, Sink,
+            Method     => Method,
+            Max_Decoded => Self.Max_Decoded_Bytes,
+            Persistent  => Persistent,
+            Head_Read   => Head_Read);
          exit when Resp.Status not in 100 .. 199
            or else Resp.Status = 101;
       end loop;
    end Wire_Round_Trip;
 
-   --  Single core for every Send overload. Sink receives body chunks;
-   --  the buffered overloads pass one that appends to Resp.Body_B.
-   --  Source, when non-null, streams the request body; otherwise
-   --  Req.Body_B is written. Cancel, when non-null, is bound to the
-   --  live transport so a concurrent Cancel can Abort_Pending it,
-   --  and a pre-cancelled handle does not dial.
-   procedure Run_Request
-     (Self   : Client_Type;
-      Req    : AHT.HTTP.Request.Request_Type;
-      Resp   : out AHT.HTTP.Response.Response_Type;
-      Sink   : not null access
+   --  Unbinds a Cancel_State when it goes out of scope, so that every
+   --  way out of Exchange, an abort included, leaves the state bound
+   --  to nothing: the transport it pointed at is about to be closed
+   --  or freed, and a later Cancel must not reach it.
+   type Binding is new Ada.Finalization.Limited_Controlled with record
+      State : Cancel_State_Access;
+   end record;
+
+   overriding procedure Finalize (Self : in out Binding) is
+   begin
+      if Self.State /= null then
+         Self.State.Unbind;
+         Self.State := null;
+      end if;
+   end Finalize;
+
+   procedure Arm (Self : in out Binding; State : Cancel_State_Access) is
+   begin
+      Self.State := State;
+   end Arm;
+
+   --  Wire_Round_Trip with T bound to Cancel for its duration. A
+   --  Cancel that landed while bound may have fired Abort_Pending at
+   --  T, which can still be pending, so such a transport is reported
+   --  not Persistent. Unbind (the Binding's finalization) and the
+   --  Was_Cancelled check are ordered under the Cancel_State lock: a
+   --  Cancel after Unbind fires at nothing.
+   procedure Exchange
+     (Self       : Client_Type;
+      Working    : AHT.HTTP.Request.Request_Type;
+      Method     : AHT.HTTP.Methods.Method_Type;
+      T          : in out AHT.Transport.Transport_Type'Class;
+      Resp       : out AHT.HTTP.Response.Response_Type;
+      Sink       : not null access
         procedure (Chunk : AHT.Bytes.Byte_Array);
-      Cancel : access Cancel_State;
-      Source : access AHT.HTTP.Request.Body_Source'Class := null)
+      Source     : access AHT.HTTP.Request.Body_Source'Class;
+      Cancel     : access Cancel_State;
+      Persistent : out Boolean;
+      Head_Read  : access Boolean) is
+   begin
+      declare
+         B : Binding;
+      begin
+         --  Race window: Cancel could fire between Connect returning
+         --  and Bind running. Bind itself re-checks Cancelled under
+         --  the protected lock and triggers Abort_Pending on the
+         --  freshly bound transport, so a Cancel landing here still
+         --  takes effect on the next Read.
+         if Cancel /= null then
+            --  'Unchecked_Access: B cannot outlive this block, and
+            --  the state outlives the Send that was handed it.
+            Arm (B, Cancel.all'Unchecked_Access);
+            Cancel.Bind (T'Unchecked_Access);
+         end if;
+
+         Wire_Round_Trip
+           (Self, Working, Method, T, Resp, Sink, Source, Cancel,
+            Persistent, Head_Read);
+      end;
+
+      if Cancel /= null and then Cancel.Was_Cancelled then
+         Persistent := False;
+      end if;
+   end Exchange;
+
+   --  Owns one pooled connection for the duration of a hop, so every
+   --  exit, an abort included, closes and frees what was not handed
+   --  back to the pool.
+   type Lease is new Ada.Finalization.Limited_Controlled with record
+      C : aliased AHT.HTTP.Connection_Pools.Connection;
+   end record;
+
+   overriding procedure Finalize (Self : in out Lease) is
+   begin
+      AHT.HTTP.Connection_Pools.Discard (Self.C);
+   end Finalize;
+
+   function Endpoint_Of
+     (Self : Client_Type;
+      U    : AHT.URL.URL_Type) return AHT.HTTP.Connection_Pools.Endpoint is
+     (Scheme      => U.Scheme,
+      Host        => U.Host,
+      Port        => U.Port,
+      TLS_Profile =>
+        (if U.Scheme = AHT.URL.HTTPS
+         then To_Unbounded_String
+                ((if Self.Insecure then "insecure" else "verify")
+                 & ASCII.NUL & To_String (Self.CA_Path)
+                 & ASCII.NUL & To_String (Self.CA_PEM))
+         else Null_Unbounded_String));
+
+   function Pool_Endpoint
+     (Self : Client_Type;
+      URL  : AHT.URL.URL_Type) return AHT.HTTP.Connection_Pools.Endpoint
+     renames Endpoint_Of;
+
+   function Idempotent (M : AHT.HTTP.Methods.Method_Type) return Boolean is
+     (M in AHT.HTTP.Methods.GET | AHT.HTTP.Methods.HEAD
+         | AHT.HTTP.Methods.PUT | AHT.HTTP.Methods.DELETE
+         | AHT.HTTP.Methods.OPTIONS);
+
+   --  One request/response exchange for Req (a hop of a Send). Sink
+   --  receives body chunks. Source, when non-null, streams the
+   --  request body; otherwise Req.Body_B is written. Cancel, when
+   --  non-null, is bound to the live transport so a concurrent Cancel
+   --  can Abort_Pending it, and a pre-cancelled handle does not dial.
+   procedure Run_Hop
+     (Self              : Client_Type;
+      Req               : AHT.HTTP.Request.Request_Type;
+      Resp              : out AHT.HTTP.Response.Response_Type;
+      Sink              : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array);
+      Cancel            : access Cancel_State;
+      Source            : access AHT.HTTP.Request.Body_Source'Class;
+      Strip_Credentials : Boolean)
    is
       Working : AHT.HTTP.Request.Request_Type := Req;
 
@@ -165,8 +338,114 @@ package body AHT.HTTP.Client is
         Resolve_Bound (Self, Self.Connect_Timeout);
       Handshake_B : constant Duration :=
         Resolve_Bound (Self, Self.Handshake_Deadline);
+
+      Persistent : Boolean;
+
+      --  Whether a status line came back in this hop. Written through
+      --  an access by the response reader, so it is right after a
+      --  raise.
+      Answered : aliased Boolean := False;
+
+      procedure Connect_TCP (T : in out AHT.Transport.TCP.TCP_Transport) is
+      begin
+         AHT.Transport.TCP.Connect
+           (T,
+            Host            => To_String (Req.Target.Host),
+            Port            => Req.Target.Port,
+            Connect_Timeout => Connect_B,
+            Resolve_Timeout => Resolve_B);
+      end Connect_TCP;
+
+      procedure Connect_TLS (T : in out AHT.Transport.TLS.TLS_Transport) is
+      begin
+         AHT.Transport.TLS.Connect
+           (T,
+            Host               => To_String (Req.Target.Host),
+            Port               => Req.Target.Port,
+            Insecure           => Self.Insecure,
+            CA_Path            => To_String (Self.CA_Path),
+            Connect_Timeout    => Connect_B,
+            Handshake_Deadline => Handshake_B,
+            Resolve_Timeout    => Resolve_B,
+            CA_PEM             => To_String (Self.CA_PEM));
+      end Connect_TLS;
+
+      --  The pooled path. A hop on a connection from the pool that
+      --  fails before the caller saw a body byte is retried once on a
+      --  fresh connection when that is safe (see Send in the spec).
+      procedure Run_Pooled is
+         use AHT.HTTP.Connection_Pools;
+
+         function View (C : Connection) return AHT.Transport.Transport_Access
+           renames AHT.HTTP.Connection_Pools.Transport;
+
+         Where     : constant Endpoint := Endpoint_Of (Self, Req.Target);
+         function Retry_Safe return Boolean is
+           (Idempotent (Req.Method)
+            and then Source = null
+            and then not Answered
+            and then not (Cancel /= null and then Cancel.Was_Cancelled));
+
+         --  Set by Attempt as soon as it has a pooled connection. Not an
+         --  out parameter: a scalar out is not copied back when the
+         --  call propagates, and propagating is when it is needed.
+         Reused : Boolean := False;
+
+         procedure Attempt (Reuse : Boolean) is
+            L     : Lease;
+            Found : Boolean := False;
+         begin
+            Reused := False;
+            if Reuse then
+               --  Skip connections the peer has spoken on since they
+               --  were parked; that is almost always its close.
+               loop
+                  Acquire (Self.Pool, Where, L.C'Access, Found);
+                  exit when not Found or else View (L.C).Peer_Quiet;
+                  Discard (L.C);
+               end loop;
+            end if;
+
+            if Found then
+               Reused := True;
+            else
+               Allocate (L.C, Req.Target.Scheme);
+               if Req.Target.Scheme = AHT.URL.HTTP then
+                  Connect_TCP
+                    (AHT.Transport.TCP.TCP_Transport (View (L.C).all));
+               else
+                  Connect_TLS
+                    (AHT.Transport.TLS.TLS_Transport (View (L.C).all));
+               end if;
+            end if;
+
+            Exchange
+              (Self, Working, Req.Method, View (L.C).all, Resp,
+               Sink, Source, Cancel, Persistent, Answered'Access);
+
+            if Persistent
+              and then not Lists_Token (Working.Headers, "connection", "close")
+            then
+               Release (Self.Pool, Where, L.C'Access);
+            end if;
+            --  Otherwise L's finalization closes it.
+         end Attempt;
+      begin
+         begin
+            Attempt (Reuse => True);
+         exception
+            when AHT.Transport.Transport_Error
+               | Protocol_Error
+               | AHT.Transport.TLS.TLS_Error =>
+               if not (Reused and then Retry_Safe) then
+                  raise;
+               end if;
+               Attempt (Reuse => False);
+         end;
+      end Run_Pooled;
+
    begin
-      Merge_Headers (Self, Req, Working);
+      Merge_Headers (Self, Req, Working, Strip_Credentials);
 
       if Cancel /= null and then Cancel.Was_Cancelled then
          raise AHT.Transport.Aborted_Error
@@ -174,44 +453,32 @@ package body AHT.HTTP.Client is
              & "before the request started";
       end if;
 
+      if Req.Target.Scheme in AHT.URL.WS | AHT.URL.WSS then
+         raise HTTP_Error
+           with "ws/wss URL passed to HTTP.Client.Send; "
+             & "use AHT.Websocket.Client for WebSocket connections";
+      end if;
+
+      if not AHT.HTTP.Connection_Pools.Is_Null (Self.Pool) then
+         Run_Pooled;
+         return;
+      end if;
+
       case Req.Target.Scheme is
          when AHT.URL.HTTP =>
             declare
                T : aliased AHT.Transport.TCP.TCP_Transport;
             begin
-               AHT.Transport.TCP.Connect
-                 (T,
-                  Host            => To_String (Req.Target.Host),
-                  Port            => Req.Target.Port,
-                  Connect_Timeout => Connect_B,
-                  Resolve_Timeout => Resolve_B);
-
-               --  Race window: Cancel could fire between Connect
-               --  returning and Bind running. Bind itself re-checks
-               --  Cancelled under the protected lock and triggers
-               --  Abort_Pending on the freshly bound transport, so a
-               --  Cancel landing here still takes effect on the next
-               --  Read.
-               if Cancel /= null then
-                  Cancel.Bind (T'Unchecked_Access);
-               end if;
-
+               Connect_TCP (T);
                begin
-                  Wire_Round_Trip
+                  Exchange
                     (Self, Working, Req.Method, T, Resp, Sink,
-                     Source, Cancel);
+                     Source, Cancel, Persistent, Answered'Access);
                exception
                   when others =>
-                     if Cancel /= null then
-                        Cancel.Unbind;
-                     end if;
                      T.Close;
                      raise;
                end;
-
-               if Cancel /= null then
-                  Cancel.Unbind;
-               end if;
                T.Close;
             end;
 
@@ -219,49 +486,136 @@ package body AHT.HTTP.Client is
             declare
                T : aliased AHT.Transport.TLS.TLS_Transport;
             begin
-               AHT.Transport.TLS.Connect
-                 (T,
-                  Host               => To_String (Req.Target.Host),
-                  Port               => Req.Target.Port,
-                  Insecure           => Self.Insecure,
-                  CA_Path            => To_String (Self.CA_Path),
-                  Connect_Timeout    => Connect_B,
-                  Handshake_Deadline => Handshake_B,
-                  Resolve_Timeout    => Resolve_B,
-                  CA_PEM             => To_String (Self.CA_PEM));
-
-               --  Same Cancel bind/unbind discipline as the HTTP
-               --  branch: Bind re-checks Cancelled under the lock and
-               --  fires Abort_Pending on the freshly-bound TLS
-               --  transport, which forwards to the underlying TCP.
-               if Cancel /= null then
-                  Cancel.Bind (T'Unchecked_Access);
-               end if;
-
+               Connect_TLS (T);
                begin
-                  Wire_Round_Trip
+                  Exchange
                     (Self, Working, Req.Method, T, Resp, Sink,
-                     Source, Cancel);
+                     Source, Cancel, Persistent, Answered'Access);
                exception
                   when others =>
-                     if Cancel /= null then
-                        Cancel.Unbind;
-                     end if;
                      T.Close;
                      raise;
                end;
-
-               if Cancel /= null then
-                  Cancel.Unbind;
-               end if;
                T.Close;
             end;
 
          when AHT.URL.WS | AHT.URL.WSS =>
-            raise HTTP_Error
-              with "ws/wss URL passed to HTTP.Client.Send; "
-                & "use AHT.Websocket.Client for WebSocket connections";
+            null;   --  refused above
       end case;
+   end Run_Hop;
+
+   --  A 303, or a 301 / 302 answering a POST, continues as a GET (a
+   --  HEAD stays a HEAD) without the request body (RFC 9110 sec.
+   --  15.4); 307 and 308, and 301 / 302 for other methods, repeat the
+   --  request as it was.
+   function Drops_Body
+     (Status : AHT.HTTP.Status.Status_Code;
+      Method : AHT.HTTP.Methods.Method_Type) return Boolean is
+     (Status = 303
+      or else (Status in 301 | 302 and then Method = AHT.HTTP.Methods.POST));
+
+   --  Single core for every Send overload: Run_Hop per hop, following
+   --  redirects as Self.Max_Redirects allows. Sink receives the body
+   --  of the response returned; a followed redirect's body is read
+   --  and dropped.
+   procedure Run_Request
+     (Self   : Client_Type;
+      Req    : AHT.HTTP.Request.Request_Type;
+      Resp   : out AHT.HTTP.Response.Response_Type;
+      Sink   : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array);
+      Cancel : access Cancel_State;
+      Source : access AHT.HTTP.Request.Body_Source'Class := null)
+   is
+      Hop        : AHT.HTTP.Request.Request_Type := Req;
+      Hop_Source : access AHT.HTTP.Request.Body_Source'Class := Source;
+      Hops       : Natural := 0;
+
+      --  Whether the response being read is a redirect this Send
+      --  follows. Decided from the status line and headers alone, so
+      --  it holds from the first body byte; the checks that refuse a
+      --  redirect (hop count, Location, scheme) raise after the body
+      --  is drained. A redirect that needs a streamed body replayed is
+      --  not followed.
+      function Following return Boolean is
+        (Self.Max_Redirects > 0
+         and then Resp.Status in 301 | 302 | 303 | 307 | 308
+         and then Resp.Headers.Contains ("location")
+         and then (Hop_Source = null
+                   or else Drops_Body (Resp.Status, Hop.Method)));
+
+      procedure Forward (Chunk : AHT.Bytes.Byte_Array) is
+      begin
+         if not Following then
+            Sink (Chunk);
+         end if;
+      end Forward;
+   begin
+      loop
+         Run_Hop
+           (Self, Hop, Resp, Forward'Access, Cancel, Hop_Source,
+            Strip_Credentials => not Same_Origin (Hop.Target, Req.Target));
+         Resp.Final_URL := Hop.Target;
+
+         exit when not Following;
+
+         if Hops = Self.Max_Redirects then
+            raise Redirect_Error with
+              "HTTP.Client.Send: more than" & Self.Max_Redirects'Image
+              & " redirects, last to " & Resp.Headers.Get ("location");
+         end if;
+         Hops := Hops + 1;
+
+         declare
+            Location : constant String := Resp.Headers.Get ("location");
+            Next     : AHT.URL.URL_Type;
+         begin
+            begin
+               Next := AHT.URL.Resolve (Hop.Target, Location);
+            exception
+               when E : AHT.URL.Parse_Error =>
+                  raise Redirect_Error with
+                    "HTTP.Client.Send: unusable Location """ & Location
+                    & """: " & Ada.Exceptions.Exception_Message (E);
+            end;
+
+            if Next.Scheme not in AHT.URL.HTTP | AHT.URL.HTTPS then
+               raise Redirect_Error with
+                 "HTTP.Client.Send: redirect to a non-HTTP URL: "
+                 & Location;
+            end if;
+            if Hop.Target.Scheme = AHT.URL.HTTPS
+              and then Next.Scheme = AHT.URL.HTTP
+              and then not Self.Allow_Redirect_Downgrade
+            then
+               raise Redirect_Error with
+                 "HTTP.Client.Send: refusing https to http redirect to "
+                 & Location;
+            end if;
+
+            --  RFC 9110 sec. 10.2.2: a Location without a fragment
+            --  inherits the request's.
+            if Length (Next.Fragment) = 0 then
+               Next.Fragment := Hop.Target.Fragment;
+            end if;
+
+            if Drops_Body (Resp.Status, Hop.Method) then
+               if Hop.Method /= AHT.HTTP.Methods.HEAD then
+                  Hop.Method := AHT.HTTP.Methods.GET;
+               end if;
+               Hop.Body_B.Clear;
+               Hop.Headers.Remove ("content-length");
+               Hop.Headers.Remove ("content-type");
+               Hop.Headers.Remove ("content-encoding");
+               Hop.Headers.Remove ("transfer-encoding");
+               Hop_Source := null;
+            end if;
+
+            --  Host is the new target's, whatever the caller set.
+            Hop.Headers.Remove ("host");
+            Hop.Target := Next;
+         end;
+      end loop;
    end Run_Request;
 
    procedure Send
@@ -326,7 +680,8 @@ package body AHT.HTTP.Client is
    --  download mirror of Stream_Source.Read_Chunk's copy;
    --  Stream_Element'Size = Octet'Size = 8 on every supported target),
    --  then dispatches to the stream's Write. A raising Write propagates
-   --  out through Run_Request, which closes the transport.
+   --  out through Run_Request; the hop that owned the transport closes
+   --  it on the way.
    procedure Send_Streaming
      (Self   : in out Client_Type;
       Req    : AHT.HTTP.Request.Request_Type;

@@ -16,6 +16,9 @@ required. Every authored file carries an SPDX header and the
 repository is [REUSE](https://reuse.software) compliant; keep it that
 way (`reuse lint` runs in CI). Third-party material in a contribution
 must be identified in the pull request with its source and license.
+The DEFLATE decoder (`src/aht-inflate*.ad?`) is derived from Zip-Ada
+and stays under its MIT licence (`LICENSES/MIT.txt`); see
+`docs/inflate.md`.
 
 ## Layout
 

@@ -770,6 +770,23 @@ package body AHT.Transport.TCP is
    overriding function Is_Connected (Self : TCP_Transport) return Boolean is
      (Self.Connected);
 
+   overriding function Peer_Quiet (Self : TCP_Transport) return Boolean is
+      Buffer : Stream_Element_Array (1 .. 1);
+      Last   : Stream_Element_Offset;
+   begin
+      if not Self.Connected then
+         return False;
+      end if;
+      --  The socket is non-blocking, so the peek returns at once:
+      --  with a byte, with EOF (Last < Buffer'First), or by raising
+      --  would-block, the one quiet answer.
+      Receive_Socket (Self.Socket, Buffer, Last, Flags => Peek_At_Incoming_Data);
+      return False;
+   exception
+      when E : Socket_Error =>
+         return Resolve_Exception (E) = Resource_Temporarily_Unavailable;
+   end Peer_Quiet;
+
    overriding procedure Set_Read_Deadline
      (Self     : in out TCP_Transport;
       Deadline : Duration)

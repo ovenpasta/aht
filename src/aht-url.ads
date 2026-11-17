@@ -52,4 +52,21 @@ package AHT.URL is
    function Request_Target (U : URL_Type) return String;
    --  The "path?query" that goes on the HTTP request line.
 
+   function Resolve (Base : URL_Type; Reference : String) return URL_Type
+     with Post => Ada.Strings.Unbounded.Length (Resolve'Result.Host) > 0;
+   --  The target of Reference, a URI reference such as a Location
+   --  header value, relative to Base (RFC 3986 sec. 5.2): an absolute
+   --  URL is parsed as by Parse, "//host/path" takes Base's scheme,
+   --  "/path", "path", "?query" and "" take Base's scheme and
+   --  authority, and a relative path is merged with Base's. Dot
+   --  segments are removed from the result's path. The fragment is
+   --  Reference's own, empty when it has none.
+   --
+   --  Bytes that may not appear in a request target (controls, space,
+   --  bytes at or above 16#7F#, and " < > \ ^ ` { | }) are
+   --  percent-encoded in the path and query; existing escapes are kept.
+   --  Raises Parse_Error where Parse would, for a scheme with no "//"
+   --  authority ("mailto:x"), and for a host holding such a byte
+   --  (escaping would name a different host).
+
 end AHT.URL;

@@ -2,11 +2,13 @@
 --  SPDX-License-Identifier: Apache-2.0
 
 with Ada.Characters.Handling;
+with Ada.Exceptions;
 with Ada.Strings;
 with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 
 with AHT.HTTP.IO;
+with AHT.Inflate;
 
 package body AHT.HTTP.Response is
 
@@ -66,7 +68,8 @@ package body AHT.HTTP.Response is
    procedure Parse_Status_Line
      (Line   : String;
       Code   : out AHT.HTTP.Status.Status_Code;
-      Reason : out Unbounded_String)
+      Reason : out Unbounded_String;
+      Minor  : out Natural)
    is
       First_SP : Natural;
       Second_SP : Natural;
@@ -90,6 +93,8 @@ package body AHT.HTTP.Response is
             raise Protocol_Error with
               "HTTP.Response: unsupported version """ & Version & """";
          end if;
+         Minor := Character'Pos (Version (Version'First + 7))
+                  - Character'Pos ('0');
       end;
 
       Second_SP := Ada.Strings.Fixed.Index
@@ -148,50 +153,6 @@ package body AHT.HTTP.Response is
          Value => Strip_OWS (Line (Colon + 1 .. Line'Last)));
    end Parse_Header_Line;
 
-   --  Streaming Content-Length body: read up to Chunk_Size bytes at
-   --  a time, dispatch each fill to Sink. Single Read_N for small
-   --  N (one chunk to Sink); larger N gets sliced into Chunk_Size
-   --  pieces so users see progress on large downloads.
-   procedure Read_N_Streaming
-     (T      : in out AHT.Transport.Transport_Type'Class;
-      N      : Natural;
-      Sink   : not null access
-        procedure (Chunk : AHT.Bytes.Byte_Array))
-   is
-      Chunk_Size : constant Positive := 4_096;
-      Remaining  : Natural := N;
-   begin
-      while Remaining > 0 loop
-         declare
-            This : constant Positive :=
-              (if Remaining < Chunk_Size then Remaining else Chunk_Size);
-            Buf  : AHT.Bytes.Byte_Array (1 .. This);
-         begin
-            AHT.HTTP.IO.Read_N (T, Buf);
-            Sink (Buf);
-            Remaining := Remaining - This;
-         end;
-      end loop;
-   end Read_N_Streaming;
-
-   --  Streaming read-until-EOF: pull whatever the transport gives
-   --  us per Read and dispatch each slice to Sink until a 0-byte
-   --  read signals peer close.
-   procedure Read_Until_EOF_Streaming
-     (T    : in out AHT.Transport.Transport_Type'Class;
-      Sink : not null access
-        procedure (Chunk : AHT.Bytes.Byte_Array))
-   is
-      Buf  : AHT.Bytes.Byte_Array (1 .. 4_096);
-      Last : Natural;
-   begin
-      loop
-         T.Read (Buf, Last);
-         exit when Last = 0;
-         Sink (Buf (Buf'First .. Last));
-      end loop;
-   end Read_Until_EOF_Streaming;
-
    --  Common head parser used by Read and Read_Streaming: status
    --  line, headers, no-body suppression. Returns True if the body
    --  must be skipped (HEAD / 1xx / 204 / 205 / 304); False if the
@@ -200,7 +161,9 @@ package body AHT.HTTP.Response is
      (Self        : out Response_Type;
       T           : in out AHT.Transport.Transport_Type'Class;
       Method      : AHT.HTTP.Methods.Method_Type;
-      Skip_Body   : out Boolean)
+      Skip_Body   : out Boolean;
+      Minor       : out Natural;
+      Head_Read   : access Boolean)
    is
       use type AHT.HTTP.Methods.Method_Type;
    begin
@@ -211,8 +174,12 @@ package body AHT.HTTP.Response is
       declare
          Status_Line : constant String := AHT.HTTP.IO.Read_Line (T);
       begin
-         Parse_Status_Line (Status_Line, Self.Status, Self.Reason);
+         Parse_Status_Line
+           (Status_Line, Self.Status, Self.Reason, Minor);
       end;
+      if Head_Read /= null then
+         Head_Read.all := True;
+      end if;
 
       loop
          declare
@@ -237,49 +204,214 @@ package body AHT.HTTP.Response is
         or else Self.Status = 304;
    end Parse_Head;
 
+   --  Body framing: chunked wins, then Content-Length, then EOF.
+   --  Only "chunked" is understood as a Transfer-Encoding; any other
+   --  (gzip, chunked+gzip, ...) is refused rather than handed back as
+   --  undecoded bytes.
+   procedure Select_Framing
+     (Self      : Response_Type;
+      Skip_Body : Boolean;
+      Reader    : out AHT.HTTP.IO.Body_Reader)
+   is
+      use AHT.HTTP.IO;
+   begin
+      if Skip_Body then
+         Start (Reader, No_Body);
+      elsif Self.Headers.Contains ("transfer-encoding") then
+         declare
+            TE : constant String :=
+              To_Lower (Self.Headers.Get ("transfer-encoding"));
+         begin
+            if TE /= "chunked" then
+               raise Protocol_Error with
+                 "HTTP.Response: unsupported Transfer-Encoding: """
+                 & TE & """";
+            end if;
+            Start (Reader, Chunked);
+         end;
+      elsif Self.Headers.Contains ("content-length") then
+         declare
+            First : constant String :=
+              Strip_OWS (Self.Headers.Get ("content-length"));
+         begin
+            --  RFC 9112 sec. 6.3: lengths that disagree leave the end
+            --  of the message unknowable.
+            for V of Self.Headers.Values ("content-length") loop
+               if Strip_OWS (V) /= First then
+                  raise Protocol_Error with
+                    "HTTP.Response: conflicting Content-Length values """
+                    & First & """ and """ & Strip_OWS (V) & """";
+               end if;
+            end loop;
+            Start (Reader, Fixed, Parse_Content_Length (First));
+         end;
+      else
+         Start (Reader, Until_Close);
+      end if;
+   end Select_Framing;
+
+   --  The decoder for Self's single Content-Encoding, if it has one
+   --  this package decodes.
+   procedure Select_Coding
+     (Self   : Response_Type;
+      Coded  : out Boolean;
+      Format : out AHT.Inflate.Format) is
+   begin
+      Coded  := False;
+      Format := AHT.Inflate.Gzip;
+      if Self.Status = 206
+        or else Natural (Self.Headers.Values ("content-encoding").Length) /= 1
+      then
+         return;
+      end if;
+      declare
+         CE : constant String :=
+           To_Lower (Strip_OWS (Self.Headers.Get ("content-encoding")));
+      begin
+         if CE = "gzip" or else CE = "x-gzip" then
+            Coded := True;
+            Format := AHT.Inflate.Gzip;
+         elsif CE = "deflate" then
+            Coded := True;
+            Format := AHT.Inflate.Zlib_Or_Raw;
+         end if;
+      end;
+   end Select_Coding;
+
+   --  True when a Connection header lists "close".
+   function Lists_Close (Self : Response_Type) return Boolean is
+   begin
+      for V of Self.Headers.Values ("connection") loop
+         declare
+            Lower : constant String := To_Lower (V);
+            First : Positive := Lower'First;
+         begin
+            while First <= Lower'Last + 1 loop
+               declare
+                  Comma : constant Natural :=
+                    Ada.Strings.Fixed.Index
+                      (Lower (First .. Lower'Last), ",");
+                  Stop  : constant Natural :=
+                    (if Comma = 0 then Lower'Last else Comma - 1);
+               begin
+                  if Strip_OWS (Lower (First .. Stop)) = "close" then
+                     return True;
+                  end if;
+                  exit when Comma = 0;
+                  First := Comma + 1;
+               end;
+            end loop;
+         end;
+      end loop;
+      return False;
+   end Lists_Close;
+
+   procedure Read_Streaming
+     (Self       : out Response_Type;
+      T          : in out AHT.Transport.Transport_Type'Class;
+      Sink       : not null access
+        procedure (Chunk : AHT.Bytes.Byte_Array);
+      Method      : AHT.HTTP.Methods.Method_Type;
+      Max_Decoded : Decode_Limit;
+      Persistent  : out Boolean;
+      Head_Read   : access Boolean := null)
+   is
+      use type Interfaces.Integer_64;
+
+      Skip   : Boolean;
+      Minor  : Natural;
+      Reader : AHT.HTTP.IO.Body_Reader;
+      Coded  : Boolean := False;
+      Format : AHT.Inflate.Format;
+      Framed : Boolean;
+
+      Decoded_Total : Interfaces.Integer_64 := 0;
+
+      procedure Pull (Data : out AHT.Bytes.Byte_Array; Last : out Natural) is
+      begin
+         AHT.HTTP.IO.Read (Reader, T, Data, Last);
+      end Pull;
+
+      --  The decoder's output, held to Max_Decoded.
+      procedure Bounded_Sink (Chunk : AHT.Bytes.Byte_Array) is
+         Room : constant Interfaces.Integer_64 :=
+           Max_Decoded - Decoded_Total;
+      begin
+         if Interfaces.Integer_64 (Chunk'Length) > Room then
+            if Room > 0 then
+               Sink (Chunk (Chunk'First .. Chunk'First + Natural (Room) - 1));
+               Decoded_Total := Max_Decoded;
+            end if;
+            raise Protocol_Error with
+              "HTTP.Response: decoded body exceeds Max_Decoded ("
+              & Ada.Strings.Fixed.Trim (Max_Decoded'Image, Ada.Strings.Both)
+              & " bytes)";
+         end if;
+         Decoded_Total := Decoded_Total + Interfaces.Integer_64 (Chunk'Length);
+         Sink (Chunk);
+      end Bounded_Sink;
+   begin
+      Persistent := False;
+      Parse_Head (Self, T, Method, Skip, Minor, Head_Read);
+      Select_Framing (Self, Skip, Reader);
+      --  Every framing but read-until-close ends at a known byte.
+      Framed := Skip
+        or else Self.Headers.Contains ("transfer-encoding")
+        or else Self.Headers.Contains ("content-length");
+
+      if Max_Decoded /= No_Decoding and then not Skip then
+         Select_Coding (Self, Coded, Format);
+      end if;
+
+      if Coded then
+         Self.Headers.Remove ("content-encoding");
+         Self.Headers.Remove ("content-length");
+         Self.Decoded := True;
+         begin
+            AHT.Inflate.Decode (Format, Pull'Access, Bounded_Sink'Access);
+         exception
+            when E : AHT.Inflate.Data_Error =>
+               raise Protocol_Error with
+                 "HTTP.Response: coded body: "
+                 & Ada.Exceptions.Exception_Message (E);
+         end;
+      else
+         declare
+            Buf  : AHT.Bytes.Byte_Array (1 .. 4_096);
+            Last : Natural;
+         begin
+            loop
+               AHT.HTTP.IO.Read (Reader, T, Buf, Last);
+               exit when Last < Buf'First;
+               Sink (Buf (Buf'First .. Last));
+            end loop;
+         end;
+      end if;
+
+      Persistent := Framed
+        and then AHT.HTTP.IO.At_End (Reader)
+        and then Self.Status /= 101
+        and then Minor >= 1
+        and then not Lists_Close (Self)
+        and then not
+          (Self.Headers.Contains ("transfer-encoding")
+           and then
+             (Self.Headers.Contains ("content-length")
+              or else Natural
+                (Self.Headers.Values ("transfer-encoding").Length) > 1));
+   end Read_Streaming;
+
    procedure Read_Streaming
      (Self   : out Response_Type;
       T      : in out AHT.Transport.Transport_Type'Class;
       Sink   : not null access
         procedure (Chunk : AHT.Bytes.Byte_Array);
-      Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET)
+      Method      : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET;
+      Max_Decoded : Decode_Limit := No_Decoding)
    is
-      Skip : Boolean;
+      Ignore : Boolean;
    begin
-      Parse_Head (Self, T, Method, Skip);
-      if Skip then
-         return;
-      end if;
-
-      --  Body framing: chunked wins, then Content-Length, then EOF.
-      if Self.Headers.Contains ("transfer-encoding") then
-         declare
-            TE : constant String :=
-              To_Lower (Self.Headers.Get ("transfer-encoding"));
-         begin
-            --  Only "chunked" is supported in v1. Anything else (gzip,
-            --  deflate, chunked+gzip, ...) would need a codec stack we
-            --  don't have yet, so refuse cleanly rather than silently
-            --  hand back corrupted bytes.
-            if TE = "chunked" then
-               AHT.HTTP.IO.Read_Chunked_Body (T, Sink);
-            else
-               raise Protocol_Error with
-                 "HTTP.Response: unsupported Transfer-Encoding: """
-                 & TE & """";
-            end if;
-         end;
-      elsif Self.Headers.Contains ("content-length") then
-         declare
-            N : constant Natural :=
-              Parse_Content_Length
-                (Strip_OWS (Self.Headers.Get ("content-length")));
-         begin
-            Read_N_Streaming (T, N, Sink);
-         end;
-      else
-         Read_Until_EOF_Streaming (T, Sink);
-      end if;
+      Read_Streaming (Self, T, Sink, Method, Max_Decoded, Ignore);
    end Read_Streaming;
 
    function Body_Text (Self : Response_Type) return String is
@@ -288,7 +420,8 @@ package body AHT.HTTP.Response is
    procedure Read
      (Self   : out Response_Type;
       T      : in out AHT.Transport.Transport_Type'Class;
-      Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET)
+      Method      : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET;
+      Max_Decoded : Decode_Limit := No_Decoding)
    is
       --  Body sink that appends every delivered chunk to Self.Body_B.
       --  Parse_Head (called inside Read_Streaming) clears Self before
@@ -299,7 +432,8 @@ package body AHT.HTTP.Response is
          Self.Body_B.Append (Chunk);
       end Append_To_Body;
    begin
-      Read_Streaming (Self, T, Append_To_Body'Access, Method);
+      Read_Streaming
+        (Self, T, Append_To_Body'Access, Method, Max_Decoded);
    end Read;
 
 end AHT.HTTP.Response;

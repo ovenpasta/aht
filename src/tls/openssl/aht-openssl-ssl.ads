@@ -122,6 +122,11 @@ package AHT.Openssl.SSL is
       Num : Interfaces.C.int) return Interfaces.C.int
      with Import, Convention => C, External_Name => "SSL_read";
 
+   function Has_Pending (S : System.Address) return Interfaces.C.int
+     with Import, Convention => C, External_Name => "SSL_has_pending";
+   --  1 when the SSL object holds data read from its BIO and not yet
+   --  returned by Read, decrypted or not; 0 otherwise.
+
    function Write
      (S   : System.Address;
       Buf : System.Address;

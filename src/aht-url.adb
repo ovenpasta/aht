@@ -255,4 +255,187 @@ package body AHT.URL is
       end if;
    end Request_Target;
 
+   ---------------------------------------------------------------------
+   --  Reference resolution (RFC 3986 sec. 5.2)
+   ---------------------------------------------------------------------
+
+   --  Percent-encode the bytes a request target may not carry.
+   function Escape_Unsafe (S : String) return String is
+      Hex : constant String := "0123456789ABCDEF";
+      R   : Unbounded_String;
+   begin
+      for C of S loop
+         declare
+            P : constant Natural := Character'Pos (C);
+         begin
+            if P <= 16#20# or else P >= 16#7F#
+              or else C in '"' | '<' | '>' | '\' | '^' | '`'
+                         | '{' | '|' | '}'
+            then
+               Append (R, '%');
+               Append (R, Hex (P / 16 + 1));
+               Append (R, Hex (P mod 16 + 1));
+            else
+               Append (R, C);
+            end if;
+         end;
+      end loop;
+      return To_String (R);
+   end Escape_Unsafe;
+
+   --  RFC 3986 sec. 5.2.4.
+   function Remove_Dot_Segments (Path : String) return String is
+      Input  : Unbounded_String := To_Unbounded_String (Path);
+      Output : Unbounded_String;
+
+      function Starts (Prefix : String) return Boolean is
+        (Length (Input) >= Prefix'Length
+         and then Slice (Input, 1, Prefix'Length) = Prefix);
+
+      --  Drop the last segment of Output and its preceding "/".
+      procedure Pop_Output is
+         S : constant String := To_String (Output);
+         Slash : constant Natural :=
+           Ada.Strings.Fixed.Index (S, "/", Going => Ada.Strings.Backward);
+      begin
+         if Slash = 0 then
+            Output := Null_Unbounded_String;
+         else
+            Output := To_Unbounded_String (S (S'First .. Slash - 1));
+         end if;
+      end Pop_Output;
+   begin
+      while Length (Input) > 0 loop
+         if Starts ("../") then
+            Delete (Input, 1, 3);
+         elsif Starts ("./") then
+            Delete (Input, 1, 2);
+         elsif Starts ("/./") then
+            Delete (Input, 1, 2);
+         elsif To_String (Input) = "/." then
+            Input := To_Unbounded_String ("/");
+         elsif Starts ("/../") then
+            Delete (Input, 1, 3);
+            Pop_Output;
+         elsif To_String (Input) = "/.." then
+            Input := To_Unbounded_String ("/");
+            Pop_Output;
+         elsif To_String (Input) = "." or else To_String (Input) = ".." then
+            Input := Null_Unbounded_String;
+         else
+            --  Move the first segment, with its leading "/" if any,
+            --  to Output.
+            declare
+               S    : constant String := To_String (Input);
+               Next : constant Natural :=
+                 Ada.Strings.Fixed.Index (S (S'First + 1 .. S'Last), "/");
+               Stop : constant Natural := (if Next = 0 then S'Last else Next - 1);
+            begin
+               Append (Output, S (S'First .. Stop));
+               Input := To_Unbounded_String (S (Stop + 1 .. S'Last));
+            end;
+         end if;
+      end loop;
+      return To_String (Output);
+   end Remove_Dot_Segments;
+
+   function Has_Scheme (S : String) return Boolean is
+   begin
+      if S'Length = 0 or else S (S'First) not in 'a' .. 'z' | 'A' .. 'Z' then
+         return False;
+      end if;
+      for I in S'First + 1 .. S'Last loop
+         case S (I) is
+            when ':' => return True;
+            when 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '+' | '-' | '.' =>
+               null;
+            when others => return False;
+         end case;
+      end loop;
+      return False;
+   end Has_Scheme;
+
+   function Resolve (Base : URL_Type; Reference : String) return URL_Type is
+      Ref    : String renames Reference;
+      Result : URL_Type;
+   begin
+      if Has_Scheme (Ref) then
+         Result := Parse (Ref);
+      elsif Ref'Length >= 2 and then Ref (Ref'First .. Ref'First + 1) = "//" then
+         Result := Parse (Scheme_Image (Base.Scheme) & ":" & Ref);
+      else
+         --  Same authority as Base; split Ref into path ? query # frag.
+         declare
+            Hash  : constant Natural := Ada.Strings.Fixed.Index (Ref, "#");
+            Head_Last : constant Natural :=
+              (if Hash = 0 then Ref'Last else Hash - 1);
+            Quest : constant Natural :=
+              Ada.Strings.Fixed.Index (Ref (Ref'First .. Head_Last), "?");
+            Path_Last : constant Natural :=
+              (if Quest = 0 then Head_Last else Quest - 1);
+            Path  : constant String := Ref (Ref'First .. Path_Last);
+         begin
+            Result := Base;
+            Result.Fragment := Null_Unbounded_String;
+            if Hash /= 0 then
+               Result.Fragment :=
+                 To_Unbounded_String (Ref (Hash + 1 .. Ref'Last));
+            end if;
+
+            if Path'Length = 0 then
+               --  Path from Base; the query only if Ref has none.
+               if Quest /= 0 then
+                  Result.Query :=
+                    To_Unbounded_String (Ref (Quest + 1 .. Head_Last));
+               end if;
+            else
+               Result.Query := Null_Unbounded_String;
+               if Quest /= 0 then
+                  Result.Query :=
+                    To_Unbounded_String (Ref (Quest + 1 .. Head_Last));
+               end if;
+               if Path (Path'First) = '/' then
+                  Result.Path := To_Unbounded_String (Path);
+               else
+                  --  Merge (sec. 5.2.3): Base's path up to its last
+                  --  "/", then Path.
+                  declare
+                     B     : constant String :=
+                       (if Length (Base.Path) = 0 then "/"
+                        else To_String (Base.Path));
+                     Slash : constant Natural :=
+                       Ada.Strings.Fixed.Index
+                         (B, "/", Going => Ada.Strings.Backward);
+                  begin
+                     Result.Path :=
+                       To_Unbounded_String (B (B'First .. Slash) & Path);
+                  end;
+               end if;
+            end if;
+         end;
+      end if;
+
+      --  Escaping is for the path and query only. A host cannot be
+      --  repaired by it: an escaped host is a different, unresolvable
+      --  name, so one with such bytes is refused.
+      declare
+         Host : constant String := To_String (Result.Host);
+      begin
+         if Escape_Unsafe (Host) /= Host then
+            raise Parse_Error with "URL host has an invalid character";
+         end if;
+      end;
+
+      declare
+         Clean : constant String :=
+           Remove_Dot_Segments (Escape_Unsafe (To_String (Result.Path)));
+      begin
+         Result.Path :=
+           To_Unbounded_String (if Clean'Length = 0 then "/" else Clean);
+         Result.Query :=
+           To_Unbounded_String (Escape_Unsafe (To_String (Result.Query)));
+      end;
+      return Result;
+   end Resolve;
+
 end AHT.URL;

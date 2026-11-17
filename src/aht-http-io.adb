@@ -127,83 +127,20 @@ package body AHT.HTTP.IO is
       Sink : not null access
         procedure (Chunk : AHT.Bytes.Byte_Array))
    is
+      --  A fixed window, not a chunk-sized buffer: the chunk size
+      --  comes off the wire unbounded, and a Size-sized local would
+      --  overflow the thread stack on a multi-MB chunk.
+      R     : Body_Reader;
+      Buf   : AHT.Bytes.Byte_Array (1 .. 4_096);
+      Last  : Natural;
       Total : Natural := 0;
-
-      function Chunk_Size_From_Line (Line : String) return Natural;
-
-      function Chunk_Size_From_Line (Line : String) return Natural is
-         Semi : Natural := 0;
-      begin
-         --  Ignore chunk-ext (anything after the first ';').
-         for I in Line'Range loop
-            if Line (I) = ';' then
-               Semi := I;
-               exit;
-            end if;
-         end loop;
-         if Semi = 0 then
-            return Parse_Hex (Line);
-         else
-            return Parse_Hex (Line (Line'First .. Semi - 1));
-         end if;
-      end Chunk_Size_From_Line;
-
    begin
+      Start (R, Chunked);
       loop
-         declare
-            Line : constant String := Read_Line (T);
-            Size : constant Natural := Chunk_Size_From_Line (Line);
-         begin
-            exit when Size = 0;
-
-            --  Read the chunk-data in bounded windows rather than into
-            --  a single Size-sized array. Size comes straight off the
-            --  wire (the chunk-size line) and is unbounded, so a
-            --  Size-sized local would be a dynamically-sized *primary*-
-            --  stack object that overflows the fixed thread stack on a
-            --  multi-MB chunk (and would drive the same overflow into
-            --  TCP Read's buffer via Read_N). A fixed window keeps the
-            --  stack footprint O(1) in the chunk size; Sink sees the
-            --  chunk delivered as ordered slices.
-            declare
-               Window : constant Positive := 4_096;
-               Buf    : AHT.Bytes.Byte_Array (1 .. Window);
-               Left   : Natural := Size;
-            begin
-               while Left > 0 loop
-                  declare
-                     This  : constant Positive := Natural'Min (Window, Left);
-                     Slice : AHT.Bytes.Byte_Array renames Buf (1 .. This);
-                  begin
-                     Read_N (T, Slice);
-                     Sink (Slice);
-                     Left := Left - This;
-                  end;
-               end loop;
-               Total := Total + Size;
-            end;
-
-            --  RFC 7230: chunk-data is followed by CRLF.
-            declare
-               Trailing : constant String := Read_Line (T);
-            begin
-               if Trailing'Length /= 0 then
-                  raise Protocol_Error with
-                    "HTTP.IO.Read_Chunked_Body: chunk-data not followed "
-                    & "by bare CRLF (got """ & Trailing & """)";
-               end if;
-            end;
-         end;
-      end loop;
-
-      --  After the last (zero-size) chunk: read trailer lines until an
-      --  empty line terminates the chunked body.
-      loop
-         declare
-            Trailer : constant String := Read_Line (T);
-         begin
-            exit when Trailer'Length = 0;
-         end;
+         Read (R, T, Buf, Last);
+         exit when Last < Buf'First;
+         Sink (Buf (Buf'First .. Last));
+         Total := Total + (Last - Buf'First + 1);
       end loop;
 
       if Log.Enabled (AHT.Log.Debug) then
@@ -226,5 +163,117 @@ package body AHT.HTTP.IO is
       Read_Chunked_Body (T, Append_To_Result'Access);
       return Result;
    end Read_Chunked_Body;
+
+   ---------------------------------------------------------------------
+   --  Body_Reader
+   ---------------------------------------------------------------------
+
+   procedure Start
+     (Self    : out Body_Reader;
+      Framing : Body_Framing;
+      Length  : Natural := 0) is
+   begin
+      Self := (Framing  => Framing,
+               Left     => (if Framing = Fixed then Length else 0),
+               In_Chunk => False,
+               Done     => Framing = No_Body
+                           or else (Framing = Fixed and then Length = 0));
+   end Start;
+
+   function At_End (Self : Body_Reader) return Boolean is (Self.Done);
+
+   --  Chunk-size line: hex digits, then an optional chunk-ext after
+   --  ';', which is ignored.
+   function Chunk_Size_From_Line (Line : String) return Natural is
+      Semi : Natural := 0;
+   begin
+      for I in Line'Range loop
+         if Line (I) = ';' then
+            Semi := I;
+            exit;
+         end if;
+      end loop;
+      if Semi = 0 then
+         return Parse_Hex (Line);
+      else
+         return Parse_Hex (Line (Line'First .. Semi - 1));
+      end if;
+   end Chunk_Size_From_Line;
+
+   procedure Read
+     (Self : in out Body_Reader;
+      T    : in out AHT.Transport.Transport_Type'Class;
+      Data : out AHT.Bytes.Byte_Array;
+      Last : out Natural) is
+   begin
+      Last := Data'First - 1;
+      if Self.Done or else Data'Length = 0 then
+         return;
+      end if;
+
+      case Self.Framing is
+         when No_Body =>
+            Self.Done := True;
+
+         when Fixed =>
+            declare
+               N : constant Positive := Natural'Min (Data'Length, Self.Left);
+            begin
+               Read_N (T, Data (Data'First .. Data'First + N - 1));
+               Self.Left := Self.Left - N;
+               Self.Done := Self.Left = 0;
+               Last := Data'First + N - 1;
+            end;
+
+         when Until_Close =>
+            T.Read (Data, Last);
+            if Last = 0 then
+               Last := Data'First - 1;
+               Self.Done := True;
+            end if;
+
+         when Chunked =>
+            if Self.Left = 0 then
+               if Self.In_Chunk then
+                  --  RFC 7230: chunk-data is followed by CRLF.
+                  declare
+                     Trailing : constant String := Read_Line (T);
+                  begin
+                     if Trailing'Length /= 0 then
+                        raise Protocol_Error with
+                          "HTTP.IO.Read_Chunked_Body: chunk-data not "
+                          & "followed by bare CRLF (got """
+                          & Trailing & """)";
+                     end if;
+                  end;
+                  Self.In_Chunk := False;
+               end if;
+
+               Self.Left := Chunk_Size_From_Line (Read_Line (T));
+               if Self.Left = 0 then
+                  --  Last chunk: read trailer lines until the empty
+                  --  line that ends the message.
+                  loop
+                     declare
+                        Trailer : constant String := Read_Line (T);
+                     begin
+                        exit when Trailer'Length = 0;
+                     end;
+                  end loop;
+                  Self.Done := True;
+                  return;
+               end if;
+               Self.In_Chunk := True;
+            end if;
+
+            declare
+               N : constant Positive := Natural'Min (Data'Length, Self.Left);
+            begin
+               Read_N (T, Data (Data'First .. Data'First + N - 1));
+               Self.Left := Self.Left - N;
+               Last := Data'First + N - 1;
+            end;
+      end case;
+   end Read;
 
 end AHT.HTTP.IO;

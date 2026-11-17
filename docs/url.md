@@ -41,6 +41,21 @@ Parses and rebuilds `http://`, `https://`, `ws://` and `wss://` URLs.
   (`"[::1]"` for IPv6, the plain string otherwise).
 - `Request_Target (U) return String`: `"path?query"` for the HTTP
   request line.
+- `Resolve (Base, Reference) return URL_Type`: the target of a URI
+  reference relative to `Base`, by RFC 3986 sec. 5.2; the HTTP client
+  uses it for `Location`.
+  - An absolute reference is parsed as by `Parse`; `//host/path`
+    takes `Base`'s scheme; `/path`, `path`, `?query` and the empty
+    reference take `Base`'s scheme and authority, a relative path
+    being merged with `Base`'s.
+  - Dot segments are removed from the result's path (sec. 5.2.4).
+  - The fragment is the reference's own, empty when it has none.
+  - Bytes a request target may not carry (controls, space, bytes at
+    or above `16#7F#`, and `` " < > \ ^ ` { | } ``) are percent-encoded
+    in the path and query; existing escapes are kept.
+  - Raises `Parse_Error` where `Parse` would, for a scheme with no
+    `//` authority (`mailto:x`), and for a host holding such a byte:
+    escaping it would name a different host.
 
 ### Notes
 

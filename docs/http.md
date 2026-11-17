@@ -18,9 +18,15 @@ Packages under `AHT.HTTP`:
 - `AHT.HTTP.IO`: line and body readers; chunked decoder with
   streaming and buffered overloads.
 - `AHT.HTTP.Client`: the client. HTTP and HTTPS; synchronous,
-  streaming and async surfaces, with cancel.
+  streaming and async surfaces, with cancel; optional redirect
+  following, content decoding and keep-alive.
+- `AHT.HTTP.Connection_Pools`: idle connections kept for reuse.
 
-Common exceptions (in `AHT.HTTP`): `HTTP_Error`, `Protocol_Error`.
+Content decoding uses `AHT.Inflate`, a DEFLATE / zlib / gzip decoder
+described in [`inflate.md`](inflate.md).
+
+Common exceptions (in `AHT.HTTP`): `HTTP_Error`, `Protocol_Error`,
+`Redirect_Error`.
 
 ## Usage
 
@@ -58,6 +64,15 @@ end Example;
 `Send` fills in `Host`, `User-Agent`, `Connection: close` and, for a
 non-empty body, `Content-Length`. A non-2xx status is returned in
 `Resp.Status`, not raised.
+
+Redirect following, content decoding and keep-alive are off by
+default and switched on per client:
+
+```ada
+C.Max_Redirects := 10;                                  --  follow
+C.Max_Decoded_Bytes := 64 * 2**20;                      --  gzip, deflate
+C.Pool          := AHT.HTTP.Connection_Pools.Create;    --  keep-alive
+```
 
 ## `AHT.HTTP.Methods`
 
@@ -242,25 +257,38 @@ Ada.Streams.Stream_IO.Close (F);
 
 ```ada
 type Response_Type is tagged record
-   Status  : AHT.HTTP.Status.Status_Code := 200;
-   Reason  : Ada.Strings.Unbounded.Unbounded_String;
-   Headers : AHT.HTTP.Headers.Map;
-   Body_B  : AHT.Bytes.Buffer;
+   Status    : AHT.HTTP.Status.Status_Code := 200;
+   Reason    : Ada.Strings.Unbounded.Unbounded_String;
+   Headers   : AHT.HTTP.Headers.Map;
+   Body_B    : AHT.Bytes.Buffer;
+   Decoded   : Boolean := False;
+   Final_URL : AHT.URL.URL_Type;
 end record;
 
 procedure Read
   (Self   : out Response_Type;
    T      : in out AHT.Transport.Transport_Type'Class;
-   Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET);
+   Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET;
+   Max_Decoded : Decode_Limit := No_Decoding);
 
 procedure Read_Streaming
   (Self   : out Response_Type;
    T      : in out AHT.Transport.Transport_Type'Class;
    Sink   : not null access procedure (Chunk : AHT.Bytes.Byte_Array);
-   Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET);
+   Method : AHT.HTTP.Methods.Method_Type := AHT.HTTP.Methods.GET;
+   Max_Decoded : Decode_Limit := No_Decoding);
+
+procedure Read_Streaming
+  (Self, T, Sink, Method, Max_Decoded : ...;
+   Persistent : out Boolean;
+   Head_Read  : access Boolean := null);
 
 function Body_Text (Self : Response_Type) return String;
 ```
+
+`Final_URL` is set by the client to the URL the response came from
+(the request's target, or the last redirect's); `Read` leaves it at
+its default. `Decoded` is described under *Content decoding* below.
 
 `Read` parses a status line (`HTTP/1.x SP status SP [reason]`),
 header lines until a blank line, then picks body framing:
@@ -282,8 +310,10 @@ header lines until a blank line, then picks body framing:
 
 Only `chunked` is understood; any other `Transfer-Encoding` (gzip,
 compress, chunked+gzip) raises `Protocol_Error`. A `Status` outside
-`100..599`, a missing colon on a header line, or a non-numeric
-`Content-Length` also raise `Protocol_Error`. A status line with an
+`100..599`, a missing colon on a header line, a non-numeric
+`Content-Length`, or `Content-Length` headers that disagree (RFC 9112
+sec. 6.3: the end of the message is then unknowable) also raise
+`Protocol_Error`. A status line with an
 empty reason phrase (`HTTP/1.1 204 CRLF`) is legal and leaves
 `Reason` empty.
 
@@ -300,8 +330,57 @@ granularity (a hint, not a contract):
   before delivery (one call when N is at most 4 KiB).
 - Neither header (`Connection: close`): one call per underlying
   transport `Read` until peer EOF.
+- Decoded bodies: as the decoder produces them, at most 4 KiB.
 
 Same `Protocol_Error` conditions as `Read`.
+
+The overload with `Persistent` also reports whether the transport can
+carry another response: true when the message ended where its framing
+says (no body, chunked, or `Content-Length`; not read-until-close),
+the status is not 101, the version is HTTP/1.1, no `Connection`
+header lists `close`, and the framing headers are unambiguous: a
+message with both `Transfer-Encoding` and `Content-Length`, or with
+`Transfer-Encoding` on several lines, is read as chunked but is not
+persistent. It says nothing about the request side, which is the
+caller's to check.
+
+`Head_Read`, when given, is set once a status line has been parsed. It
+is an access parameter so the value survives a raise, which is when it
+matters: it separates a peer that answered badly from one that never
+answered.
+
+### Content decoding
+
+`Max_Decoded` is both the switch and the bound. `No_Decoding` (0, the
+default) delivers every body as received. With any other value, a body whose `Content-Encoding` is exactly one
+of `gzip`, `x-gzip` or `deflate` (case-insensitive) is decompressed by
+`AHT.Inflate` on its way to the sink. `deflate` is accepted both
+zlib-wrapped (what RFC 9110 specifies) and raw (what some servers
+send); the first two bytes decide. Before the first sink call the
+`content-encoding` and `content-length` headers are removed, since
+they describe the coded bytes, and `Decoded` is set.
+
+Delivered as received, with headers untouched:
+
+- no body (HEAD, 1xx, 204, 205, 304);
+- 206 Partial Content: a byte range of a coded body cannot be decoded
+  on its own;
+- `identity`, an unknown coding (`br`, `zstd`), or more than one
+  coding, as a list or as repeated headers.
+
+A coded body that is malformed, truncated, followed by stray bytes or
+fails its CRC-32 / Adler-32 / length check raises `Protocol_Error`
+with the decoder's reason. Bytes decoded before the fault have already
+reached the sink. `Transfer-Encoding` other than `chunked` is still
+refused, coded or not.
+
+Decoding is always bounded, and the bound is always the caller's
+choice. DEFLATE expands up to about 1000 to 1, so without a bound a
+small response could exhaust memory, and no default suits both a JSON
+API and a file download. `Max_Decoded` is the most a body may decode
+to; one that would pass it raises `Protocol_Error` after exactly
+`Max_Decoded` bytes have reached the sink. There is no value meaning
+"unbounded" and none meaning "some default".
 
 `Body_Text` returns the body one `Character` per byte (raw octets, no
 charset decoding), for printing or comparing. It is empty when there
@@ -347,6 +426,31 @@ that dribbles one byte per (deadline / N) seconds trips
 - `Read_Chunked_Body (T) return Buffer`: buffered overload; wraps the
   streaming decoder with a sink that appends to one buffer.
 
+### Pull-style body reader
+
+```ada
+type Body_Framing is (No_Body, Chunked, Fixed, Until_Close);
+type Body_Reader is private;
+procedure Start (Self : out Body_Reader; Framing : Body_Framing;
+                 Length : Natural := 0);
+procedure Read  (Self : in out Body_Reader;
+                 T    : in out AHT.Transport.Transport_Type'Class;
+                 Data : out AHT.Bytes.Byte_Array;
+                 Last : out Natural);
+function At_End (Self : Body_Reader) return Boolean;
+```
+
+The push readers deliver bytes; a decoder needs to ask for them. A
+`Body_Reader` holds the framing state of one body and hands out the
+next bytes on request, `Last < Data'First` at the end. `Fixed` and
+`Chunked` fill exactly `min (Data'Length, bytes left in the body or
+the current chunk)`, so a read never crosses a chunk boundary and
+never reads past the message. `Chunked` consumes each chunk's CRLF,
+and at the end the trailer section, before reporting the end;
+`Until_Close` returns what one transport `Read` returns.
+`Read_Chunked_Body` and the response reader are loops over it, so
+there is one chunked decoder.
+
 ## `AHT.HTTP.Client`
 
 ```ada
@@ -363,6 +467,12 @@ type Client_Type is tagged record
    Handshake_Deadline : Phase_Bound := Inherit;
    Write_Deadline     : Phase_Bound := Inherit;
    Read_Deadline      : Phase_Bound := Inherit;
+
+   Max_Redirects            : Natural := 0;
+   Allow_Redirect_Downgrade : Boolean := False;
+   Max_Decoded_Bytes        : Response.Decode_Limit :=
+     Response.No_Decoding;
+   Pool                     : AHT.HTTP.Connection_Pools.Pool_Ref;
 end record;
 
 type Phase_Bound is private;
@@ -373,6 +483,7 @@ function Seconds (S : Duration) return Phase_Bound
 
 procedure Send (Self, Req, Resp);
 function  Get  (Self, URL) return Response_Type;
+function  Pool_Endpoint (Self, URL) return Connection_Pools.Endpoint;
 ```
 
 `CA_PEM` holds trust anchors as PEM data rather than a path, for
@@ -383,10 +494,12 @@ dialled; there is no precedence rule, and the refusal stands under
 
 ### Behaviour
 
-- Synchronous, one request per call. Each `Send` owns a fresh
-  transport for the duration of the call, so multiple tasks can share
-  one `Client_Type` without extra synchronization. `Connection:
-  close` on every request; no keep-alive, no HTTP/2.
+- Synchronous. A `Send` is one request, plus the redirects
+  `Max_Redirects` allows. Without a `Pool` every hop dials a transport
+  of its own and closes it, with `Connection: close`; with one,
+  connections are borrowed and returned as described under
+  *Keep-alive*. Either way multiple tasks can share one `Client_Type`
+  without extra synchronization. No HTTP/2.
 
 - Scheme dispatch on `Req.Target.Scheme`:
   - `http://`: `AHT.Transport.TCP`.
@@ -406,7 +519,8 @@ dialled; there is no precedence rule, and the refusal stands under
      full or not at all).
   2. `Host` from the URL (`host[:port]`, omitting the default port).
   3. `User-Agent` from `Self.User_Agent`.
-  4. `Connection: close`.
+  4. `Connection: close`, or `Connection: keep-alive` with a `Pool`.
+  5. With `Max_Decoded_Bytes` set: `Accept-Encoding: gzip, deflate`.
 
 - Interim 1xx loop. `Send` reads responses until the status is not
   1xx. `101 Switching Protocols` is the one terminal 1xx: it returns
@@ -419,23 +533,123 @@ dialled; there is no precedence rule, and the refusal stands under
   `Content-Length`.
 
 - Body framing is `Response.Read`'s: chunked, then `Content-Length`,
-  then read-until-EOF.
+  then read-until-EOF. With `Max_Decoded_Bytes` set, coded bodies are
+  decoded as described under *Content decoding*, to at most that many
+  bytes. 0, the default, turns decoding off; there is no way to decode
+  without a bound.
 
 - Errors. A non-2xx status is not an exception; `Resp.Status`
   carries it. Exceptions are for malformed wire or transport failure:
   `HTTP_Error`, `Protocol_Error`, `Transport_Error`, `Timeout_Error`,
-  `Aborted_Error`, plus `AHT.Transport.TLS.TLS_Error` for `https://`
-  (for example an untrusted or invalid certificate chain). The
-  transport is closed on every exit path.
+  `Aborted_Error`, `Redirect_Error`, plus `AHT.Transport.TLS.TLS_Error`
+  for `https://` (for example an untrusted or invalid certificate
+  chain). A transport that raised is closed, never pooled.
 
 - Retry safety. A `Timeout_Error` or `Aborted_Error` can be raised
   with request bytes already on the wire, and the library cannot tell
   "never sent" from "partially sent". Such a failure is retry-unsafe
-  for a non-idempotent request; the per-request transport is closed,
-  so the partially written connection is never reused.
+  for a non-idempotent request; the transport is closed, so the
+  partially written connection is never reused. The one retry the
+  client makes itself is described under *Keep-alive*.
 
 - `Get (URL)`: parses `URL`, builds a GET with no body, calls
   `Send`. Raises `AHT.URL.Parse_Error` on a malformed URL.
+
+### Redirects
+
+`Max_Redirects` is how many redirects one `Send` follows; 0, the
+default, returns every 3xx as it came. A response is followed when its
+status is 301, 302, 303, 307 or 308 and it has a `Location`. The
+decision is made from the status line and headers, before the body, so
+a followed redirect's body is read (keeping the connection reusable)
+and dropped, and never reaches a `Sink`. Each hop is a request of its
+own: it gets its own phase budgets, binds the `Cancel_Handle` for its
+duration, and checks it before dialling.
+
+- `Location` is resolved against the current URL with
+  `AHT.URL.Resolve`. A `Location` without a fragment inherits the
+  request's (RFC 9110 sec. 10.2.2). `Resp.Final_URL` is the URL of the
+  response returned.
+- Method and body (RFC 9110 sec. 15.4): 303 continues as a GET (a HEAD
+  stays a HEAD), as do 301 and 302 after a POST, without the body and
+  without its `Content-Length`, `Content-Type`, `Content-Encoding` and
+  `Transfer-Encoding`. Every other case repeats the method and body.
+- A streaming upload (`Send_Streaming_Body`) cannot be replayed, so a
+  redirect that would repeat its body is not followed: the 3xx is
+  returned as it came. One that drops the body is followed.
+- `Host` is recomputed for every hop, whatever the caller set.
+  `Authorization`, `Proxy-Authorization` and `Cookie`, whether from
+  `Req.Headers` or `Default_Headers`, are sent only to the request's
+  own scheme, host and port; a hop to anything else goes without them.
+- `Redirect_Error` is raised for a redirect the client will not
+  follow: one more than `Max_Redirects` (the message names the last
+  `Location`), a `Location` that does not parse or names a scheme
+  other than `http` and `https`, and an `https` to `http` downgrade
+  unless `Allow_Redirect_Downgrade` is set.
+
+### Keep-alive
+
+```ada
+package AHT.HTTP.Connection_Pools is
+   type Pool_Ref is private;   --  default: no pool
+   function Create
+     (Max_Idle_Per_Host : Positive := 4;
+      Max_Idle          : Positive := 32;
+      Idle_Timeout      : Duration := 30.0) return Pool_Ref;
+   function Is_Null    (Self : Pool_Ref) return Boolean;
+   function Idle_Count (Self : Pool_Ref) return Natural;
+   procedure Clear     (Self : Pool_Ref);
+   ...
+end AHT.HTTP.Connection_Pools;
+```
+
+With `C.Pool := Connection_Pools.Create`, requests default to
+`Connection: keep-alive` and connections outlive the `Send` that
+dialled them. `Pool_Ref` is a counted handle: copies of the client,
+the snapshot `Send_Async` takes included, share one pool, and the last
+copy to go closes every idle connection.
+
+- Endpoint. A connection is reused only for the same scheme, host
+  (case-insensitive) and port, and for `https` the same `CA_Path`,
+  `CA_PEM` and `Insecure`; `Pool_Endpoint` returns that key.
+- Taking. The most recently parked connection for the endpoint is
+  taken first, and only if `Transport.Peer_Quiet` reports nothing
+  arrived since it was parked; anything at all, usually the peer's
+  close, gets it discarded. Connections idle for `Idle_Timeout` are
+  closed instead of handed out.
+- Returning. After the response, the connection goes back to the pool
+  when the response is `Persistent` (see `Read_Streaming`), the
+  request did not list `Connection: close`, and the `Send` was not
+  cancelled. A release past `Max_Idle_Per_Host` or `Max_Idle` closes
+  the endpoint's, or the pool's, longest-idle connection.
+- Deadlines do not travel with a connection: every exchange starts by
+  clearing both.
+- Retry. A pooled connection can be closed by the peer just as a
+  request goes out, which no probe can see in advance. When a
+  connection taken from the pool fails with `Transport_Error`,
+  `Protocol_Error` or `TLS_Error` before a status line came back on
+  it, the request is a GET, HEAD, PUT, DELETE or OPTIONS with a
+  buffered body and the `Send` was not cancelled, it is sent once more
+  on a freshly dialled connection. Those methods are idempotent
+  (RFC 9110 sec. 9.2.2). Anything else raises as it would without a
+  pool; in particular a peer that answers, however badly, is not asked
+  twice.
+
+The pool's own operations (`Allocate`, `Acquire`, `Release`, `Discard`,
+`Transport`) are public so it can be driven directly, by a test or
+another transport owner. Its lock covers list surgery only: whatever a
+call pushes out moves to a doomed list inside the pool and is closed
+after the protected action. Ownership never straddles a point where an
+abort can land. `Acquire` and `Release` take the holder's `Connection`
+by access and move the transport in or out within the protected
+action, which is abort-deferred, so at every instant it belongs to the
+pool or to the holder, not both and not neither. Doomed connections
+are popped one at a time into a controlled holder. Transports are
+allocated abort-deferred through `AHT.Guarded_New`, and a connection
+on loan to a `Send` sits in a controlled holder, so an exception or
+abort closes it. None of this is exercised by a test that aborts a
+task; it rests on those two properties of protected actions and
+finalization.
 
 ### Timeouts
 
@@ -500,7 +714,8 @@ and the transport is closed on that path. `Sink` must not invoke
 `Send` recursively against the same `Client_Type` while the
 transport is mid-call. `Sink` is not called for 1xx responses, and
 not for 101 Switching Protocols (post-header bytes are left on the
-wire for the WebSocket layer).
+wire for the WebSocket layer), nor with the body of a redirect that
+is followed.
 
 #### Download to an Ada stream
 
@@ -671,12 +886,18 @@ task that calls `Send_Streaming`.
 ## Implementation notes
 
 The buffered, streaming, cancellable and async surfaces share one
-internal core (`Run_Request`), which owns the transport for the call:
-resolve, connect, bind the cancel state, run the wire round trip,
-unbind, close. The buffered overloads supply a sink that appends to
-`Resp.Body_B`. The write and read deadlines are armed inside the
-round trip: the write deadline before the streaming upload, the read
-deadline once the request is on the wire.
+internal core. `Run_Request` follows redirects, running `Run_Hop` per
+hop with a sink that drops a followed redirect's body. `Run_Hop` owns
+the transport for one exchange: without a pool it connects a
+stack-allocated transport and closes it; with one it borrows or dials
+a connection, returns or discards it, and makes the retry. Both paths
+call `Exchange`, which binds the cancel state around the wire round
+trip. The unbind is the finalization of a guard object, so it also
+runs when the task is aborted, before the transport the state points
+at is closed or freed. The buffered overloads supply a sink that appends
+to `Resp.Body_B`. Deadlines are cleared at the start of the round trip
+and armed inside it: the write deadline before the streaming upload,
+the read deadline once the request is on the wire.
 
 `Cancel_Handle` and `Async_Handle` both wrap a protected
 `Cancel_State` holding the currently bound transport and a sticky
@@ -685,3 +906,13 @@ deadline once the request is on the wire.
 between connect returning and the bind, which is what closes the
 bind race. The async worker stores its result in the same protected
 state and flips a done flag; `Await` waits on that barrier.
+
+A pooled connection must not be parked with an `Abort_Pending`
+outstanding, or it would abort an unrelated later request. `Exchange`
+reads `Was_Cancelled` after the unbind; both run under the
+`Cancel_State` lock and `Cancel` sets the flag in the same action that
+fires `Abort_Pending` at the bound transport. So a `Cancel` either
+lands while the transport is bound, and the flag is seen and the
+connection discarded, or after `Unbind`, and fires at nothing. No test
+can place a `Cancel` between the last response byte and `Unbind`; the
+argument above is what covers that window.
