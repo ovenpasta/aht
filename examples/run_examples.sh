@@ -3,7 +3,8 @@
 #  SPDX-License-Identifier: Apache-2.0
 #
 # Builds the library and the example programs, starts the fixtures the
-# examples dial (HTTP 8764, WS 8765, HTTPS 8766, stall 8767, wss 8768),
+# examples dial (HTTP 8764, WS 8765, HTTPS 8766, stall 8767, wss 8768,
+# keep-alive 8779),
 # runs every main listed in examples/examples.gpr in order, and kills
 # the fixtures on exit.
 #
@@ -34,9 +35,11 @@ WS_PID=
 TLS_PID=
 STALL_PID=
 WSS_PID=
+KEEPALIVE_PID=
 
 cleanup() {
-    for pid in "$HTTP_PID" "$WS_PID" "$TLS_PID" "$STALL_PID" "$WSS_PID"; do
+    for pid in "$HTTP_PID" "$WS_PID" "$TLS_PID" "$STALL_PID" "$WSS_PID" \
+               "$KEEPALIVE_PID"; do
         if [ -n "$pid" ]; then
             kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
@@ -63,7 +66,7 @@ PY="$VENV"/bin/python3
 echo "==> generating self-signed cert (for the https + wss examples)"
 sh scripts/generate_cert.sh
 
-echo "==> starting HTTP (8764) + WS (8765) + HTTPS (8766) + stall (8767) + wss (8768) fixtures"
+echo "==> starting HTTP (8764) + WS (8765) + HTTPS (8766) + stall (8767) + wss (8768) + keepalive (8779) fixtures"
 "$PY" tests/server/server.py        >>"$LOG" 2>&1 &
 HTTP_PID=$!
 "$PY" tests/server/server_ws.py     >>"$LOG" 2>&1 &
@@ -74,6 +77,8 @@ TLS_PID=$!
 STALL_PID=$!
 "$PY" tests/server/server_ws_tls.py >>"$LOG" 2>&1 &
 WSS_PID=$!
+"$PY" tests/server/server_keepalive.py >>"$LOG" 2>&1 &
+KEEPALIVE_PID=$!
 
 # Wait for every fixture's READY line; a fixture that never prints it
 # fails here, not as an example bug.
@@ -83,18 +88,21 @@ for _ in $(seq 1 50); do
     HAS_TLS=$(grep -c   '^READY tls '   "$LOG" 2>/dev/null || true)
     HAS_STALL=$(grep -c '^READY stall ' "$LOG" 2>/dev/null || true)
     HAS_WSS=$(grep -c   '^READY wss '   "$LOG" 2>/dev/null || true)
+    HAS_KA=$(grep -c    '^READY keepalive ' "$LOG" 2>/dev/null || true)
     if [ "$HAS_HTTP" -ge 1 ] && [ "$HAS_WS" -ge 1 ] \
        && [ "$HAS_TLS" -ge 1 ] && [ "$HAS_STALL" -ge 1 ] \
-       && [ "$HAS_WSS" -ge 1 ]; then
+       && [ "$HAS_WSS" -ge 1 ] && [ "$HAS_KA" -ge 1 ]; then
         break
     fi
     sleep 0.1
 done
 if [ "$HAS_HTTP" -lt 1 ] || [ "$HAS_WS" -lt 1 ] || [ "$HAS_TLS" -lt 1 ] \
-   || [ "$HAS_STALL" -lt 1 ] || [ "$HAS_WSS" -lt 1 ]
+   || [ "$HAS_STALL" -lt 1 ] || [ "$HAS_WSS" -lt 1 ] \
+   || [ "$HAS_KA" -lt 1 ]
 then
     echo "FATAL: fixtures did not become ready in 5s (http=$HAS_HTTP"
-    echo "ws=$HAS_WS tls=$HAS_TLS stall=$HAS_STALL wss=$HAS_WSS); log follows:"
+    echo "ws=$HAS_WS tls=$HAS_TLS stall=$HAS_STALL wss=$HAS_WSS"
+    echo "keepalive=$HAS_KA); log follows:"
     cat "$LOG"
     exit 2
 fi

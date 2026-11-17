@@ -32,7 +32,7 @@ tests/server/                Python fixtures, one per port
 tests/autobahn/              RFC 6455 conformance harness and BASELINE.md
 scripts/                     fetch, binding regeneration, probes
 docs/                        design documentation, one file per subsystem
-examples/                    nine programs, easy to hard
+examples/                    ten programs, easy to hard
 ```
 
 Exactly one backend directory and one OS directory compile, selected

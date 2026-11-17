@@ -144,7 +144,7 @@ the testing standard and the Windows cross build under wine.
 
 ## Examples
 
-A ladder of nine self-contained programs under `examples/src/`, ordered
+A ladder of ten self-contained programs under `examples/src/`, ordered
 easy → hard, each demonstrating one capability of the client:
 
 1. `ex_01_get`: one-line `Client.Get`; print status + body text.
@@ -164,6 +164,10 @@ easy → hard, each demonstrating one capability of the client:
 8. `ex_08_wss_subprotocol`: `wss://` with subprotocol negotiation.
 9. `ex_09_https`: the same one-line GET over `https://`, configuring
    the client's `Insecure` / `CA_Path` / `CA_PEM` trust fields.
+10. `ex_10_client_options`: the opt-in behaviours, one field each:
+    `Max_Redirects`, `Max_Decoded_Bytes` (gzip / deflate decoding with
+    its bound) and `Pool` (keep-alive, shown by two requests sharing a
+    connection).
 
 Each takes an optional URL/host argument and otherwise defaults to the
 local Python fixture server from `tests/`. Build them all:

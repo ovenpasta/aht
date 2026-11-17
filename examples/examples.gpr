@@ -22,7 +22,8 @@ project Examples is
       "ex_06_ws_echo.adb",
       "ex_07_ws_callbacks.adb",
       "ex_08_wss_subprotocol.adb",
-      "ex_09_https.adb");
+      "ex_09_https.adb",
+      "ex_10_client_options.adb");
 
    package Compiler renames Aht.Compiler;
    package Binder   renames Aht.Binder;
