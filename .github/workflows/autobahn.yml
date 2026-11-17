@@ -1,0 +1,76 @@
+#  Copyright (C) 2026 Aldo Nicolas Bruno
+#  SPDX-License-Identifier: Apache-2.0
+
+name: Autobahn
+
+on:
+  push:
+    branches: [main, 'ci/**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  conformance:
+    name: openssl
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      AHT_TLS_BACKEND: openssl
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: alire-project/setup-alire@v6.0.0
+        with:
+          toolchain: gnat_native=16.1.0 gprbuild=26.0.1
+
+      - name: Install OpenSSL 3
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev openssl
+
+      - name: Build library
+        run: alr build
+
+      - name: Build testee
+        run: alr exec -- gprbuild -P tests/autobahn/autobahn.gpr
+
+      # Starts the fuzzingserver in Docker and runs the testee against
+      # it. Its exit status covers the run itself (server up, every
+      # case attempted), not the verdicts; those are in index.json.
+      - name: Run the suite
+        run: sh tests/autobahn/run.sh
+
+      # The pass criterion of tests/autobahn/BASELINE.md: no case with
+      # a failing verdict. The OK / NON-STRICT split moves between
+      # runs and is printed, not compared.
+      - name: Check verdicts
+        run: |
+          python3 - <<'PY'
+          import collections, json, sys
+          report = json.load(open("tests/autobahn/reports/index.json"))
+          passing = {"OK", "NON-STRICT", "INFORMATIONAL", "UNIMPLEMENTED"}
+          counts = collections.Counter()
+          bad = []
+          cases = 0
+          for agent, results in report.items():
+              for case, r in sorted(results.items()):
+                  cases += 1
+                  counts[r["behavior"]] += 1
+                  for key in ("behavior", "behaviorClose"):
+                      if r[key] not in passing:
+                          bad.append(f"{agent} {case}: {key} = {r[key]}")
+          for verdict, n in sorted(counts.items()):
+              print(f"{verdict:15} {n}")
+          print(f"{'Total':15} {cases}")
+          if cases == 0:
+              sys.exit("no cases in the report")
+          if bad:
+              print("\n".join(bad))
+              sys.exit(f"{len(bad)} failing verdict(s)")
+          PY
+
+      - name: Keep the report index
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autobahn-index
+          path: tests/autobahn/reports/index.json
+          if-no-files-found: ignore
