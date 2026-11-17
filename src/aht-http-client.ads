@@ -10,6 +10,7 @@ with AHT.HTTP.Connection_Pools;
 with AHT.HTTP.Headers;
 with AHT.HTTP.Request;
 with AHT.HTTP.Response;
+with AHT.HTTP.Status;
 with AHT.Transport;
 with AHT.URL;
 
@@ -34,6 +35,28 @@ package AHT.HTTP.Client is
 
    Unbounded : constant Phase_Bound;
    --  No bound on this phase, whatever Timeout_Seconds says.
+
+   --  What a redirect filter says about one hop.
+   type Redirect_Decision is
+     (Follow,   --  go on to the target
+      Stop,     --  end here: the 3xx is the response returned
+      Refuse);  --  raise Redirect_Error naming the target
+
+   --  The field forms of the two filters. They must designate
+   --  library-level functions, since a Client_Type is copied into
+   --  Send_Async's worker; the On_Redirect and On_Address parameters
+   --  of Send and its streaming forms take the same profiles as
+   --  anonymous access, so a nested function with the caller's
+   --  per-request state can be passed there. When a field and a
+   --  parameter are both set, both are asked and both must agree to
+   --  proceed. See On_Redirect and On_Address in Client_Type.
+   type Redirect_Filter is access function
+     (From, To : AHT.URL.URL_Type;
+      Status   : AHT.HTTP.Status.Status_Code;
+      Hop      : Positive) return Redirect_Decision;
+
+   type Address_Filter is access function
+     (Host, Address : String) return Boolean;
 
    type Client_Type is tagged record
       User_Agent      : Ada.Strings.Unbounded.Unbounded_String :=
@@ -86,8 +109,28 @@ package AHT.HTTP.Client is
       --  An https to http redirect raises Redirect_Error unless
       --  Allow_Redirect_Downgrade is set. Each hop is bounded and
       --  cancelled like a request of its own.
+      --  A followed redirect's body is read only up to 64 KiB; one
+      --  longer is abandoned with its connection, which is closed and
+      --  not pooled.
       Max_Redirects            : Natural := 0;
       Allow_Redirect_Downgrade : Boolean := False;
+
+      --  Vets each redirect the rules above would follow, after those
+      --  rules: it can stop or refuse a hop, never permit one they
+      --  refuse. From is the URL that answered, To the resolved
+      --  target, Hop counts from 1. On Stop the 3xx is returned with
+      --  its headers; its body has been dropped by then.
+      On_Redirect : Redirect_Filter := null;
+
+      --  Vets each address before it is dialled, as described at
+      --  AHT.Transport.TCP.Connect: the place to decide by where a
+      --  name really leads (a public name resolving to a loopback or
+      --  private address). Every address refused: Transport_Error. It
+      --  is also asked about a connection taken from the Pool, with
+      --  the address that connection was dialled to, so a connection
+      --  opened under one request's rules is not reused under
+      --  another's; a refused pooled connection is closed.
+      On_Address : Address_Filter := null;
 
       --  Content decoding. When set, requests that do not name an
       --  Accept-Encoding (in Req.Headers or Default_Headers) send
@@ -131,7 +174,13 @@ package AHT.HTTP.Client is
    procedure Send
      (Self : in out Client_Type;
       Req  : AHT.HTTP.Request.Request_Type;
-      Resp : out AHT.HTTP.Response.Response_Type);
+      Resp : out AHT.HTTP.Response.Response_Type;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null);
    --  Synchronous round trip, plus the redirects Max_Redirects allows.
    --  Without a Pool every hop dials a fresh transport and closes it;
    --  with one it borrows and returns connections as described at
@@ -174,7 +223,13 @@ package AHT.HTTP.Client is
      (Self   : in out Client_Type;
       Req    : AHT.HTTP.Request.Request_Type;
       Resp   : out AHT.HTTP.Response.Response_Type;
-      Cancel : in out Cancel_Handle);
+      Cancel : in out Cancel_Handle;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null);
    --  Same as the 3-argument Send, plus cross-task cancellation via
    --  Cancel (see Cancel_Handle above for the lifecycle rules).
    --  Raises AHT.Transport.Aborted_Error if cancelled before or
@@ -186,7 +241,13 @@ package AHT.HTTP.Client is
       Req  : AHT.HTTP.Request.Request_Type;
       Resp : out AHT.HTTP.Response.Response_Type;
       Sink : not null access
-        procedure (Chunk : AHT.Bytes.Byte_Array));
+        procedure (Chunk : AHT.Bytes.Byte_Array);
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null);
    --  Streaming variant of Send: every body byte goes to Sink as it
    --  arrives; Resp.Body_B stays empty. Slices are at most 4 KiB and
    --  wire chunk boundaries are not preserved (not a stable
@@ -201,7 +262,13 @@ package AHT.HTTP.Client is
       Resp   : out AHT.HTTP.Response.Response_Type;
       Sink   : not null access
         procedure (Chunk : AHT.Bytes.Byte_Array);
-      Cancel : in out Cancel_Handle);
+      Cancel : in out Cancel_Handle;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null);
    --  Streaming Send with cross-task cancel. Same Cancel_Handle
    --  semantics as the buffered overload.
 
@@ -209,7 +276,13 @@ package AHT.HTTP.Client is
      (Self   : in out Client_Type;
       Req    : AHT.HTTP.Request.Request_Type;
       Resp   : out AHT.HTTP.Response.Response_Type;
-      Target : not null access Ada.Streams.Root_Stream_Type'Class);
+      Target : not null access Ada.Streams.Root_Stream_Type'Class;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null);
    --  Download straight to an Ada stream: every body byte is written
    --  to Target as it arrives; Resp.Body_B stays empty. Selected with
    --  Target => ...; otherwise as the Sink overload. Target is
@@ -221,7 +294,13 @@ package AHT.HTTP.Client is
       Req    : AHT.HTTP.Request.Request_Type;
       Resp   : out AHT.HTTP.Response.Response_Type;
       Target : not null access Ada.Streams.Root_Stream_Type'Class;
-      Cancel : in out Cancel_Handle);
+      Cancel : in out Cancel_Handle;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null);
    --  Stream-target download with cross-task cancel. Same
    --  Cancel_Handle semantics as the other cancellable overloads.
 
@@ -229,7 +308,13 @@ package AHT.HTTP.Client is
      (Self   : in out Client_Type;
       Req    : AHT.HTTP.Request.Request_Type;
       Resp   : out AHT.HTTP.Response.Response_Type;
-      Source : in out AHT.HTTP.Request.Body_Source'Class);
+      Source : in out AHT.HTTP.Request.Body_Source'Class;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null);
    --  Streaming upload: the body is pulled from Source.Read_Chunk and
    --  framed without buffering. A single Content-Length on Req
    --  selects fixed framing of exactly that many bytes; otherwise
@@ -248,7 +333,13 @@ package AHT.HTTP.Client is
       Req    : AHT.HTTP.Request.Request_Type;
       Resp   : out AHT.HTTP.Response.Response_Type;
       Source : in out AHT.HTTP.Request.Body_Source'Class;
-      Cancel : in out Cancel_Handle);
+      Cancel : in out Cancel_Handle;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null);
    --  Streaming upload with cross-task cancel. Cancel is observed at
    --  the transport (a parked write is broken via Abort_Pending) and
    --  before each Read_Chunk, never during one.

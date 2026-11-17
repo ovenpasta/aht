@@ -28,7 +28,9 @@ package AHT.Transport.TLS is
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
       CA_PEM             : String  := "";
-      Resolve_Timeout    : Duration := Duration'Last);
+      Resolve_Timeout    : Duration := Duration'Last;
+      Address_Filter     : access function
+        (Host, Address : String) return Boolean := null);
    --  TCP-connect to Host:Port, then run the TLS handshake. A DNS name
    --  gets SNI = Host and certificate verification against Host; an
    --  IP literal gets no SNI and is checked against its IP SANs. Host
@@ -47,6 +49,8 @@ package AHT.Transport.TLS is
    --  (AHT.Transport.TCP.Connect); Timeout_Error.
    --  Handshake_Deadline bounds the handshake only (Set_*_Deadline do
    --  not apply to it); Timeout_Error. Duration'Last is unbounded.
+   --  Address_Filter is passed to AHT.Transport.TCP.Connect, which
+   --  describes it; a refused destination sees no TLS byte.
    --  Single-use: after a successful Connect, further Connect calls
    --  raise TLS_Error. A failed Connect leaves the object retryable.
 
@@ -78,6 +82,9 @@ package AHT.Transport.TLS is
    --  reclaim waits until the reader has exited.
 
    overriding function Is_Connected (Self : TLS_Transport) return Boolean;
+
+   overriding function Peer_Address (Self : TLS_Transport) return String;
+   --  The inner TCP transport's; "" once Close has freed it.
 
    overriding function Peer_Quiet (Self : TLS_Transport) return Boolean;
    --  Quiet when the session is live, no end of stream is latched, the

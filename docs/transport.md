@@ -80,6 +80,19 @@ idempotent and safe to call when nothing is pending.
 The default bodies are no-ops, so an implementation that cannot
 enforce them leaves `Read` and `Write` blocking.
 
+### Peer address
+
+```ada
+function Peer_Address (Self : Transport_Type) return String is ("");
+```
+
+The numeric address the transport connected to, as dialled; `""`
+before a connection or when an implementation does not know. TCP
+records the literal of the candidate that connected and still answers
+after `Close`; TLS forwards to its inner TCP transport. The HTTP
+client uses it to put a pooled connection's destination before the
+current request's address filter.
+
 ### Idle probe
 
 ```ada
@@ -139,7 +152,7 @@ closed transport.
 
 A wrapper over `GNAT.Sockets`.
 
-`Connect (Host, Port, Connect_Timeout, Resolve_Timeout)`:
+`Connect (Host, Port, Connect_Timeout, Resolve_Timeout, Address_Filter)`:
 
 1. Tries `Inet_Addr (Host)`, which succeeds for IPv4 and IPv6
    literals. If it parses, only that address is tried; a literal
@@ -162,6 +175,16 @@ A wrapper over `GNAT.Sockets`.
 the `Transport_Error` of a lookup that answered with no usable
 address. It is not consulted when `Host` is a literal.
 `Duration'Last` (the default) leaves either budget unbounded.
+
+`Connect` also takes `Address_Filter`, an optional
+`access function (Host, Address : String) return Boolean`. It is asked
+about each address before a socket is opened to it: the literal
+itself in step 1, every resolved literal in step 2. False skips the
+address; if none is left, `Transport_Error` names `Host` and nothing
+is dialled. This is where a destination is refused for where a name
+actually leads, which no check on the name can do. `TLS.Connect` takes
+the same parameter and passes it down, so a refused destination sees
+no TLS byte. `Connect_Candidates` does not consult it.
 
 `Connect_Candidates` is public so that tests can drive the fallback
 with an explicit list; each `Host` must already be a numeric literal.

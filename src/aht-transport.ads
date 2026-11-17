@@ -57,6 +57,11 @@ package AHT.Transport is
    --  which is the default. Same precondition as Close: no other task
    --  is inside any operation on this transport.
 
+   function Peer_Address (Self : Transport_Type) return String is ("");
+   --  The numeric address (IPv4 or IPv6 literal) this transport
+   --  connected to, as dialled; "" before a connection or when the
+   --  implementation does not know. It still answers after Close.
+
    --  Optional read-side deadline / cancel hooks. The default bodies
    --  are no-ops, so implementations that can't enforce them do
    --  nothing and Read blocks indefinitely.

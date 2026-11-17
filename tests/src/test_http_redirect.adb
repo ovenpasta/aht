@@ -24,6 +24,12 @@
 --       returned as it came; one that drops it is followed.
 --    9. Refusals: unparsable or non-HTTP Location, https to http.
 --   10. http to https upgrade; Send_Async follows too.
+--   11. The redirect filter: asked once per hop the built-in rules
+--       allow, after them; Follow, Stop and Refuse; the per-request
+--       form sees the caller's state, the field form works through
+--       Send_Async and is asked first.
+--   12. A redirect with an endless body is followed without reading
+--       it to the end.
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -37,7 +43,10 @@ with AHT.HTTP.Client;
 with AHT.HTTP.Methods;
 with AHT.HTTP.Request;
 with AHT.HTTP.Response;
+with AHT.HTTP.Status;
 with AHT.URL;
+
+with Test_Filters;
 
 procedure Test_HTTP_Redirect is
 
@@ -498,6 +507,154 @@ begin
       end if;
    exception
       when E : others => Guard ("async", E);
+   end;
+
+   ------------------------------------------------------------------
+   --  11. The redirect filter. The per-request form is a nested
+   --  function writing to this block's variables, which is the point
+   --  of it: the decision can depend on the request in hand.
+   ------------------------------------------------------------------
+   declare
+      Calls   : Natural := 0;
+      Trail   : Unbounded_String;
+      Stop_At : Natural := 0;     --  0: never
+      Refuse_At : Natural := 0;
+
+      function Filter
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Client.Redirect_Decision is
+      begin
+         Calls := Calls + 1;
+         Append (Trail, Hop'Image & ":" & To_String (From.Path) & ">"
+                 & To_String (To.Path) & Status'Image);
+         if Hop = Stop_At then
+            return Client.Stop;
+         elsif Hop = Refuse_At then
+            return Client.Refuse;
+         end if;
+         return Client.Follow;
+      end Filter;
+
+      Chain : constant String := Base & "/r/301?to=/r/302%3Fto%3D/hello";
+      C     : Client.Client_Type := Following;
+      Resp  : AHT.HTTP.Response.Response_Type;
+   begin
+      --  Asked once per hop, with what the hop is.
+      Client.Send (C, Make (Methods.GET, Chain), Resp,
+                   On_Redirect => Filter'Access);
+      if Resp.Body_Text /= Hello
+        or else To_String (Trail)
+                /= " 1:/r/301>/r/302 301 2:/r/302>/hello 302"
+      then
+         Fail ("filter trail: """ & To_String (Trail) & """, body """
+               & Resp.Body_Text & """");
+      end if;
+
+      --  Stop: the second 3xx is the response, headers kept, body gone.
+      Stop_At := 2;
+      Client.Send (C, Make (Methods.GET, Chain), Resp,
+                   On_Redirect => Filter'Access);
+      if Resp.Status /= 302
+        or else Resp.Headers.Get ("location") /= "/hello"
+        or else To_String (Resp.Final_URL.Path) /= "/r/302"
+        or else Resp.Body_B.Length /= 0
+      then
+         Fail ("filter Stop:" & Resp.Status'Image & " at "
+               & AHT.URL.To_String (Resp.Final_URL));
+      end if;
+
+      --  Refuse.
+      Stop_At := 0;
+      Refuse_At := 1;
+      begin
+         Client.Send (C, Make (Methods.GET, Chain), Resp,
+                      On_Redirect => Filter'Access);
+         Fail ("filter Refuse: no exception");
+      exception
+         when E : AHT.HTTP.Redirect_Error =>
+            if not Contains (Ada.Exceptions.Exception_Message (E),
+                             "/r/302?to=/hello refused by the redirect filter")
+            then
+               Guard ("filter Refuse", E);
+            end if;
+      end;
+
+      --  The built-in rules come first: a hop they refuse never
+      --  reaches the filter, and the hop bound still counts.
+      Refuse_At := 0;
+      Calls := 0;
+      begin
+         Client.Send
+           (C, Make (Methods.GET,
+                     TLS_Base & "/r/302?to=http://127.0.0.1:8764/inspect"),
+            Resp, On_Redirect => Filter'Access);
+         Fail ("filter after downgrade: no exception");
+      exception
+         when AHT.HTTP.Redirect_Error => null;
+      end;
+      if Calls /= 0 then
+         Fail ("filter was asked about a refused downgrade");
+      end if;
+      C.Max_Redirects := 2;
+      begin
+         Client.Send (C, Make (Methods.GET, Base & "/r/loop?n=0"), Resp,
+                      On_Redirect => Filter'Access);
+         Fail ("filter with loop: no exception");
+      exception
+         when AHT.HTTP.Redirect_Error => null;
+      end;
+      if Calls /= 2 then
+         Fail ("filter with Max_Redirects 2: asked" & Calls'Image & " times");
+      end if;
+
+      --  The field form, through Send_Async; and field before
+      --  parameter, so a field's Refuse leaves the parameter unasked.
+      C.Max_Redirects := 5;
+      C.On_Redirect := Test_Filters.Refuse_Redirects'Access;
+      Calls := 0;
+      Test_Filters.Redirect_Calls := 0;
+      declare
+         Async : Client.Async_Handle;
+      begin
+         Client.Send_Async (C, Make (Methods.GET, Chain), Async);
+         Client.Await (Async, Resp);
+         Fail ("field filter, async: no exception");
+      exception
+         when AHT.HTTP.Redirect_Error => null;
+      end;
+      begin
+         Client.Send (C, Make (Methods.GET, Chain), Resp,
+                      On_Redirect => Filter'Access);
+         Fail ("field filter, sync: no exception");
+      exception
+         when AHT.HTTP.Redirect_Error => null;
+      end;
+      if Test_Filters.Redirect_Calls /= 2 or else Calls /= 0 then
+         Fail ("field filter: field asked"
+               & Test_Filters.Redirect_Calls'Image & ", parameter"
+               & Calls'Image);
+      end if;
+   exception
+      when E : others => Guard ("redirect filter", E);
+   end;
+
+   ------------------------------------------------------------------
+   --  12. A redirect whose body never ends. The fixture writes until
+   --  the client closes; a client that drained it would sit there
+   --  until the read deadline and raise Timeout_Error.
+   ------------------------------------------------------------------
+   declare
+      C    : Client.Client_Type := Following;
+      Resp : AHT.HTTP.Response.Response_Type;
+   begin
+      C.Read_Deadline := Client.Seconds (5.0);
+      Resp := Client.Get (C, Base & "/r-endless?to=/hello");
+      if Resp.Status /= 200 or else Resp.Body_Text /= Hello then
+         Fail ("endless redirect body:" & Resp.Status'Image);
+      end if;
+   exception
+      when E : others => Guard ("endless redirect body", E);
    end;
 
    if Failures = 0 then

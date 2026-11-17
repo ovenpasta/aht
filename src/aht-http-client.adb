@@ -8,7 +8,6 @@ with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 
 with AHT.HTTP.Methods;
-with AHT.HTTP.Status;
 with AHT.Transport.TCP;
 with AHT.Transport.TLS;
 
@@ -322,9 +321,19 @@ package body AHT.HTTP.Client is
         procedure (Chunk : AHT.Bytes.Byte_Array);
       Cancel            : access Cancel_State;
       Source            : access AHT.HTTP.Request.Body_Source'Class;
+      On_Address        : access function
+        (Host, Address : String) return Boolean;
       Strip_Credentials : Boolean)
    is
       Working : AHT.HTTP.Request.Request_Type := Req;
+
+      Filtering : constant Boolean :=
+        Self.On_Address /= null or else On_Address /= null;
+
+      --  The field's filter and the request's: both must accept.
+      function Address_OK (Host, Address : String) return Boolean is
+        ((Self.On_Address = null or else Self.On_Address (Host, Address))
+         and then (On_Address = null or else On_Address (Host, Address)));
 
       --  One resolved bound per dial phase. Each is the matching
       --  Client_Type field, or Timeout_Seconds where that field was
@@ -353,7 +362,9 @@ package body AHT.HTTP.Client is
             Host            => To_String (Req.Target.Host),
             Port            => Req.Target.Port,
             Connect_Timeout => Connect_B,
-            Resolve_Timeout => Resolve_B);
+            Resolve_Timeout => Resolve_B,
+            Address_Filter  =>
+              (if Filtering then Address_OK'Access else null));
       end Connect_TCP;
 
       procedure Connect_TLS (T : in out AHT.Transport.TLS.TLS_Transport) is
@@ -367,7 +378,9 @@ package body AHT.HTTP.Client is
             Connect_Timeout    => Connect_B,
             Handshake_Deadline => Handshake_B,
             Resolve_Timeout    => Resolve_B,
-            CA_PEM             => To_String (Self.CA_PEM));
+            CA_PEM             => To_String (Self.CA_PEM),
+            Address_Filter     =>
+              (if Filtering then Address_OK'Access else null));
       end Connect_TLS;
 
       --  The pooled path. A hop on a connection from the pool that
@@ -398,10 +411,19 @@ package body AHT.HTTP.Client is
             Reused := False;
             if Reuse then
                --  Skip connections the peer has spoken on since they
-               --  were parked; that is almost always its close.
+               --  were parked; that is almost always its close. Skip
+               --  too any whose address this request's filter refuses:
+               --  it was dialled under another request's rules.
                loop
                   Acquire (Self.Pool, Where, L.C'Access, Found);
-                  exit when not Found or else View (L.C).Peer_Quiet;
+                  exit when not Found
+                    or else
+                      (View (L.C).Peer_Quiet
+                       and then
+                         (not Filtering
+                          or else Address_OK
+                            (To_String (Req.Target.Host),
+                             View (L.C).Peer_Address)));
                   Discard (L.C);
                end loop;
             end if;
@@ -504,6 +526,11 @@ package body AHT.HTTP.Client is
       end case;
    end Run_Hop;
 
+   --  How much of a followed redirect's body is read before the
+   --  connection is given up instead: enough for any honest "moved"
+   --  page, too little for a server to hold the client with.
+   Redirect_Body_Limit : constant := 65_536;
+
    --  A 303, or a 301 / 302 answering a POST, continues as a GET (a
    --  HEAD stays a HEAD) without the request body (RFC 9110 sec.
    --  15.4); 307 and 308, and 301 / 302 for other methods, repeat the
@@ -522,6 +549,12 @@ package body AHT.HTTP.Client is
      (Self   : Client_Type;
       Req    : AHT.HTTP.Request.Request_Type;
       Resp   : out AHT.HTTP.Response.Response_Type;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision;
+      On_Address  : access function
+        (Host, Address : String) return Boolean;
       Sink   : not null access
         procedure (Chunk : AHT.Bytes.Byte_Array);
       Cancel : access Cancel_State;
@@ -530,6 +563,15 @@ package body AHT.HTTP.Client is
       Hop        : AHT.HTTP.Request.Request_Type := Req;
       Hop_Source : access AHT.HTTP.Request.Body_Source'Class := Source;
       Hops       : Natural := 0;
+
+      --  Bytes of the current followed redirect's body dropped so far.
+      Dropped : Natural := 0;
+
+      --  Raised by Forward to stop reading a redirect body past
+      --  Redirect_Body_Limit. It unwinds the hop like any exception,
+      --  which closes the transport instead of pooling it; the head
+      --  already parsed into Resp is all the redirect needs.
+      Redirect_Body_Too_Long : exception;
 
       --  Whether the response being read is a redirect this Send
       --  follows. Decided from the status line and headers alone, so
@@ -548,13 +590,41 @@ package body AHT.HTTP.Client is
       begin
          if not Following then
             Sink (Chunk);
+         else
+            Dropped := Dropped + Chunk'Length;
+            if Dropped > Redirect_Body_Limit then
+               raise Redirect_Body_Too_Long;
+            end if;
          end if;
       end Forward;
+
+      --  The field's filter, then the request's.
+      function Vet
+        (To : AHT.URL.URL_Type) return Redirect_Decision
+      is
+         D : Redirect_Decision := Follow;
+      begin
+         if Self.On_Redirect /= null then
+            D := Self.On_Redirect (Hop.Target, To, Resp.Status, Hops);
+         end if;
+         if D = Follow and then On_Redirect /= null then
+            D := On_Redirect (Hop.Target, To, Resp.Status, Hops);
+         end if;
+         return D;
+      end Vet;
    begin
       loop
-         Run_Hop
-           (Self, Hop, Resp, Forward'Access, Cancel, Hop_Source,
-            Strip_Credentials => not Same_Origin (Hop.Target, Req.Target));
+         Dropped := 0;
+         begin
+            Run_Hop
+              (Self, Hop, Resp, Forward'Access, Cancel, Hop_Source,
+               On_Address,
+               Strip_Credentials =>
+                 not Same_Origin (Hop.Target, Req.Target));
+         exception
+            when Redirect_Body_Too_Long =>
+               null;
+         end;
          Resp.Final_URL := Hop.Target;
 
          exit when not Following;
@@ -593,6 +663,20 @@ package body AHT.HTTP.Client is
                  & Location;
             end if;
 
+            --  The caller's say comes last, so it can only narrow
+            --  what the rules above allow.
+            case Vet (Next) is
+               when Follow =>
+                  null;
+               when Stop =>
+                  exit;
+               when Refuse =>
+                  raise Redirect_Error with
+                    "HTTP.Client.Send: redirect to "
+                    & AHT.URL.To_String (Next)
+                    & " refused by the redirect filter";
+            end case;
+
             --  RFC 9110 sec. 10.2.2: a Location without a fragment
             --  inherits the request's.
             if Length (Next.Fragment) = 0 then
@@ -621,7 +705,13 @@ package body AHT.HTTP.Client is
    procedure Send
      (Self : in out Client_Type;
       Req  : AHT.HTTP.Request.Request_Type;
-      Resp : out AHT.HTTP.Response.Response_Type)
+      Resp : out AHT.HTTP.Response.Response_Type;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null)
    is
       --  Body sink that appends every delivered chunk to Resp.Body_B.
       --  Read_Streaming clears Self before any sink call (via its
@@ -631,7 +721,7 @@ package body AHT.HTTP.Client is
          Resp.Body_B.Append (Chunk);
       end Append_To_Body;
    begin
-      Run_Request (Self, Req, Resp,
+      Run_Request (Self, Req, Resp, On_Redirect, On_Address,
                    Sink   => Append_To_Body'Access,
                    Cancel => null);
    end Send;
@@ -640,14 +730,20 @@ package body AHT.HTTP.Client is
      (Self   : in out Client_Type;
       Req    : AHT.HTTP.Request.Request_Type;
       Resp   : out AHT.HTTP.Response.Response_Type;
-      Cancel : in out Cancel_Handle)
+      Cancel : in out Cancel_Handle;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null)
    is
       procedure Append_To_Body (Chunk : AHT.Bytes.Byte_Array) is
       begin
          Resp.Body_B.Append (Chunk);
       end Append_To_Body;
    begin
-      Run_Request (Self, Req, Resp,
+      Run_Request (Self, Req, Resp, On_Redirect, On_Address,
                    Sink   => Append_To_Body'Access,
                    Cancel => Cancel.State'Access);
    end Send;
@@ -657,9 +753,15 @@ package body AHT.HTTP.Client is
       Req  : AHT.HTTP.Request.Request_Type;
       Resp : out AHT.HTTP.Response.Response_Type;
       Sink : not null access
-        procedure (Chunk : AHT.Bytes.Byte_Array)) is
+        procedure (Chunk : AHT.Bytes.Byte_Array);
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null) is
    begin
-      Run_Request (Self, Req, Resp, Sink => Sink, Cancel => null);
+      Run_Request (Self, Req, Resp, On_Redirect, On_Address, Sink => Sink, Cancel => null);
    end Send_Streaming;
 
    procedure Send_Streaming
@@ -668,9 +770,15 @@ package body AHT.HTTP.Client is
       Resp   : out AHT.HTTP.Response.Response_Type;
       Sink   : not null access
         procedure (Chunk : AHT.Bytes.Byte_Array);
-      Cancel : in out Cancel_Handle) is
+      Cancel : in out Cancel_Handle;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null) is
    begin
-      Run_Request (Self, Req, Resp,
+      Run_Request (Self, Req, Resp, On_Redirect, On_Address,
                    Sink   => Sink,
                    Cancel => Cancel.State'Access);
    end Send_Streaming;
@@ -686,7 +794,13 @@ package body AHT.HTTP.Client is
      (Self   : in out Client_Type;
       Req    : AHT.HTTP.Request.Request_Type;
       Resp   : out AHT.HTTP.Response.Response_Type;
-      Target : not null access Ada.Streams.Root_Stream_Type'Class)
+      Target : not null access Ada.Streams.Root_Stream_Type'Class;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null)
    is
       procedure Write_To_Stream (Chunk : AHT.Bytes.Byte_Array) is
          use type Ada.Streams.Stream_Element_Offset;
@@ -700,7 +814,7 @@ package body AHT.HTTP.Client is
          Target.Write (SE);
       end Write_To_Stream;
    begin
-      Run_Request (Self, Req, Resp,
+      Run_Request (Self, Req, Resp, On_Redirect, On_Address,
                    Sink   => Write_To_Stream'Access,
                    Cancel => null);
    end Send_Streaming;
@@ -710,7 +824,13 @@ package body AHT.HTTP.Client is
       Req    : AHT.HTTP.Request.Request_Type;
       Resp   : out AHT.HTTP.Response.Response_Type;
       Target : not null access Ada.Streams.Root_Stream_Type'Class;
-      Cancel : in out Cancel_Handle)
+      Cancel : in out Cancel_Handle;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null)
    is
       procedure Write_To_Stream (Chunk : AHT.Bytes.Byte_Array) is
          use type Ada.Streams.Stream_Element_Offset;
@@ -724,7 +844,7 @@ package body AHT.HTTP.Client is
          Target.Write (SE);
       end Write_To_Stream;
    begin
-      Run_Request (Self, Req, Resp,
+      Run_Request (Self, Req, Resp, On_Redirect, On_Address,
                    Sink   => Write_To_Stream'Access,
                    Cancel => Cancel.State'Access);
    end Send_Streaming;
@@ -733,14 +853,20 @@ package body AHT.HTTP.Client is
      (Self   : in out Client_Type;
       Req    : AHT.HTTP.Request.Request_Type;
       Resp   : out AHT.HTTP.Response.Response_Type;
-      Source : in out AHT.HTTP.Request.Body_Source'Class)
+      Source : in out AHT.HTTP.Request.Body_Source'Class;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null)
    is
       procedure Append_To_Body (Chunk : AHT.Bytes.Byte_Array) is
       begin
          Resp.Body_B.Append (Chunk);
       end Append_To_Body;
    begin
-      Run_Request (Self, Req, Resp,
+      Run_Request (Self, Req, Resp, On_Redirect, On_Address,
                    Sink   => Append_To_Body'Access,
                    Cancel => null,
                    Source => Source'Access);
@@ -751,14 +877,20 @@ package body AHT.HTTP.Client is
       Req    : AHT.HTTP.Request.Request_Type;
       Resp   : out AHT.HTTP.Response.Response_Type;
       Source : in out AHT.HTTP.Request.Body_Source'Class;
-      Cancel : in out Cancel_Handle)
+      Cancel : in out Cancel_Handle;
+      On_Redirect : access function
+        (From, To : AHT.URL.URL_Type;
+         Status   : AHT.HTTP.Status.Status_Code;
+         Hop      : Positive) return Redirect_Decision := null;
+      On_Address  : access function
+        (Host, Address : String) return Boolean := null)
    is
       procedure Append_To_Body (Chunk : AHT.Bytes.Byte_Array) is
       begin
          Resp.Body_B.Append (Chunk);
       end Append_To_Body;
    begin
-      Run_Request (Self, Req, Resp,
+      Run_Request (Self, Req, Resp, On_Redirect, On_Address,
                    Sink   => Append_To_Body'Access,
                    Cancel => Cancel.State'Access,
                    Source => Source'Access);
@@ -892,7 +1024,7 @@ package body AHT.HTTP.Client is
       --  there is no second rendezvous; multiple Awaits and "drop
       --  without Await" both work.
       begin
-         Run_Request (Client_Snap, Req_Snap, Resp,
+         Run_Request (Client_Snap, Req_Snap, Resp, null, null,
                       Sink   => Append_To_Resp'Access,
                       Cancel => State);
          if State /= null then

@@ -137,6 +137,7 @@ package body AHT.Transport.TCP is
             end if;
 
             Self.Socket := Sock;
+            Self.Peer := E.Host;
             Self.Connected := True;
             Success := True;
             Log.Info
@@ -279,10 +280,22 @@ package body AHT.Transport.TCP is
       Host            : String;
       Port            : AHT.URL.Port_Number;
       Connect_Timeout : Duration := Duration'Last;
-      Resolve_Timeout : Duration := Duration'Last)
+      Resolve_Timeout : Duration := Duration'Last;
+      Address_Filter  : access function
+        (Host, Address : String) return Boolean := null)
    is
+      procedure Refused is
+      begin
+         raise Transport_Error with
+           "TCP connect to " & Host
+           & ": every address was refused by the address filter";
+      end Refused;
    begin
       if Is_IP_Literal (Host) then
+         if Address_Filter /= null and then not Address_Filter (Host, Host)
+         then
+            Refused;
+         end if;
          --  Nothing to resolve, so Resolve_Timeout has nothing to
          --  bound and is not consulted.
          Connect_Candidates
@@ -327,12 +340,22 @@ package body AHT.Transport.TCP is
 
             declare
                List : Endpoint_List (1 .. N);
+               Kept : Natural := 0;
             begin
                for I in 1 .. N loop
-                  List (I) := (Host => Addrs (I), Port => Port);
+                  if Address_Filter = null
+                    or else Address_Filter (Host, To_String (Addrs (I)))
+                  then
+                     Kept := Kept + 1;
+                     List (Kept) := (Host => Addrs (I), Port => Port);
+                  end if;
                end loop;
+               if Kept = 0 then
+                  Refused;
+               end if;
                Connect_Candidates
-                 (Self, List, Connect_Timeout => Connect_Timeout);
+                 (Self, List (1 .. Kept),
+                  Connect_Timeout => Connect_Timeout);
             end;
          end;
       end if;
@@ -769,6 +792,9 @@ package body AHT.Transport.TCP is
 
    overriding function Is_Connected (Self : TCP_Transport) return Boolean is
      (Self.Connected);
+
+   overriding function Peer_Address (Self : TCP_Transport) return String is
+     (To_String (Self.Peer));
 
    overriding function Peer_Quiet (Self : TCP_Transport) return Boolean is
       Buffer : Stream_Element_Array (1 .. 1);

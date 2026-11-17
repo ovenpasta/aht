@@ -33,6 +33,9 @@ integration tests in tests/src/test_http_*.adb hit:
                         non-empty body, for every method
     GET  /r/loop?n=<k>
                      -> 302 to /r/loop?n=<k+1>
+    GET  /r-endless?to=<location>
+                     -> 302 with Location and a chunked body that goes
+                        on until the client closes the connection
     ANY  /inspect    -> 200 describing the request: method, body
                         length and the Host, Authorization, Cookie,
                         Content-Type and Accept-Encoding headers
@@ -192,6 +195,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_fixed(int(url.path[3:]), b"redirect body, not for you\n",
                              "text/plain",
                              extra_headers=(("Location", query["to"][0]),))
+            return True
+        if url.path == "/r-endless":
+            self.send_response(302)
+            self.send_header("Location", query["to"][0])
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            piece = b"1000\r\n" + b"x" * 4096 + b"\r\n"
+            try:
+                while True:
+                    self.wfile.write(piece)
+            except OSError:
+                pass
+            self.close_connection = True
             return True
         if url.path == "/r/loop":
             n = int(query.get("n", ["0"])[0])

@@ -28,6 +28,10 @@
 --       retried. Bytes past the end of a response keep the connection
 --       from being reused; conflicting Content-Length is refused and
 --       Transfer-Encoding with Content-Length is not pooled.
+--       A redirect body past the discard bound costs the hop its
+--       connection. The address filter is asked about every address
+--       dialled and about a pooled connection's address; a request it
+--       refuses neither dials nor rides a pooled connection.
 --    6. A Cancel after the Send returned leaves the connection
 --       pooled and usable.
 --  Pool cases:
@@ -61,6 +65,8 @@ with AHT.HTTP.Response;
 with AHT.Transport;
 with AHT.Transport.TCP;
 with AHT.URL;
+
+with Test_Filters;
 
 procedure Test_HTTP_Keepalive is
 
@@ -390,6 +396,111 @@ procedure Test_HTTP_Keepalive is
          when E : others => Guard (Tag & "ambiguous framing", E);
       end;
 
+      --  2c. A redirect with a body past the discard bound: the hop's
+      --  connection is given up, so the target is the first request
+      --  on another one (compare /ka/redirect above, which shares).
+      declare
+         C : Client.Client_Type := New_Client (Pooled => True);
+         R : AHT.HTTP.Response.Response_Type;
+      begin
+         C.Max_Redirects := 2;
+         R := Client.Get (C, Base & "/ka/redirect-big");
+         if R.Status /= 200 or else Nth (R) /= "1" then
+            Fail (Tag & "redirect-big: status" & R.Status'Image
+                  & ", request " & Nth (R) & " on its connection");
+         end if;
+      exception
+         when E : others => Guard (Tag & "redirect-big", E);
+      end;
+
+      --  5e. The address filter. Per-request, so nested functions
+      --  with this block's state.
+      declare
+         C        : Client.Client_Type := New_Client (Pooled => True);
+         R        : AHT.HTTP.Response.Response_Type;
+         Want_Host : constant String :=
+           To_String (AHT.URL.Parse (Base & "/").Host);
+         Asked    : Natural := 0;
+         Bad      : Unbounded_String;
+         Allow    : Boolean := True;
+         Accepted : Natural;
+         First    : Unbounded_String;
+
+         function Filter (Host, Address : String) return Boolean is
+         begin
+            Asked := Asked + 1;
+            if Host /= Want_Host
+              or else (Address /= "127.0.0.1" and then Address /= "::1")
+            then
+               Bad := To_Unbounded_String (Host & " / " & Address);
+            end if;
+            --  Only the loopback the fixture listens on.
+            return Allow and then Address = "127.0.0.1";
+         end Filter;
+      begin
+         --  Asked about each address, with the name it came from.
+         Client.Send (C, Make (AHT.HTTP.Methods.GET, Base & "/ka/hello"), R,
+                      On_Address => Filter'Access);
+         First := To_Unbounded_String (Conn (R));
+         if R.Status /= 200 or else Asked = 0 or else Length (Bad) > 0 then
+            Fail (Tag & "address filter: asked" & Asked'Image
+                  & ", unexpected " & To_String (Bad));
+         end if;
+
+         --  The connection is now pooled. A request whose filter
+         --  refuses everything must not ride on it, and must not dial:
+         --  the fixture accepts nothing new.
+         Allow := False;
+         Asked := 0;
+         Accepted := Stat ("accepted");
+         begin
+            Client.Send (C, Make (AHT.HTTP.Methods.GET, Base & "/ka/hello"),
+                         R, On_Address => Filter'Access);
+            Fail (Tag & "address filter: refused request served on conn "
+                  & Conn (R));
+         exception
+            when E : AHT.Transport.Transport_Error =>
+               if Ada.Strings.Fixed.Index
+                    (Ada.Exceptions.Exception_Message (E),
+                     Want_Host & ": every address was refused") = 0
+               then
+                  Guard (Tag & "address filter refusal", E);
+               end if;
+         end;
+         if Stat ("accepted") /= Accepted then
+            Fail (Tag & "address filter: a refused request dialled");
+         end if;
+         if Asked < 2 then
+            Fail (Tag & "address filter: asked" & Asked'Image
+                  & " times; the pooled connection was not vetted");
+         end if;
+
+         --  The refused pooled connection was closed, not kept.
+         R := Client.Get (C, Base & "/ka/hello");
+         if Conn (R) = To_String (First) or else Nth (R) /= "1" then
+            Fail (Tag & "address filter: refused connection reused");
+         end if;
+
+         --  The field form, through Send_Async.
+         C.On_Address := Test_Filters.Refuse_Addresses'Access;
+         Test_Filters.Address_Calls := 0;
+         declare
+            Async : Client.Async_Handle;
+         begin
+            Client.Send_Async
+              (C, Make (AHT.HTTP.Methods.GET, Base & "/ka/hello"), Async);
+            Client.Await (Async, R);
+            Fail (Tag & "address field filter: served");
+         exception
+            when AHT.Transport.Transport_Error => null;
+         end;
+         if Test_Filters.Address_Calls = 0 then
+            Fail (Tag & "address field filter: never asked");
+         end if;
+      exception
+         when E : others => Guard (Tag & "address filter", E);
+      end;
+
       --  6. Cancel after the Send.
       declare
          C      : Client.Client_Type := New_Client (Pooled => True);
@@ -622,7 +733,13 @@ procedure Test_HTTP_Keepalive is
          if T.Peer_Quiet then
             Fail ("TCP: quiet before Connect");
          end if;
+         if T.Peer_Address /= "" then
+            Fail ("TCP: Peer_Address before Connect");
+         end if;
          AHT.Transport.TCP.Connect (T, "127.0.0.1", 8779);
+         if T.Peer_Address /= "127.0.0.1" then
+            Fail ("TCP: Peer_Address " & T.Peer_Address);
+         end if;
          if not T.Peer_Quiet then
             Fail ("TCP: not quiet on a silent connection");
          end if;

@@ -18,7 +18,9 @@ package AHT.Transport.TCP is
       Host            : String;
       Port            : AHT.URL.Port_Number;
       Connect_Timeout : Duration := Duration'Last;
-      Resolve_Timeout : Duration := Duration'Last);
+      Resolve_Timeout : Duration := Duration'Last;
+      Address_Filter  : access function
+        (Host, Address : String) return Boolean := null);
    --  Resolves Host via AHT.DNS (getaddrinfo, so IPv6 answers are
    --  used) and tries each address in resolver order; an IP literal
    --  skips the lookup. Resolve_Timeout bounds the lookup:
@@ -26,6 +28,13 @@ package AHT.Transport.TCP is
    --  with no usable address. Connect_Timeout is one total budget
    --  across all candidates: Timeout_Error. Duration'Last leaves
    --  either unbounded.
+   --  Address_Filter, when not null, is asked about each address
+   --  before anything is sent to it: Address is the numeric literal
+   --  about to be dialled, Host the name it came from (for an IP
+   --  literal the two are equal). False skips the address. It is the
+   --  place to refuse a destination by where a name actually leads,
+   --  which a check on the name cannot do. Every address refused:
+   --  Transport_Error naming Host, with nothing dialled.
    --  Single-use: after a successful Connect every later Connect
    --  raises Transport_Error, even after Close, even when poisoned.
    --  A Connect that fails before a session leaves the object usable.
@@ -108,6 +117,8 @@ package AHT.Transport.TCP is
 
    overriding function Is_Connected (Self : TCP_Transport) return Boolean;
 
+   overriding function Peer_Address (Self : TCP_Transport) return String;
+
    overriding function Peer_Quiet (Self : TCP_Transport) return Boolean;
    --  A non-blocking peek of one byte: quiet when the receive would
    --  block. A pending byte, a FIN or a socket error is not quiet.
@@ -158,6 +169,8 @@ private
       --  parked in Check_Selector decides what its wake means by
       --  reading it. The other flags are written only by Connect
       --  and Close, which the lifecycle contract single-threads.
+      Peer               : Ada.Strings.Unbounded.Unbounded_String;
+      --  The literal the successful connect dialled.
       Used               : Boolean := False;
       --  Latched True at the first successful Connect, never
       --  cleared, not even by Close. A failed Connect leaves it

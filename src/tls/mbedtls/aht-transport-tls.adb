@@ -502,7 +502,9 @@ package body AHT.Transport.TLS is
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
       CA_PEM             : String  := "";
-      Resolve_Timeout    : Duration := Duration'Last)
+      Resolve_Timeout    : Duration := Duration'Last;
+      Address_Filter     : access function
+        (Host, Address : String) return Boolean := null)
    is
       use Ada.Real_Time;
 
@@ -594,7 +596,8 @@ package body AHT.Transport.TLS is
       AHT.Transport.TCP.Connect
         (Self.State.TCP.all, Host, Port,
          Connect_Timeout => Connect_Timeout,
-         Resolve_Timeout => Resolve_Timeout);
+         Resolve_Timeout => Resolve_Timeout,
+         Address_Filter  => Address_Filter);
 
       --  2. Allocate the mbedTLS contexts (sized by the C glue).
       Self.State.Entropy  := AHT.Mbedtls.Glue.Entropy_New;
@@ -1005,6 +1008,10 @@ package body AHT.Transport.TLS is
 
    overriding function Is_Connected (Self : TLS_Transport) return Boolean is
      (Live (Self));
+
+   overriding function Peer_Address (Self : TLS_Transport) return String is
+     (if Self.State /= null and then Self.State.TCP /= null
+      then Self.State.TCP.Peer_Address else "");
 
    --  No lock: the precondition puts no other task in the transport,
    --  so nothing else touches the inbound queue.

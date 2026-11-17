@@ -36,6 +36,8 @@ so a test reads reuse off the wire instead of inferring it. Routes:
     GET  /ka/te-and-cl   -> 200 chunked that also carries a
                             Content-Length
     GET  /ka/redirect    -> 302 to /ka/hello with a body
+    GET  /ka/redirect-big
+                         -> 302 to /ka/hello with a 200 000-byte body
     GET  /ka/stats       -> 200, two lines:
                             "accepted=<a> closed=<c> dropped=<d>
                             garbled=<g>": connections accepted,
@@ -184,6 +186,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b"5\r\nhello\r\n0\r\n\r\n")
         elif path == "/ka/redirect":
             self._fixed(302, b"moved, not for you\n", (("Location", "/ka/hello"),))
+        elif path == "/ka/redirect-big":
+            self._fixed(302, b"x" * 200_000, (("Location", "/ka/hello"),))
         elif path == "/ka/stats":
             with _lock:
                 line = ("accepted={accepted} closed={closed} "

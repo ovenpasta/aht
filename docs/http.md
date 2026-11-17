@@ -470,6 +470,8 @@ type Client_Type is tagged record
 
    Max_Redirects            : Natural := 0;
    Allow_Redirect_Downgrade : Boolean := False;
+   On_Redirect              : Redirect_Filter := null;
+   On_Address               : Address_Filter := null;
    Max_Decoded_Bytes        : Response.Decode_Limit :=
      Response.No_Decoding;
    Pool                     : AHT.HTTP.Connection_Pools.Pool_Ref;
@@ -481,7 +483,19 @@ Unbounded : constant Phase_Bound;   --  no bound at all
 function Seconds (S : Duration) return Phase_Bound
   with Pre => S >= 0.0;
 
-procedure Send (Self, Req, Resp);
+type Redirect_Decision is (Follow, Stop, Refuse);
+type Redirect_Filter is access function
+  (From, To : AHT.URL.URL_Type;
+   Status   : AHT.HTTP.Status.Status_Code;
+   Hop      : Positive) return Redirect_Decision;
+type Address_Filter is access function
+  (Host, Address : String) return Boolean;
+
+procedure Send
+  (Self, Req, Resp;
+   On_Redirect : access function (...) return Redirect_Decision := null;
+   On_Address  : access function (Host, Address : String)
+                   return Boolean := null);
 function  Get  (Self, URL) return Response_Type;
 function  Pool_Endpoint (Self, URL) return Connection_Pools.Endpoint;
 ```
@@ -561,8 +575,11 @@ dialled; there is no precedence rule, and the refusal stands under
 default, returns every 3xx as it came. A response is followed when its
 status is 301, 302, 303, 307 or 308 and it has a `Location`. The
 decision is made from the status line and headers, before the body, so
-a followed redirect's body is read (keeping the connection reusable)
-and dropped, and never reaches a `Sink`. Each hop is a request of its
+a followed redirect's body never reaches a `Sink`. It is read and
+dropped, which keeps the connection reusable, but only up to 64 KiB:
+past that the read is abandoned and the connection closed, not pooled,
+so a server cannot hold the client behind a 302 with a body that never
+ends. Each hop is a request of its
 own: it gets its own phase budgets, binds the `Cancel_Handle` for its
 duration, and checks it before dialling.
 
@@ -586,6 +603,45 @@ duration, and checks it before dialling.
   `Location`), a `Location` that does not parse or names a scheme
   other than `http` and `https`, and an `https` to `http` downgrade
   unless `Allow_Redirect_Downgrade` is set.
+
+### Filters
+
+Two hooks let the caller decide per hop and per destination. Each
+exists in two forms with one profile. The `On_Redirect` and
+`On_Address` parameters of `Send`, `Send_Streaming` and
+`Send_Streaming_Body` are anonymous access-to-function, so a nested
+function can be passed and the decision can use the state of the
+request in hand (who is asking, on whose behalf). The fields of the
+same names on `Client_Type` take library-level functions only, since
+the client is copied into `Send_Async`'s worker; that is the form the
+async surface has. When a field and a parameter are both set, the
+field is asked first and both must agree to proceed.
+
+`On_Redirect` is asked once for each redirect the built-in rules would
+follow, after those rules (hop bound, scheme, downgrade), so it can
+narrow them and never widen them. `From` is the URL that answered,
+`To` the resolved target, `Hop` counts from 1.
+
+- `Follow`: go on.
+- `Stop`: the 3xx is the response returned, with its headers; its body
+  has been dropped by then.
+- `Refuse`: `Redirect_Error` naming the target.
+
+`On_Address` is asked about each address before anything is sent to
+it: `Address` is the numeric literal about to be dialled and `Host`
+the name it came from (equal for an IP literal in the URL). Returning
+False skips the address; every address refused raises
+`Transport_Error` naming the host, with nothing dialled. A check on
+the URL's host cannot do this job: a public name can resolve to a
+loopback or private address, and can resolve differently the next
+time. The filter sees where the connection is actually going.
+
+With a `Pool`, `On_Address` is also asked about a connection taken
+from the pool, with `Transport.Peer_Address`, the address that
+connection was dialled to. A connection opened under one request's
+rules is therefore never reused under another's. One the filter
+refuses is closed, and the request goes on to the next idle
+connection or a fresh dial.
 
 ### Keep-alive
 
@@ -615,7 +671,8 @@ copy to go closes every idle connection.
 - Taking. The most recently parked connection for the endpoint is
   taken first, and only if `Transport.Peer_Quiet` reports nothing
   arrived since it was parked; anything at all, usually the peer's
-  close, gets it discarded. Connections idle for `Idle_Timeout` are
+  close, gets it discarded. So does a refusal of its address by the
+  request's `On_Address` (see *Filters*). Connections idle for `Idle_Timeout` are
   closed instead of handed out.
 - Returning. After the response, the connection goes back to the pool
   when the response is `Persistent` (see `Read_Streaming`), the
@@ -887,7 +944,10 @@ task that calls `Send_Streaming`.
 
 The buffered, streaming, cancellable and async surfaces share one
 internal core. `Run_Request` follows redirects, running `Run_Hop` per
-hop with a sink that drops a followed redirect's body. `Run_Hop` owns
+hop with a sink that drops a followed redirect's body and raises a
+private exception past the discard bound; the hop unwinds as for any
+exception, closing its transport, and `Run_Request` carries on from
+the head already parsed. `Run_Hop` owns
 the transport for one exchange: without a pool it connects a
 stack-allocated transport and closes it; with one it borrows or dials
 a connection, returns or discards it, and makes the retry. Both paths
