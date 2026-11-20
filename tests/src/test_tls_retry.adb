@@ -12,6 +12,8 @@ with AHT.Transport;
 with AHT.Transport.TLS;
 with AHT.URL;
 
+with Test_Untrusted;
+
 --  Failed-Connect retryability (backend-neutral). The TLS transport is
 --  single-use only AFTER a successful handshake; a Connect that fails,
 --  at the TCP layer, at CA loading, or at certificate verification,
@@ -107,19 +109,33 @@ begin
       T.Close;
    end;
 
-   --  Case 2: certificate verification failure (no CA configured for a
-   --  self-signed peer), then success with the right CA: the central
-   --  retryability case: the TCP connect and part of the handshake DID
-   --  run before the failure.
+   --  Case 2: certificate verification failure (an unrelated
+   --  certificate as the only anchor for a self-signed peer), then
+   --  success with the right CA: the central retryability case: the
+   --  TCP connect and part of the handshake DID run before the failure,
+   --  which the anchor check and the dial count establish.
+   if Test_Untrusted.Anchor_Problem /= "" then
+      Fail ("untrusted: " & Test_Untrusted.Anchor_Problem);
+   end if;
    declare
       T : AHT.Transport.TLS.TLS_Transport;
    begin
       begin
-         T.Connect (Host, Port, Insecure => False);
+         Test_Untrusted.Dials := 0;
+         T.Connect (Host, Port, Insecure => False,
+                    CA_Path        => Test_Untrusted.Other_File,
+                    Address_Filter => Test_Untrusted.Count_Dial'Access);
          Fail ("untrusted: Connect returned normally");
       exception
-         when AHT.Transport.TLS.TLS_Error =>
-            null;  --  expected
+         when E : AHT.Transport.TLS.TLS_Error =>
+            if Test_Untrusted.Dials = 0
+              or else not Test_Untrusted.Is_Handshake_Rejection
+                            (Ada.Exceptions.Exception_Message (E))
+            then
+               Fail ("untrusted: not rejected by the handshake ("
+                     & Test_Untrusted.Dials'Image & " dial(s)): "
+                     & Ada.Exceptions.Exception_Message (E));
+            end if;
          when E : others =>
             Fail ("untrusted: expected TLS_Error, got "
                   & Ada.Exceptions.Exception_Name (E) & " — "

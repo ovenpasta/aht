@@ -40,7 +40,8 @@ package AHT.Websocket.Client is
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
       Upgrade_Deadline   : Duration := Duration'Last;
-      Resolve_Timeout    : Duration := Duration'Last);
+      Resolve_Timeout    : Duration := Duration'Last;
+      Use_System_Roots   : Boolean := False);
 
    procedure Connect
      (Self               : in out Client_Type;
@@ -51,7 +52,8 @@ package AHT.Websocket.Client is
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
       Upgrade_Deadline   : Duration := Duration'Last;
-      Resolve_Timeout    : Duration := Duration'Last);
+      Resolve_Timeout    : Duration := Duration'Last;
+      Use_System_Roots   : Boolean := False);
    --  Dials URL and runs the opening handshake. Legal from Idle or
    --  Disconnected; raises Handshake_Error from Connecting, Open or
    --  Closing (a live connection is never displaced; use Reconnect).
@@ -74,9 +76,12 @@ package AHT.Websocket.Client is
    --  the half-built session; the client is back where admission
    --  found it and a retry is legal.
    --
-   --  Supplying both CA_Path and CA_PEM raises
-   --  AHT.Transport.TLS.TLS_Error before dialling; there is no
-   --  precedence. Host stays the name for SNI; see AHT.DNS.
+   --  Trust for wss:// follows AHT.Transport.TLS.Connect: exactly one
+   --  of CA_Path, CA_PEM and Use_System_Roots, or Insecure. More than
+   --  one raises AHT.Transport.TLS.TLS_Error before dialling, on ws://
+   --  too; there is no precedence. None of them on wss:// without
+   --  Insecure raises the same from the TLS transport, before it
+   --  dials. Host stays the name for SNI; see AHT.DNS.
 
    --  How decoded messages reach the application. Callback_Only
    --  never enqueues, so the inbox is not a growth path in that
@@ -324,6 +329,7 @@ private
       Insecure     : Boolean := False;
       CA_Path      : Ada.Strings.Unbounded.Unbounded_String;
       CA_PEM       : Ada.Strings.Unbounded.Unbounded_String;
+      System_Roots : Boolean := False;
    end record;
 
    --  Snapshot of the installed callbacks. The receiver takes one per

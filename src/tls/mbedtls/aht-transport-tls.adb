@@ -3,6 +3,7 @@
 
 with Ada.Directories;
 with Ada.Exceptions;
+with Ada.Strings.Unbounded;
 with Ada.Unchecked_Conversion;
 with Ada.Unchecked_Deallocation;
 with Interfaces.C;
@@ -21,8 +22,8 @@ with AHT.Mbedtls.SSL;
 with AHT.Mbedtls.X509;
 with AHT.TLS_Sync;
 with AHT.Guarded_New;
-with AHT.PEM;
 with AHT.Transport.TCP;
+with AHT.Transport.TLS.Anchors;
 
 --  mbedTLS backend. Same engine as the openssl body; differences:
 --    * the BIO callbacks move bytes to and from two in-memory queues
@@ -30,7 +31,6 @@ with AHT.Transport.TCP;
 --    * an abrupt TCP EOF is a clean Last = 0, not an error;
 --    * mbedtls_ssl_set_hostname covers IP literals too (iPAddress
 --      SANs), so there is no separate IP-SAN path;
---    * no default trust with CA_Path = "";
 --    * every context, entropy source and DRBG included, is per
 --      transport; nothing is shared between sessions;
 --    * Set_*_Deadline are also forwarded to the inner TCP.
@@ -504,11 +504,14 @@ package body AHT.Transport.TLS is
       CA_PEM             : String  := "";
       Resolve_Timeout    : Duration := Duration'Last;
       Address_Filter     : access function
-        (Host, Address : String) return Boolean := null)
+        (Host, Address : String) return Boolean := null;
+      Use_System_Roots   : Boolean := False)
    is
       use Ada.Real_Time;
 
       Ret : C.int;
+
+      Trust_PEM : Ada.Strings.Unbounded.Unbounded_String;
 
       procedure Fail (Code : C.int; Where : String) with No_Return is
       begin
@@ -564,30 +567,18 @@ package body AHT.Transport.TLS is
       --  idempotent.
       begin
 
-      --  Raises before dialling, even under Insecure; no precedence.
-      if CA_Path /= "" and then CA_PEM /= "" then
-         raise TLS_Error
-           with "TLS connect: CA_Path and CA_PEM are mutually "
-             & "exclusive; supply the trust anchors either as a path "
-             & "or as PEM data, not both";
-      end if;
-
-      --  Validated here, before anything is dialled and regardless of
-      --  Insecure, so a malformed bundle is an error under both
-      --  backends: OpenSSL skips CA loading when verification is off,
-      --  mbedTLS parses it anyway.
-      if CA_PEM /= "" then
-         declare
-            Problem : constant String := AHT.PEM.Bundle_Problem (CA_PEM);
-         begin
-            if Problem /= "" then
-               raise TLS_Error
-                 with "TLS connect (CA_PEM): " & Problem
-                   & "; the bundle is rejected whole rather than in "
-                   & "part";
-            end if;
-         end;
-      end if;
+      --  The trust choice, checked before anything is dialled and
+      --  regardless of Insecure, so that a contradictory or malformed
+      --  choice is an error under both backends; see
+      --  AHT.Transport.TLS.Anchors. Trust_PEM is CA_PEM, or the
+      --  platform store's certificates under Use_System_Roots.
+      Ada.Strings.Unbounded.Set_Unbounded_String
+        (Trust_PEM,
+         Anchors.Checked_PEM
+           (Insecure         => Insecure,
+            CA_Path          => CA_Path,
+            CA_PEM           => CA_PEM,
+            Use_System_Roots => Use_System_Roots));
 
       --  1. Plain TCP first, fresh per attempt so a failed handshake
       --     leaves this object retryable. Through AHT.Guarded_New for
@@ -633,19 +624,24 @@ package body AHT.Transport.TLS is
          M.Conf_Authmode (Self.State.Conf, M.VERIFY_REQUIRED);
       end if;
 
-      if CA_Path /= "" or else CA_PEM /= "" then
+      --  Anchors.Checked_PEM left at most one of Trust_PEM and CA_Path
+      --  set, and one of them whenever verification is on.
+      if CA_Path /= "" or else Ada.Strings.Unbounded.Length (Trust_PEM) > 0
+      then
          Self.State.CA_Cert := AHT.Mbedtls.Glue.X509_CRT_New;
          if Self.State.CA_Cert = System.Null_Address then
             Fail (0, "TLS connect (x509 alloc)");
          end if;
 
-         if CA_PEM /= "" then
+         if Ada.Strings.Unbounded.Length (Trust_PEM) > 0 then
             declare
                --  To_C with Append_Nul, and the NUL is counted in the
                --  length: mbedTLS picks PEM over DER by finding
                --  "-----BEGIN" and its PEM branch requires the
                --  terminator inside the counted length.
-               Buf : aliased C.char_array := C.To_C (CA_PEM, True);
+               Buf : aliased C.char_array :=
+                 C.To_C (Ada.Strings.Unbounded.To_String (Trust_PEM),
+                         True);
             begin
                Ret := AHT.Mbedtls.X509.CRT_Parse
                  (Self.State.CA_Cert, Buf'Address, Buf'Length);
@@ -655,8 +651,11 @@ package body AHT.Transport.TLS is
             --  prefix of the bundle.
             if Ret /= 0 then
                Fail (Ret,
-                     "TLS connect (CA_PEM parse; the bundle is "
-                     & "rejected whole rather than in part)");
+                     (if Use_System_Roots
+                      then "TLS connect (Use_System_Roots parse"
+                      else "TLS connect (CA_PEM parse")
+                     & "; the bundle is rejected whole rather than in "
+                     & "part)");
             end if;
          else
             declare

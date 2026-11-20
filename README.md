@@ -31,11 +31,23 @@ Every Ada unit lives under the `AHT.*` namespace.
   blocking `Receive` or push callbacks; exercised against the
   Autobahn|Testsuite conformance harness.
 - **TLS**: `https://` and `wss://`, with certificate verification
-  against the system trust store, a caller CA bundle (`CA_Path`) or
-  anchors embedded in the binary (`CA_PEM`),
-  or opt-in `Insecure` mode. Two build-time backends: system
-  OpenSSL 3 (default, TLS 1.3) or vendored mbedTLS 3.6
-  (`AHT_TLS_BACKEND=mbedtls`), see [`docs/tls.md`](docs/tls.md).
+  against trust anchors the caller chooses explicitly: the platform's
+  store (`Use_System_Roots`, read by `AHT.Root_Store` on Linux, the
+  BSDs, macOS and Windows), a CA bundle (`CA_Path`) or anchors embedded
+  in the binary (`CA_PEM`); or opt-in `Insecure` mode. Nothing is
+  trusted by default: with none chosen, a connect is refused. Two
+  build-time backends: system OpenSSL 3 (default, TLS 1.3) or vendored
+  mbedTLS 3.6 (`AHT_TLS_BACKEND=mbedtls`), see
+  [`docs/tls.md`](docs/tls.md).
+
+> **Breaking change: no implicit trust.** Earlier, an `https://` or
+> `wss://` connect with neither `CA_Path` nor `CA_PEM` verified
+> against the platform store on the openssl backend (and failed on
+> mbedtls). It now raises `AHT.Transport.TLS.TLS_Error` ("no trust
+> anchors configured") before dialling, on both backends. Code that
+> relied on the old default sets `Use_System_Roots := True` (or
+> passes `Use_System_Roots => True`); see
+> [`docs/tls.md`](docs/tls.md), *Trust anchors*.
 - **Contracts**: public APIs carry Ada 2012/2022 contracts (subtype
   predicates, `Type_Invariant`, `Pre`/`Post`).
 
@@ -163,7 +175,8 @@ easy → hard, each demonstrating one capability of the client:
    protected object.
 8. `ex_08_wss_subprotocol`: `wss://` with subprotocol negotiation.
 9. `ex_09_https`: the same one-line GET over `https://`, configuring
-   the client's `Insecure` / `CA_Path` / `CA_PEM` trust fields.
+   the client's `Use_System_Roots` / `CA_Path` / `CA_PEM` /
+   `Insecure` trust fields.
 10. `ex_10_client_options`: the opt-in behaviours, one field each:
     `Max_Redirects`, `Max_Decoded_Bytes` (gzip / deflate decoding with
     its bound) and `Pool` (keep-alive, shown by two requests sharing a

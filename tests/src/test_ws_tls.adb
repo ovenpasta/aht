@@ -10,9 +10,9 @@
 --  Cases:
 --    1. CA_Path at the fixture's cert: text round-trip, clean Close
 --    2. Insecure => True, no CA: binary round-trip
---    3. verify required, no CA: Connect propagates TLS_Error,
---       unwrapped, since the dial is outside the Handshake_Error
---       wrapper
+--    3. verify required, trusting an unrelated certificate: Connect
+--       propagates the handshake's TLS_Error, unwrapped, since the
+--       dial is outside the Handshake_Error wrapper
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -22,6 +22,8 @@ with AHT.Bytes;
 with AHT.Transport.TLS;
 with AHT.Websocket;
 with AHT.Websocket.Client;
+
+with Test_Untrusted;
 
 procedure Test_WS_TLS is
 
@@ -134,24 +136,39 @@ begin
       AHT.Websocket.Client.Close (C);
    end;
 
-   --  Case 3: verify required, no CA configured. The self-signed cert
-   --  chains to no trusted root, so the TLS handshake must be rejected
-   --  with TLS_Error propagated out of Connect (the dial sits before
-   --  the handshake's Handshake_Error wrapper, so it stays unwrapped).
-   declare
-      C : AHT.Websocket.Client.Client_Type;
-   begin
-      AHT.Websocket.Client.Connect (C, URL);
-      Fail ("untrusted: Connect returned without raising "
-            & "(expected TLS_Error)");
-   exception
-      when AHT.Transport.TLS.TLS_Error =>
-         null;  --  expected: untrusted chain rejected
-      when E : others =>
-         Fail ("untrusted: expected TLS_Error, got "
-               & Ada.Exceptions.Exception_Name (E) & " — "
-               & Ada.Exceptions.Exception_Message (E));
-   end;
+   --  Case 3: verify required, trusting an unrelated certificate. The
+   --  self-signed cert chains to no trusted root, so the TLS handshake
+   --  must be rejected with TLS_Error propagated out of Connect (the
+   --  dial sits before the handshake's Handshake_Error wrapper, so it
+   --  stays unwrapped). The client takes no address filter, so the
+   --  anchor is checked first and the message must name the
+   --  handshake; a refusal while loading the anchor names the connect.
+   --  No trust at all is refused before dialling; test_tls_trust
+   --  covers that.
+   if Test_Untrusted.Anchor_Problem /= "" then
+      Fail ("untrusted: " & Test_Untrusted.Anchor_Problem);
+   else
+      declare
+         C : AHT.Websocket.Client.Client_Type;
+      begin
+         AHT.Websocket.Client.Connect
+           (C, URL, CA_Path => Test_Untrusted.Other_File);
+         Fail ("untrusted: Connect returned without raising "
+               & "(expected TLS_Error)");
+      exception
+         when E : AHT.Transport.TLS.TLS_Error =>
+            if not Test_Untrusted.Is_Handshake_Rejection
+                     (Ada.Exceptions.Exception_Message (E))
+            then
+               Fail ("untrusted: not rejected by the handshake: "
+                     & Ada.Exceptions.Exception_Message (E));
+            end if;
+         when E : others =>
+            Fail ("untrusted: expected TLS_Error, got "
+                  & Ada.Exceptions.Exception_Name (E) & " — "
+                  & Ada.Exceptions.Exception_Message (E));
+      end;
+   end if;
 
    if Failures = 0 then
       Put_Line ("test_ws_tls: OK");

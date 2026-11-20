@@ -63,21 +63,156 @@ The openssl backend requires OpenSSL 3: the bindings import 3.0-only
 symbols (a link-time failure on LibreSSL or 1.1), and `Connect`
 checks `OPENSSL_version_major >= 3` at runtime.
 
+## Trust anchors
+
+There is no implicit trust. A verifying `Connect` uses exactly one
+source of trust anchors, chosen by the caller:
+
+| Source | Parameter or field | What is installed |
+|--------|--------------------|-------------------|
+| Path | `CA_Path` | a PEM bundle file, or a directory of certificates |
+| PEM | `CA_PEM` | concatenated PEM certificates held in memory |
+| System | `Use_System_Roots => True` | the platform's anchors, from `AHT.Root_Store.Load` |
+
+The same three appear on `AHT.Transport.TLS.Connect`,
+`AHT.Websocket.Client.Connect` and as fields of
+`AHT.HTTP.Client.Client_Type`. The rule is the same on both backends
+and every OS. `AHT.Transport.TLS.Anchors`, shared by both backend
+bodies, checks it before anything is dialled; the WebSocket client
+repeats the more-than-one check for `ws://`, where no TLS transport
+is built.
+
+- None chosen and `Insecure` False: `TLS_Error` ("no trust anchors
+  configured"). Neither backend falls back to a default store.
+- More than one chosen: `TLS_Error`, even under `Insecure`. There is
+  no precedence and nothing is merged. To trust the platform's roots
+  and a private CA together, concatenate them and pass `CA_PEM`.
+- `CA_PEM` that fails `AHT.PEM.Bundle_Problem`: `TLS_Error`, even
+  under `Insecure`.
+- `Use_System_Roots` under `Insecure`: the store is not read.
+- `Use_System_Roots`, verifying: `AHT.Root_Store.Load` runs on every
+  `Connect`, and its PEM is installed exactly as `CA_PEM` would be. A
+  store that yields no certificate, or whose read was cut short
+  (`Truncated`), raises `TLS_Error`; a store is installed whole or
+  not at all, like any bundle. Nothing is cached: a program that
+  dials often reads the store once and passes it as `CA_PEM`, below.
+- `AHT.HTTP.Client` also refuses more than one source on `http://`,
+  and the WebSocket client on `ws://`, where no TLS transport is
+  built.
+
+Whoever controls `SSL_CERT_FILE` and `SSL_CERT_DIR` controls what
+`Use_System_Roots` trusts: they replace the platform store
+entirely. An HTTP connection pool keys on the `Use_System_Roots`
+flag, not on what the store held, so a pooled connection verified
+earlier is reused after the store or those variables change.
+
+**Breaking change.** Before this rule, the openssl backend verified
+against the platform store when neither `CA_Path` nor `CA_PEM` was
+given, and mbedtls failed the handshake. Both now raise `TLS_Error`
+before dialling; `Use_System_Roots => True` restores the platform
+store explicitly, on both backends.
+
+```ada
+Client : AHT.HTTP.Client.Client_Type;
+...
+Client.Use_System_Roots := True;
+Resp := AHT.HTTP.Client.Get (Client, "https://example.org/");
+```
+
+A program that dials often can read the store once and pass the
+result as `CA_PEM` instead:
+
+```ada
+Roots : constant AHT.Root_Store.Roots := AHT.Root_Store.Load;
+...
+if Roots.Count = 0 then
+   --  No platform store; fall back to a bundle shipped with the program.
+   Client.CA_Path := To_Unbounded_String ("share/ca-bundle.pem");
+else
+   Client.CA_PEM := Roots.PEM;
+end if;
+```
+
+### `AHT.Root_Store`
+
+`Load` returns the PEM, its certificate `Count`, the `Origin`
+(`None`, `Environment`, `Bundle_File`, `Directory`, `Native_Store`),
+a `Location` naming what was read, and `Truncated`. It never raises:
+a missing, unreadable or malformed source is skipped, and any other
+failure (memory exhausted) stops the read with `Truncated` set. The
+search, first rule that yields a certificate wins:
+
+1. `SSL_CERT_FILE` and `SSL_CERT_DIR`, on every OS, when either is
+   set and not empty. `SSL_CERT_DIR` is a list separated by
+   `GNAT.OS_Lib.Path_Separator` (`:` on POSIX, `;` on Windows). Both
+   are read and merged, and the platform default is not consulted.
+2. The platform default, one body of `AHT.Root_Store.Platform` per
+   `AHT_OS` (`src/os/{posix,windows}/`):
+   - **POSIX** (Linux, the BSDs, macOS): the first of these files that
+     yields a certificate: `/etc/ssl/certs/ca-certificates.crt`,
+     `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem`,
+     `/etc/pki/tls/cacert.pem`,
+     `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`,
+     `/etc/ssl/cert.pem`, `/usr/local/etc/ssl/cert.pem`,
+     `/usr/local/share/certs/ca-root-nss.crt`,
+     `/etc/openssl/certs/ca-certificates.crt`; else every file in the
+     first of `/etc/ssl/certs`, `/etc/pki/tls/certs` that yields one.
+     These are the locations Go's `crypto/x509` searches.
+   - **macOS** takes the POSIX body and finds `/etc/ssl/cert.pem`,
+     the system roots. Roots an administrator or user added to a
+     keychain, and trust settings that distrust a system root, are
+     not seen: that needs the Security framework
+     (`SecTrustSettingsCopyCertificates`), which AHT does not bind.
+   - **Windows**: the current user's `ROOT` system store
+     (`CertOpenSystemStoreW`), which includes the machine's roots and
+     those deployed by group policy, enumerated with
+     `CertEnumCertificatesInStore`; each X.509 entry whose enhanced
+     key usage (`CertGetEnhancedKeyUsage`, extension and store
+     property together) allows server authentication is base64-encoded
+     into a PEM block, so a root disabled for that purpose is left out.
+     The `Disallowed` store is not consulted. Windows installs some
+     roots from Windows Update only when a chain needs them, so a
+     fresh system may enumerate fewer roots than it would trust.
+     `crypt32` is linked only on Windows, and every entry point exists
+     on Windows XP. **This body is compile-checked only**: it has been
+     through the native compiler's semantic check, not built for
+     either Windows target, linked, or run under wine or on Windows.
+     The 32-bit link is the one that checks the `Stdcall` decoration
+     GNAT adds (`_CertOpenSystemStoreW@8`).
+
+Only `CERTIFICATE` PEM blocks are taken. Text between blocks, `TRUSTED
+CERTIFICATE` blocks, DER files in a directory and blocks whose body is
+not base64 are skipped. The output is re-wrapped at 64 columns with LF
+line ends and duplicates are dropped (a directory such as
+`/etc/ssl/certs` holds each root under several names), so it passes
+`AHT.PEM`. A block is searched for its END only up to the next BEGIN,
+so a block left open is skipped and the scan stays linear in the
+input; a block whose body exceeds `Max_Block_Bytes` is skipped
+undecoded. Load does not parse the certificates; a backend that
+cannot parse one of them refuses the whole store, as it would a
+`CA_PEM` bundle.
+
+Limits, named in `aht-root_store.ads`; reaching one stops the read
+and sets `Truncated`:
+
+| Constant | Value | Bounds |
+|----------|-------|--------|
+| `Max_Certificates` | 4 096 | distinct certificates in the result |
+| `Max_Bytes` | 16 MiB | bytes read from files, or DER taken from the store; a file larger than what remains is not read |
+| `Max_Entries` | 16 384 | files read plus store entries examined |
+
+`Max_Block_Bytes` (64 KiB), in the same spec, is not a read limit: a
+PEM block whose body is longer is skipped as malformed, without
+setting `Truncated`.
+
 ## Behavioral differences
 
 The public contract (`aht-transport-tls.ads`) is shared. The two
 backends differ in these policies:
 
-- **`CA_PEM` supplied.** Both backends validate the envelope with
-  `AHT.PEM` first, always, including under `Insecure`. OpenSSL then
-  loads nothing under `Insecure`, because verification is off;
-  mbedTLS parses the chain regardless. `CA_PEM` and `CA_Path` are
-  mutually exclusive on both.
-- **`CA_Path = ""`, verifying.** openssl uses the platform trust
-  store (`SSL_CTX_set_default_verify_paths`, honouring
-  `SSL_CERT_FILE` and `SSL_CERT_DIR`), so public `https://` endpoints
-  work out of the box. mbedtls configures no default trust, so the
-  handshake rejects; pass a CA bundle or set `Insecure`.
+- **PEM supplied** (`CA_PEM`, or the store under `Use_System_Roots`).
+  OpenSSL loads nothing under `Insecure`, because verification is
+  off; mbedTLS parses `CA_PEM` regardless.
 - **CA directory semantics.** openssl expects c_rehash hashed names;
   mbedtls loads every file in the directory.
 - **IP-literal host, verifying.** openssl verifies against the
@@ -225,8 +360,9 @@ carrying the `mbedtls_strerror` message.
 4. Trust anchors. `CA_Path` is loaded with
    `mbedtls_x509_crt_parse_path` when it names a directory
    (`Ada.Directories.Kind`) and `mbedtls_x509_crt_parse_file`
-   otherwise; `CA_PEM` with `mbedtls_x509_crt_parse`, passing the
-   NUL inside the counted length. Only a return of 0 is accepted; a
+   otherwise; `CA_PEM`, or the store's PEM under `Use_System_Roots`,
+   with `mbedtls_x509_crt_parse`, passing the NUL inside the counted
+   length. Only a return of 0 is accepted; a
    positive count of certificates that failed to parse rejects the
    bundle whole.
 5. `mbedtls_ssl_setup`, then `mbedtls_ssl_set_hostname (Host)` for

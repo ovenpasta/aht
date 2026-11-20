@@ -25,7 +25,7 @@ and stays under its MIT licence (`LICENSES/MIT.txt`); see
 ```
 src/                         the library
 src/tls/{openssl,mbedtls}/   one TLS backend body per directory
-src/os/{posix,windows}/      one entropy body per OS
+src/os/{posix,windows}/      the per-OS units (src/os/README.md)
 csrc/                        C glue for each TLS backend
 tests/src/                   one .adb per test main, listed in tests/tests.gpr
 tests/server/                Python fixtures, one per port
@@ -47,9 +47,9 @@ AHT_TLS_BACKEND=mbedtls bash tests/run_tests.sh  # the other backend
 bash examples/run_examples.sh
 ```
 
-Run both backends before opening a pull request. They differ in
-default trust, iPAddress SANs and error taxonomy, and a change that
-passes one regularly fails the other.
+Run both backends before opening a pull request. They differ in CA
+directory semantics, iPAddress SANs and error taxonomy, and a change
+that passes one regularly fails the other.
 
 The runner starts the Python fixtures itself (in `tests/.venv`) and
 refuses to run if any of them fails to come up. The fixtures bind

@@ -258,7 +258,8 @@ procedure Connect
    Connect_Timeout    : Duration := Duration'Last;
    Handshake_Deadline : Duration := Duration'Last;
    Upgrade_Deadline   : Duration := Duration'Last;
-   Resolve_Timeout    : Duration := Duration'Last);
+   Resolve_Timeout    : Duration := Duration'Last;
+   Use_System_Roots   : Boolean := False);
 
 --  Convenience form: no extra headers.
 procedure Connect
@@ -270,7 +271,8 @@ procedure Connect
    Connect_Timeout    : Duration := Duration'Last;
    Handshake_Deadline : Duration := Duration'Last;
    Upgrade_Deadline   : Duration := Duration'Last;
-   Resolve_Timeout    : Duration := Duration'Last);
+   Resolve_Timeout    : Duration := Duration'Last;
+   Use_System_Roots   : Boolean := False);
 
 procedure Reconnect
   (Self               : in out Client_Type;
@@ -305,17 +307,21 @@ function Generation           (Self : Client_Type) return Natural;
 ```
 
 `ws://` runs on the plain TCP transport, `wss://` on the TLS
-transport. `Insecure`, `CA_Path` and `CA_PEM` configure the TLS
-handshake and are not used on a `ws://` dial, but they are still
-checked: supplying both `CA_Path` and `CA_PEM` is rejected on either
-scheme.
+transport. `Insecure`, `CA_Path`, `CA_PEM` and `Use_System_Roots`
+configure the TLS handshake and are not used on a `ws://` dial, but
+they are still checked: choosing more than one of `CA_Path`, `CA_PEM`
+and `Use_System_Roots` is rejected on either scheme. A `wss://` dial
+with none of them and `Insecure` False is refused by the TLS
+transport before it dials: there is no implicit trust (see
+[`tls.md`](tls.md), *Trust anchors*).
 
 `CA_PEM` is the same trust material as `CA_Path`, held in memory
 rather than on disk: one or more concatenated PEM certificates, for
-anchors compiled into the binary. Two rules:
+anchors compiled into the binary. `Use_System_Roots` takes the
+platform's anchors from `AHT.Root_Store`. Two rules:
 
-- Supplying both raises, before anything is dialled and before
-  admission reserves a generation. There is no precedence, and the
+- Choosing more than one source raises, before anything is dialled
+  and before admission reserves a generation. There is no precedence, and the
   refusal stands under `Insecure`: a caller who passed two sets of
   anchors is wrong about which is in force, and honouring one
   silently would leave that belief intact. On a `ws://` dial the
@@ -327,7 +333,8 @@ anchors compiled into the binary. Two rules:
 
 `CA_PEM` is deep-copied into the saved parameters like every other
 argument, so `Reconnect` replays it without the caller keeping the
-PEM alive.
+PEM alive; `Use_System_Roots` is saved too, and the store is read
+again on the redial.
 
 The `Send_*` operations carry no `Is_Open` precondition. The receiver
 task can tear a connection down concurrently (the peer may close
@@ -609,9 +616,10 @@ to bound a dial.
      including `Origin` and `Sec-WebSocket-Protocol`, are appended
      as-is. Passing those two both ways emits duplicate header lines.
 3. Dial one transport for the scheme, TCP for `ws://` and TLS for
-   `wss://`, threading `Insecure` / `CA_Path` / `CA_PEM` into the TLS
-   handshake and `Resolve_Timeout` / `Connect_Timeout` /
-   `Handshake_Deadline` into the waits. The name is resolved here,
+   `wss://`, threading `Insecure` / `CA_Path` / `CA_PEM` /
+   `Use_System_Roots` into the TLS handshake and `Resolve_Timeout` /
+   `Connect_Timeout` / `Handshake_Deadline` into the waits. The name
+   is resolved here,
    through `AHT.DNS`, and stays the name for SNI and verification.
    The request is built before the dial, not after.
 4. Arm `Upgrade_Deadline` on both directions, then
@@ -939,6 +947,8 @@ nothing may sit ahead of it that could hang and stop it running.
 | `test_ws_tls` | the `wss://` sibling: verify / insecure / untrusted, round-trips over TLS | `server_ws_tls.py` |
 | `test_pem` | the envelope validator in isolation: bundle rules, plus index arithmetic for shifted and near-Positive'Last bounds | none (in-process) |
 | `test_tls_ca_pem` | in-memory trust anchors: same chain as the file, both-supplied refused, partial bundles refused, replayed by `Reconnect` | `server_tls.py`, `server_ws_tls.py`, `server_ws.py` |
+| `test_root_store` | `AHT.Root_Store.Load`: platform default, `SSL_CERT_FILE` / `SSL_CERT_DIR`, what a bundle may carry, duplicates, `Max_Certificates`, `Max_Bytes`, `Max_Block_Bytes`, a linear scan of unclosed blocks | none (files it writes) |
+| `test_tls_trust` | the trust choice: no source refused before dialling, `Use_System_Roots` verifying through all three clients and replayed by `Reconnect`, more than one source refused (`ws://` and `http://` too), the platform store installed whole | `server_tls.py`, `server_ws_tls.py`, `server_ws.py`, `server.py` |
 
 ### Conformance
 

@@ -10,7 +10,8 @@
 --  Cases:
 --    1. CA_Path set: the chain verifies and /hello round-trips.
 --    2. Insecure, no CA: the self-signed cert is accepted.
---    3. Verify required, no CA: TLS_Error propagates through the client.
+--    3. Verify required, trusting an unrelated certificate: the
+--       handshake's TLS_Error propagates through the client.
 --    4. CA_PEM set: the same anchor as PEM data on the client record.
 --    5. CA_Path and CA_PEM both set: refused by the request using them.
 --
@@ -26,6 +27,8 @@ with AHT.Bytes;
 with AHT.HTTP.Client;
 with AHT.HTTP.Response;
 with AHT.Transport.TLS;
+
+with Test_Untrusted;
 
 procedure Test_HTTP_TLS is
 
@@ -95,24 +98,43 @@ begin
       end;
    end;
 
-   --  Case 3: verify required, no CA configured. The self-signed cert
-   --  chains to no trusted root, so the handshake must be rejected with
-   --  TLS_Error propagated up through the client.
-   declare
-      C    : AHT.HTTP.Client.Client_Type;
-      Resp : AHT.HTTP.Response.Response_Type;
-   begin
-      Resp := AHT.HTTP.Client.Get (C, URL);
-      Fail ("untrusted: Get returned status" & Resp.Status'Image
-            & " (expected TLS_Error)");
-   exception
-      when AHT.Transport.TLS.TLS_Error =>
-         null;  --  expected: untrusted chain rejected
-      when E : others =>
-         Fail ("untrusted: expected TLS_Error, got "
-               & Ada.Exceptions.Exception_Name (E) & " — "
-               & Ada.Exceptions.Exception_Message (E));
-   end;
+   --  Case 3: verify required, trusting an unrelated certificate. The
+   --  self-signed cert chains to no trusted root, so the handshake
+   --  must be rejected with TLS_Error propagated up through the
+   --  client. The anchor is checked first and the dial counted, so a
+   --  refusal while loading it cannot pass for a handshake rejection.
+   --  (No trust at all is refused before dialling; test_tls_trust
+   --  covers that.)
+   if Test_Untrusted.Anchor_Problem /= "" then
+      Fail ("untrusted: " & Test_Untrusted.Anchor_Problem);
+   else
+      declare
+         C    : AHT.HTTP.Client.Client_Type;
+         Resp : AHT.HTTP.Response.Response_Type;
+      begin
+         C.CA_Path := Ada.Strings.Unbounded.To_Unbounded_String
+           (Test_Untrusted.Other_File);
+         C.On_Address := Test_Untrusted.Count_Dial'Access;
+         Test_Untrusted.Dials := 0;
+         Resp := AHT.HTTP.Client.Get (C, URL);
+         Fail ("untrusted: Get returned status" & Resp.Status'Image
+               & " (expected TLS_Error)");
+      exception
+         when E : AHT.Transport.TLS.TLS_Error =>
+            if Test_Untrusted.Dials = 0
+              or else not Test_Untrusted.Is_Handshake_Rejection
+                            (Ada.Exceptions.Exception_Message (E))
+            then
+               Fail ("untrusted: not rejected by the handshake ("
+                     & Test_Untrusted.Dials'Image & " dial(s)): "
+                     & Ada.Exceptions.Exception_Message (E));
+            end if;
+         when E : others =>
+            Fail ("untrusted: expected TLS_Error, got "
+                  & Ada.Exceptions.Exception_Name (E) & " — "
+                  & Ada.Exceptions.Exception_Message (E));
+      end;
+   end if;
 
 
    --  Case 4: the same anchor as PEM data on the client record. CA_PEM

@@ -149,7 +149,7 @@ The packages under `src/tls/mbedtls/`:
   protocol and error constants the body branches on.
 - `AHT.Mbedtls.X509`: `mbedtls_x509_crt_parse_file`,
   `mbedtls_x509_crt_parse_path`, and `mbedtls_x509_crt_parse` for
-  `CA_PEM`.
+  `CA_PEM` and the store's PEM under `Use_System_Roots`.
 - `AHT.Mbedtls.Glue`: the C glue above.
 - `AHT.Mbedtls.Entropy`: `Poll`, exported to C as
   `aht_mbedtls_entropy_poll`; fills from `AHT.Random` and returns

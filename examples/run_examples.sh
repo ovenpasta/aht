@@ -108,6 +108,10 @@ then
 fi
 
 echo "==> running examples"
+# ex_09_https trusts the system store; this makes the fixture's
+# self-signed certificate that store (AHT.Root_Store honours it).
+SSL_CERT_FILE=tests/server/certs/server.crt
+export SSL_CERT_FILE
 # Source the ordered main list from examples.gpr so a rename or reorder
 # in the project file is reflected here automatically.
 NAMES=$(grep -oE '"ex_[a-z0-9_]+\.adb"' examples/examples.gpr \

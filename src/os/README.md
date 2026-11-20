@@ -17,6 +17,9 @@ src/os/posix/aht-random-source.adb   /dev/urandom
 src/os/windows/aht-random-source.adb RtlGenRandom (SystemFunction036)
 src/os/posix/aht-dns-link.ads        -lpthread for the resolver shim
 src/os/windows/aht-dns-link.ads      -lws2_32 for the resolver shim
+src/aht-root_store-platform.ads             shared spec
+src/os/posix/aht-root_store-platform.adb   well-known bundles, dirs
+src/os/windows/aht-root_store-platform.adb ROOT system store (crypt32)
 ```
 
 `AHT.Random.Source` has one body per OS. The counting, the
@@ -30,6 +33,17 @@ resolver shim's link line that depends on the target:
 a `CONDITION_VARIABLE` from kernel32 on Windows, where
 `getaddrinfo`, `freeaddrinfo`, `inet_ntop` and `WSAStartup` come
 from `ws2_32`.
+
+`AHT.Root_Store.Platform` supplies the platform default of
+`AHT.Root_Store.Load`. The environment override, the PEM extraction,
+the duplicate check and the limits live in the parent body, so a
+platform body only names where its anchors are; see
+[`../../docs/tls.md`](../../docs/tls.md), *Trust anchors*. The
+Windows body imports `crypt32` with `Stdcall`, like `RtlGenRandom`
+above, and names only entry points Windows XP exports. It has been
+compile-checked only, with the native compiler (`gcc -c -gnatc`
+against `src` and `src/os/windows`); it has not been built for either
+Windows target, linked, or run, under wine or on Windows.
 
 ## Scope
 

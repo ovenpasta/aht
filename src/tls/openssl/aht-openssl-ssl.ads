@@ -56,13 +56,6 @@ package AHT.Openssl.SSL is
      with Import, Convention => C, External_Name => "SSL_CTX_set_verify";
    --  Callback is always Null_Address here (default verification).
 
-   function CTX_Set_Default_Verify_Paths
-     (Ctx : System.Address) return Interfaces.C.int
-     with Import, Convention => C,
-          External_Name => "SSL_CTX_set_default_verify_paths";
-   --  1 on success. Loads the platform trust store (honours
-   --  SSL_CERT_FILE / SSL_CERT_DIR).
-
    function CTX_Load_Verify_Locations
      (Ctx    : System.Address;
       CAfile : System.Address;

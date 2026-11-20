@@ -20,11 +20,12 @@ library project Aht is
    TLS_Backend : TLS_Backend_Kind := external ("AHT_TLS_BACKEND", "openssl");
 
    --  Target OS family, not the host: the Windows body is cross-built
-   --  from Linux with mingw. Selects the body of AHT.Random.Source
-   --  (/dev/urandom on POSIX, BCryptGenRandom on Windows), the
-   --  body-less AHT.Mbedtls.Link for the mbedtls backend, and the
-   --  triplet-suffixed paths below. An explicit external because GPR
-   --  cannot pattern-match Project'Target. Windows is not supported.
+   --  from Linux with mingw. Selects the src/os directory (the bodies
+   --  of AHT.Random.Source and AHT.Root_Store.Platform, and
+   --  AHT.DNS.Link), the body-less AHT.Mbedtls.Link for the mbedtls
+   --  backend, and the triplet-suffixed paths below. An explicit
+   --  external because GPR cannot pattern-match Project'Target.
+   --  Windows is not supported.
    type OS_Kind is ("posix", "windows");
    OS : OS_Kind := external ("AHT_OS", "posix");
 
@@ -86,7 +87,7 @@ library project Aht is
          Tls_Dirs := ("src/tls/openssl", "csrc/openssl");
    end case;
 
-   --  One body of src/aht-random-source.ads per OS directory.
+   --  The per-OS units; src/os/README.md lists them.
    Os_Dirs := ();
    case OS is
       when "posix" =>

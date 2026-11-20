@@ -1394,7 +1394,8 @@ package body AHT.Websocket.Client is
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
       Upgrade_Deadline   : Duration := Duration'Last;
-      Resolve_Timeout    : Duration := Duration'Last)
+      Resolve_Timeout    : Duration := Duration'Last;
+      Use_System_Roots   : Boolean := False)
    is
       Parsed : constant AHT.URL.URL_Type := AHT.URL.Parse (URL);
 
@@ -1412,7 +1413,8 @@ package body AHT.Websocket.Client is
          Origin       => To_Unbounded_String (Origin),
          Insecure     => Insecure,
          CA_Path      => To_Unbounded_String (CA_Path),
-         CA_PEM       => To_Unbounded_String (CA_PEM));
+         CA_PEM       => To_Unbounded_String (CA_PEM),
+         System_Roots => Use_System_Roots);
 
       --  Declared BEFORE admission is asked for, so that there is no
       --  instant at which the client is Connecting and no object is
@@ -1421,17 +1423,19 @@ package body AHT.Websocket.Client is
       --  Connect still cannot release an admission it never took.
       Attempt : Attempt_Owner (Self.Ctl'Unchecked_Access);
    begin
-      --  Checked before admission, so a contradictory pair never
+      --  Checked before admission, so a contradictory choice never
       --  reserves a generation, and before the scheme is consulted,
       --  since a ws:// dial builds no TLS transport to notice it.
-      --  Supplying both raises TLS_Error before anything is dialled;
-      --  there is no precedence, and the refusal stands even under
-      --  Insecure.
-      if CA_Path /= "" and then CA_PEM /= "" then
+      --  More than one source raises TLS_Error before anything is
+      --  dialled; there is no precedence, and the refusal stands even
+      --  under Insecure.
+      if Boolean'Pos (CA_Path /= "") + Boolean'Pos (CA_PEM /= "")
+           + Boolean'Pos (Use_System_Roots) > 1
+      then
          raise AHT.Transport.TLS.TLS_Error
-           with "Websocket.Client.Connect: CA_Path and CA_PEM are "
-             & "mutually exclusive; supply the trust anchors either "
-             & "as a path or as PEM data, not both";
+           with "Websocket.Client.Connect: CA_Path, CA_PEM and "
+             & "Use_System_Roots are mutually exclusive; choose one "
+             & "source of trust anchors";
       end if;
 
       --  Admission: one protected action decides whether an attempt
@@ -1546,7 +1550,8 @@ package body AHT.Websocket.Client is
                      Connect_Timeout    => Connect_Timeout,
                      Handshake_Deadline => Handshake_Deadline,
                      CA_PEM             => CA_PEM,
-                     Resolve_Timeout    => Resolve_Timeout);
+                     Resolve_Timeout    => Resolve_Timeout,
+                     Use_System_Roots   => Use_System_Roots);
                when Plain_Transport =>
                   --  No Handshake_Deadline here: ws:// runs no TLS
                   --  handshake, so there is nothing for it to bound.
@@ -1706,7 +1711,8 @@ package body AHT.Websocket.Client is
       Connect_Timeout    : Duration := Duration'Last;
       Handshake_Deadline : Duration := Duration'Last;
       Upgrade_Deadline   : Duration := Duration'Last;
-      Resolve_Timeout    : Duration := Duration'Last)
+      Resolve_Timeout    : Duration := Duration'Last;
+      Use_System_Roots   : Boolean := False)
    is
       No_Extras : AHT.HTTP.Headers.Map;
    begin
@@ -1720,7 +1726,8 @@ package body AHT.Websocket.Client is
          Connect_Timeout    => Connect_Timeout,
          Handshake_Deadline => Handshake_Deadline,
          Upgrade_Deadline   => Upgrade_Deadline,
-         Resolve_Timeout    => Resolve_Timeout);
+         Resolve_Timeout    => Resolve_Timeout,
+         Use_System_Roots   => Use_System_Roots);
    end Connect;
 
    --  Called by every operation that would wait on the receiver.
@@ -1796,7 +1803,8 @@ package body AHT.Websocket.Client is
          Connect_Timeout    => Connect_Timeout,
          Handshake_Deadline => Handshake_Deadline,
          Upgrade_Deadline   => Upgrade_Deadline,
-         Resolve_Timeout    => Resolve_Timeout);
+         Resolve_Timeout    => Resolve_Timeout,
+         Use_System_Roots   => P.System_Roots);
    end Reconnect;
 
    function Is_Open (Self : Client_Type) return Boolean is

@@ -294,6 +294,7 @@ package body AHT.HTTP.Client is
         (if U.Scheme = AHT.URL.HTTPS
          then To_Unbounded_String
                 ((if Self.Insecure then "insecure" else "verify")
+                 & (if Self.Use_System_Roots then "+system" else "")
                  & ASCII.NUL & To_String (Self.CA_Path)
                  & ASCII.NUL & To_String (Self.CA_PEM))
          else Null_Unbounded_String));
@@ -380,7 +381,8 @@ package body AHT.HTTP.Client is
             Resolve_Timeout    => Resolve_B,
             CA_PEM             => To_String (Self.CA_PEM),
             Address_Filter     =>
-              (if Filtering then Address_OK'Access else null));
+              (if Filtering then Address_OK'Access else null),
+            Use_System_Roots   => Self.Use_System_Roots);
       end Connect_TLS;
 
       --  The pooled path. A hop on a connection from the pool that
@@ -613,6 +615,20 @@ package body AHT.HTTP.Client is
          return D;
       end Vet;
    begin
+      --  Checked for every scheme, before anything is dialled, as the
+      --  WebSocket client does for ws://: an http:// request does not
+      --  reach the TLS transport, and a redirect could take it to
+      --  https:// with the contradiction still in place.
+      if Boolean'Pos (Length (Self.CA_Path) > 0)
+           + Boolean'Pos (Length (Self.CA_PEM) > 0)
+           + Boolean'Pos (Self.Use_System_Roots) > 1
+      then
+         raise AHT.Transport.TLS.TLS_Error
+           with "HTTP.Client.Send: CA_Path, CA_PEM and Use_System_Roots "
+             & "are mutually exclusive; choose one source of trust "
+             & "anchors";
+      end if;
+
       loop
          Dropped := 0;
          begin

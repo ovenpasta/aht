@@ -457,9 +457,10 @@ there is one chunked decoder.
 type Client_Type is tagged record
    User_Agent      : Unbounded_String := "AHT/0.1";
    Default_Headers : AHT.HTTP.Headers.Map;
-   CA_Path         : Unbounded_String;
-   CA_PEM          : Unbounded_String;
-   Insecure        : Boolean := False;
+   CA_Path          : Unbounded_String;
+   CA_PEM           : Unbounded_String;
+   Insecure         : Boolean := False;
+   Use_System_Roots : Boolean := False;
    Timeout_Seconds : Natural := 30;
 
    Resolve_Timeout    : Phase_Bound := Inherit;
@@ -500,11 +501,16 @@ function  Get  (Self, URL) return Response_Type;
 function  Pool_Endpoint (Self, URL) return Connection_Pools.Endpoint;
 ```
 
-`CA_PEM` holds trust anchors as PEM data rather than a path, for
-anchors compiled into the binary. Setting both it and `CA_Path`
-raises `TLS_Error` on the next `https://` request, before anything is
-dialled; there is no precedence rule, and the refusal stands under
-`Insecure`. A plain `http://` request does not read either field.
+An `https://` request needs exactly one source of trust anchors, or
+`Insecure`; nothing is trusted by default (see [`tls.md`](tls.md),
+*Trust anchors*). `CA_Path` names a bundle file or directory,
+`CA_PEM` holds anchors as PEM data, for anchors compiled into the
+binary, and `Use_System_Roots` takes the platform's anchors from
+`AHT.Root_Store`. None of them, without `Insecure`, raises
+`TLS_Error` on the next `https://` request before anything is
+dialled. Setting more than one raises the same on any request,
+`http://` included (a redirect could lead to `https://`), with no
+precedence rule and even under `Insecure`.
 
 ### Behaviour
 
@@ -520,8 +526,9 @@ dialled; there is no precedence rule, and the refusal stands under
   - `https://`: `AHT.Transport.TLS`. Both TLS engines run over
     memory BIOs (OpenSSL) or in-memory queues (mbedTLS) that the Ada
     side feeds from the TCP transport; the engine never touches the
-    socket. `Send` threads `CA_Path` / `CA_PEM` / `Insecure` into the
-    handshake and then runs the same round trip polymorphically.
+    socket. `Send` threads `CA_Path` / `CA_PEM` / `Use_System_Roots` /
+    `Insecure` into the handshake and then runs the same round trip
+    polymorphically.
   - `ws://` / `wss://`: raises `HTTP_Error`; use
     `AHT.Websocket.Client`.
 
@@ -667,7 +674,10 @@ copy to go closes every idle connection.
 
 - Endpoint. A connection is reused only for the same scheme, host
   (case-insensitive) and port, and for `https` the same `CA_Path`,
-  `CA_PEM` and `Insecure`; `Pool_Endpoint` returns that key.
+  `CA_PEM`, `Use_System_Roots` and `Insecure`; `Pool_Endpoint`
+  returns that key. The key holds the `Use_System_Roots` flag, not
+  the store's contents: a connection verified earlier is reused after
+  the store, `SSL_CERT_FILE` or `SSL_CERT_DIR` has changed.
 - Taking. The most recently parked connection for the endpoint is
   taken first, and only if `Transport.Peer_Quiet` reports nothing
   arrived since it was parked; anything at all, usually the peer's

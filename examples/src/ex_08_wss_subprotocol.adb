@@ -3,9 +3,10 @@
 
 --  Example 8: wss:// with subprotocol negotiation against the TLS
 --  echo fixture on :8768. Insecure => True accepts the self-signed
---  fixture cert (production sets CA_Path instead). Connect's offer
---  form takes a subprotocol list and Extra_Headers (an empty map is
---  fine); Selected_Subprotocol reports the server's pick, "" if none.
+--  fixture cert (production chooses Use_System_Roots, CA_Path or
+--  CA_PEM instead; see ex_09). Connect's offer form takes a
+--  subprotocol list and Extra_Headers (an empty map is fine);
+--  Selected_Subprotocol reports the server's pick, "" if none.
 --
 --  Run:  ./examples/bin/<mode>/ex_08_wss_subprotocol [URL]
 --  Needs the cert from scripts/generate_cert.sh.

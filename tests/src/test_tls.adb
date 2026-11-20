@@ -12,6 +12,8 @@ with AHT.Transport;
 with AHT.Transport.TLS;
 with AHT.URL;
 
+with Test_Untrusted;
+
 --  Transport-level TLS test. Drives AHT.Transport.TLS against the HTTPS
 --  fixture (tests/server/server_tls.py on 127.0.0.1:8766) by speaking a
 --  minimal HTTP/1.1 GET over the established session: enough to
@@ -123,26 +125,41 @@ begin
       Close_Quietly (T);
    end;
 
-   --  Case 3: verify required, no CA configured. The self-signed cert
-   --  chains to no trusted root, so the handshake must be rejected with
-   --  TLS_Error.
-   declare
-      T : AHT.Transport.TLS.TLS_Transport;
-   begin
+   --  Case 3: verify required, trusting an unrelated certificate. The
+   --  self-signed cert chains to no trusted root, so the handshake
+   --  must be rejected with TLS_Error. The anchor is checked first and
+   --  the dial counted, so a refusal while loading it cannot pass for
+   --  a handshake rejection. (No trust at all is refused before
+   --  dialling; test_tls_trust covers that.)
+   if Test_Untrusted.Anchor_Problem /= "" then
+      Fail ("untrusted: " & Test_Untrusted.Anchor_Problem);
+   else
+      declare
+         T : AHT.Transport.TLS.TLS_Transport;
       begin
-         T.Connect (Host, Port, Insecure => False);
+         Test_Untrusted.Dials := 0;
+         T.Connect (Host, Port, Insecure => False,
+                    CA_Path        => Test_Untrusted.Other_File,
+                    Address_Filter => Test_Untrusted.Count_Dial'Access);
          Fail ("untrusted: Connect returned normally (Is_Connected="
                & Boolean'Image (T.Is_Connected) & ")");
+         Close_Quietly (T);
       exception
-         when AHT.Transport.TLS.TLS_Error =>
-            null;  --  expected: untrusted chain rejected
+         when E : AHT.Transport.TLS.TLS_Error =>
+            if Test_Untrusted.Dials = 0
+              or else not Test_Untrusted.Is_Handshake_Rejection
+                            (Ada.Exceptions.Exception_Message (E))
+            then
+               Fail ("untrusted: not rejected by the handshake ("
+                     & Test_Untrusted.Dials'Image & " dial(s)): "
+                     & Ada.Exceptions.Exception_Message (E));
+            end if;
          when E : others =>
             Fail ("untrusted: expected TLS_Error, got "
                   & Ada.Exceptions.Exception_Name (E) & " — "
                   & Ada.Exceptions.Exception_Message (E));
       end;
-      Close_Quietly (T);
-   end;
+   end if;
 
    if Failures = 0 then
       Put_Line ("test_tls: OK");

@@ -62,13 +62,17 @@ package AHT.HTTP.Client is
       User_Agent      : Ada.Strings.Unbounded.Unbounded_String :=
         Ada.Strings.Unbounded.To_Unbounded_String ("AHT/0.1");
       Default_Headers : AHT.HTTP.Headers.Map;
-      CA_Path         : Ada.Strings.Unbounded.Unbounded_String;
-      --  Trust anchors in memory: concatenated PEM certificates.
-      --  Supplying both this and CA_Path raises
-      --  AHT.Transport.TLS.TLS_Error before dialling; there is no
-      --  precedence, and the refusal stands even under Insecure.
-      CA_PEM          : Ada.Strings.Unbounded.Unbounded_String;
-      Insecure        : Boolean := False;
+      --  Trust for https://, passed to AHT.Transport.TLS.Connect,
+      --  which states the rule: exactly one of CA_Path (a bundle file
+      --  or directory), CA_PEM (concatenated PEM certificates) and
+      --  Use_System_Roots (the platform's anchors, AHT.Root_Store), or
+      --  Insecure. None of them on an https:// request raises
+      --  AHT.Transport.TLS.TLS_Error before dialling; more than one
+      --  raises the same on any request, even under Insecure.
+      CA_Path          : Ada.Strings.Unbounded.Unbounded_String;
+      CA_PEM           : Ada.Strings.Unbounded.Unbounded_String;
+      Insecure         : Boolean := False;
+      Use_System_Roots : Boolean := False;
 
       --  The coarse bound, applied to every phase left at Inherit.
       --  0 means no bound. It is not an end-to-end deadline: each
@@ -186,8 +190,9 @@ package AHT.HTTP.Client is
    --  with one it borrows and returns connections as described at
    --  Pool. Either way tasks may share one Client_Type without
    --  locking. HTTP dials AHT.Transport.TCP; HTTPS dials
-   --  AHT.Transport.TLS with Self.CA_Path, Self.CA_PEM and
-   --  Self.Insecure; WS / WSS raise HTTP_Error. Resp.Final_URL is the
+   --  AHT.Transport.TLS with Self.CA_Path, Self.CA_PEM,
+   --  Self.Use_System_Roots and Self.Insecure; WS / WSS raise
+   --  HTTP_Error. Resp.Final_URL is the
    --  URL of the response returned.
    --
    --  Headers the caller did not set are filled in: Host from the
@@ -349,7 +354,7 @@ package AHT.HTTP.Client is
       URL  : AHT.URL.URL_Type) return AHT.HTTP.Connection_Pools.Endpoint;
    --  The pool key under which Send parks and looks up connections for
    --  URL: its scheme, host and port, and for https the trust settings
-   --  of Self (CA_Path, CA_PEM, Insecure).
+   --  of Self (CA_Path, CA_PEM, Use_System_Roots, Insecure).
 
    function Get
      (Self : in out Client_Type;

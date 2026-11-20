@@ -30,20 +30,28 @@ package AHT.Transport.TLS is
       CA_PEM             : String  := "";
       Resolve_Timeout    : Duration := Duration'Last;
       Address_Filter     : access function
-        (Host, Address : String) return Boolean := null);
+        (Host, Address : String) return Boolean := null;
+      Use_System_Roots   : Boolean := False);
    --  TCP-connect to Host:Port, then run the TLS handshake. A DNS name
    --  gets SNI = Host and certificate verification against Host; an
    --  IP literal gets no SNI and is checked against its IP SANs. Host
    --  stays the name for SNI; see AHT.DNS. Insecure skips
    --  verification; otherwise a failure raises TLS_Error.
-   --  CA_Path: a PEM bundle file or a directory of certificates. With
-   --  CA_Path = "": openssl uses the platform trust store; mbedtls has
-   --  no default trust and the handshake fails. A directory needs
-   --  c_rehash names on openssl; mbedtls loads every file in it.
-   --  CA_PEM: the same trust material as concatenated PEM in memory; a
-   --  malformed bundle raises TLS_Error with nothing of it installed.
-   --  Both CA_Path and CA_PEM supplied: raises TLS_Error before
-   --  dialling; no precedence.
+   --  Trust is never implicit. Exactly one source of trust anchors is
+   --  chosen, or Insecure is set:
+   --    CA_Path: a PEM bundle file or a directory of certificates. A
+   --      directory needs c_rehash names on openssl; mbedtls loads
+   --      every file in it.
+   --    CA_PEM: the same trust material as concatenated PEM in memory;
+   --      a malformed bundle raises TLS_Error with nothing of it
+   --      installed.
+   --    Use_System_Roots: the platform's trust anchors, read by
+   --      AHT.Root_Store.Load on every verifying Connect and installed
+   --      as CA_PEM would be; TLS_Error when it yields no certificate
+   --      or reaches one of its limits. Not read under Insecure.
+   --  None chosen and Insecure False, or more than one chosen (even
+   --  under Insecure): raises TLS_Error before dialling; no
+   --  precedence.
    --  Resolve_Timeout bounds the DNS lookup; Timeout_Error.
    --  Connect_Timeout bounds the TCP connect across all candidates
    --  (AHT.Transport.TCP.Connect); Timeout_Error.

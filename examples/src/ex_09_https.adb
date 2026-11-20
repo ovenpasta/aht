@@ -3,12 +3,16 @@
 
 --  Example 9: the one-line GET of ex_01 over https:// against the TLS
 --  fixture on :8766. Client.Get sees the scheme and runs the round
---  trip over AHT.Transport.TLS. Trust is two Client_Type fields:
---  Insecure => True accepts any certificate (the fixture's is
---  self-signed); production leaves it False and sets CA_Path instead.
+--  trip over AHT.Transport.TLS. Trust is never implicit: the client
+--  chooses one source of anchors (Use_System_Roots, CA_Path or
+--  CA_PEM) or sets Insecure. This one trusts the platform's store,
+--  which AHT.Root_Store reads; SSL_CERT_FILE replaces it, and
+--  examples/run_examples.sh points it at the fixture's self-signed
+--  certificate.
 --
---  Run:  ./examples/bin/<mode>/ex_09_https [URL]
---  A public https:// host works with Insecure left False.
+--  Run:  SSL_CERT_FILE=tests/server/certs/server.crt \
+--          ./examples/bin/<mode>/ex_09_https
+--  or:   ./examples/bin/<mode>/ex_09_https https://example.org/
 
 with Ada.Command_Line; use Ada.Command_Line;
 with Ada.Exceptions;
@@ -27,11 +31,9 @@ procedure Ex_09_HTTPS is
    Client : AHT.HTTP.Client.Client_Type;
    Resp   : AHT.HTTP.Response.Response_Type;
 begin
-   Put_Line ("GET " & URL & " (TLS, accepting self-signed cert)");
+   Put_Line ("GET " & URL & " (TLS, verified against the system store)");
 
-   --  Trust the fixture's self-signed cert; production sets CA_Path
-   --  and leaves this False.
-   Client.Insecure := True;
+   Client.Use_System_Roots := True;
 
    Resp := AHT.HTTP.Client.Get (Client, URL);
 
@@ -44,7 +46,8 @@ exception
       Put_Line ("request failed: "
                 & Ada.Exceptions.Exception_Name (E) & ": "
                 & Ada.Exceptions.Exception_Message (E));
-      Put_Line ("(is the TLS fixture up + cert generated? "
+      Put_Line ("(is the TLS fixture up, the cert generated and "
+                & "SSL_CERT_FILE pointing at it? "
                 & "try: bash examples/run_examples.sh)");
       Set_Exit_Status (Failure);
 end Ex_09_HTTPS;

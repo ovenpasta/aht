@@ -316,7 +316,8 @@ concurrency contract is the same: one reader task and one writer
 task.
 
 `Connect (Host, Port, Insecure, CA_Path, Connect_Timeout,
-Handshake_Deadline, CA_PEM, Resolve_Timeout)`:
+Handshake_Deadline, CA_PEM, Resolve_Timeout, Address_Filter,
+Use_System_Roots)`:
 
 - `Connect_Timeout` and `Resolve_Timeout` are forwarded to the TCP
   connect. Resolving here rather than in the caller keeps `Host` as
@@ -325,10 +326,14 @@ Handshake_Deadline, CA_PEM, Resolve_Timeout)`:
   TCP connect (they run before it is armed), and not later
   `Read`/`Write` (the `Set_*_Deadline` budgets govern those and are
   installed after the handshake succeeds).
-- `CA_Path` names a PEM bundle file or a directory; `CA_PEM` is the
-  same material in memory, for anchors compiled into the binary.
-  Supplying both raises `TLS_Error` before anything is dialled, even
-  under `Insecure`. `CA_PEM`'s envelope is validated by `AHT.PEM`
+- Trust is explicit: exactly one of `CA_Path`, `CA_PEM` and
+  `Use_System_Roots`, or `Insecure`. `CA_Path` names a PEM bundle
+  file or a directory; `CA_PEM` is the same material in memory, for
+  anchors compiled into the binary; `Use_System_Roots` installs the
+  platform's anchors from `AHT.Root_Store`. None of them without
+  `Insecure`, or more than one even under `Insecure`, raises
+  `TLS_Error` before anything is dialled; see [`tls.md`](tls.md),
+  *Trust anchors*. `CA_PEM`'s envelope is validated by `AHT.PEM`
   before either backend sees it, unconditionally, because neither
   backend reports trailing garbage after a valid certificate:
   OpenSSL's `PEM_R_NO_START_LINE` also means "no further header",
