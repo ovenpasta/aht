@@ -34,6 +34,12 @@
 --       refuses neither dials nor rides a pooled connection.
 --    6. A Cancel after the Send returned leaves the connection
 --       pooled and usable.
+--  Client case, over https only:
+--   10. CA_PEM in the key. Clients sharing a pool reuse a connection
+--       when their CA_PEM is equal and dial afresh when it differs in
+--       one byte at the same length; the key's length does not grow
+--       with the bundle. Over a 9 KB CA_PEM, every one-byte change
+--       changes the key.
 --  Pool cases:
 --    7. Per-endpoint and total limits, and idle expiry. Each dialled
 --       connection learns its X-Conn, and the fixture lists the ids
@@ -519,6 +525,122 @@ procedure Test_HTTP_Keepalive is
       end;
    end Client_Cases;
 
+   function Read_File (Path : String) return String is
+      F : File_Type;
+      R : Unbounded_String;
+   begin
+      Open (F, In_File, Path);
+      while not End_Of_File (F) loop
+         Append (R, Get_Line (F));
+         Append (R, ASCII.LF);
+      end loop;
+      Close (F);
+      return To_String (R);
+   end Read_File;
+
+   --  10. CA_PEM in the key. The two bundles have one length and
+   --  differ in one byte, the whitespace after the certificate, so
+   --  both trust the fixture: whichever connection a request rides,
+   --  it succeeds, and X-Conn and X-Req show which one the key chose.
+   procedure PEM_Key_Cases is
+      Tag : constant String := "[" & TLS_Base & "] ";
+   begin
+      --  In a block, so that a raise while elaborating these reaches
+      --  the handler below.
+      declare
+         Cert : constant String := Read_File (CA_File);
+         Pool : constant Pools.Pool_Ref := Pools.Create;
+
+         function Using (PEM : String) return Client.Client_Type is
+            C : Client.Client_Type;
+         begin
+            C.CA_PEM := To_Unbounded_String (PEM);
+            C.Pool := Pool;
+            return C;
+         end Using;
+
+         A1 : Client.Client_Type := Using (Cert & ' ');
+         A2 : Client.Client_Type := Using (Cert & ' ');
+         B  : Client.Client_Type := Using (Cert & ASCII.HT);
+         R1, R2, R3, R4 : AHT.HTTP.Response.Response_Type;
+
+         function Key_Length (PEM : String) return Natural is
+           (Length (Client.Pool_Endpoint
+                      (Using (PEM), AHT.URL.Parse (TLS_Base & "/"))
+                      .TLS_Profile));
+      begin
+         R1 := Client.Get (A1, TLS_Base & "/ka/hello");
+         R2 := Client.Get (A2, TLS_Base & "/ka/hello");
+         if Conn (R2) /= Conn (R1) or else Nth (R2) /= "2" then
+            Fail (Tag & "pem key: equal CA_PEM got conn " & Conn (R2)
+                  & " req " & Nth (R2) & ", want conn " & Conn (R1)
+                  & " req 2");
+         end if;
+
+         R3 := Client.Get (B, TLS_Base & "/ka/hello");
+         if Conn (R3) = Conn (R1) or else Nth (R3) /= "1" then
+            Fail (Tag & "pem key: CA_PEM one byte apart got conn "
+                  & Conn (R3) & " req " & Nth (R3)
+                  & ", want a new connection");
+         end if;
+         if Pools.Idle_Count (Pool) /= 2 then
+            Fail (Tag & "pem key: idle count"
+                  & Pools.Idle_Count (Pool)'Image & ", want 2");
+         end if;
+
+         R4 := Client.Get (A1, TLS_Base & "/ka/hello");
+         if Conn (R4) /= Conn (R1) or else Nth (R4) /= "3" then
+            Fail (Tag & "pem key: A's connection gone, got conn "
+                  & Conn (R4) & " req " & Nth (R4));
+         end if;
+
+         if Key_Length (Cert) /= Key_Length (Cert & Cert) then
+            Fail (Tag & "pem key: key length" & Key_Length (Cert)'Image
+                  & " for one certificate,"
+                  & Key_Length (Cert & Cert)'Image & " for two");
+         end if;
+
+         --  The key alone, over CA_PEM far longer than any slice the
+         --  digest might be fed in: equal text, in separate client
+         --  records, gives an equal key, and a change to any one byte a different one.
+         --  Pool_Endpoint does not validate the PEM, so any text does.
+         declare
+            Size : constant := 9_001;
+            Base : constant String (1 .. Size) :=
+              [for I in 1 .. Size => Character'Val (32 + I mod 95)];
+
+            function Key (PEM : String) return Pools.Endpoint is
+              (Client.Pool_Endpoint
+                 (Using (PEM), AHT.URL.Parse (TLS_Base & "/")));
+
+            use type Pools.Endpoint;
+
+            Base_Key : constant Pools.Endpoint := Key (Base);
+            Collided : Natural := 0;
+         begin
+            if Key (Base) /= Base_Key then
+               Fail (Tag & "pem key: equal long CA_PEM, different keys");
+            end if;
+            for I in Base'Range loop
+               declare
+                  Other : String := Base;
+               begin
+                  Other (I) := '~';
+                  if Base (I) /= '~' and then Key (Other) = Base_Key then
+                     Collided := Collided + 1;
+                  end if;
+               end;
+            end loop;
+            if Collided > 0 then
+               Fail (Tag & "pem key:" & Collided'Image
+                     & " one-byte changes kept the key");
+            end if;
+         end;
+      end;
+   exception
+      when E : others => Guard (Tag & "pem key", E);
+   end PEM_Key_Cases;
+
    --  Whether the fixture has seen connection Id end.
    function Has_Closed (Id : String) return Boolean is
       C    : Client.Client_Type;
@@ -775,6 +897,7 @@ procedure Test_HTTP_Keepalive is
 begin
    Client_Cases (Plain_Base);
    Client_Cases (TLS_Base);
+   PEM_Key_Cases;
    Pool_Cases;
    Transport_Cases;
 

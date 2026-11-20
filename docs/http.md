@@ -675,9 +675,12 @@ copy to go closes every idle connection.
 - Endpoint. A connection is reused only for the same scheme, host
   (case-insensitive) and port, and for `https` the same `CA_Path`,
   `CA_PEM`, `Use_System_Roots` and `Insecure`; `Pool_Endpoint`
-  returns that key. The key holds the `Use_System_Roots` flag, not
-  the store's contents: a connection verified earlier is reused after
-  the store, `SSL_CERT_FILE` or `SSL_CERT_DIR` has changed.
+  returns that key. The key holds the SHA-256 digest of `CA_PEM`, not
+  the PEM itself, so its size does not grow with the bundle; PEMs
+  that differ in any byte, whitespace included, get different keys.
+  It holds the `Use_System_Roots` flag, not the store's contents: a
+  connection verified earlier is reused after the store,
+  `SSL_CERT_FILE` or `SSL_CERT_DIR` has changed.
 - Taking. The most recently parked connection for the endpoint is
   taken first, and only if `Transport.Peer_Quiet` reports nothing
   arrived since it was parked; anything at all, usually the peer's

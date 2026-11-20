@@ -11,8 +11,6 @@ with System;
 --  entry points live in AHT.Openssl.Glue instead.
 package AHT.Openssl.SSL is
 
-   use type Interfaces.C.int;
-
    --  SSL_get_error classifications (openssl/ssl.h).
    ERROR_NONE        : constant Interfaces.C.int := 0;
    ERROR_SSL         : constant Interfaces.C.int := 1;

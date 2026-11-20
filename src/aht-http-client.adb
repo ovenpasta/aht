@@ -7,6 +7,8 @@ with Ada.Strings;
 with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 
+with GNAT.SHA256;
+
 with AHT.HTTP.Methods;
 with AHT.Transport.TCP;
 with AHT.Transport.TLS;
@@ -284,6 +286,31 @@ package body AHT.HTTP.Client is
       AHT.HTTP.Connection_Pools.Discard (Self.C);
    end Finalize;
 
+   --  SHA-256 of PEM in hex, or "" for an empty PEM. Fed in slices,
+   --  so the bundle is never copied whole.
+   function PEM_Digest (PEM : Unbounded_String) return String is
+      Chunk : constant := 4096;
+      Last  : constant Natural := Length (PEM);
+      Ctx   : GNAT.SHA256.Context := GNAT.SHA256.Initial_Context;
+      First : Positive := 1;
+      Stop  : Natural;
+   begin
+      if Last = 0 then
+         return "";
+      end if;
+      loop
+         Stop := (if Last - First < Chunk then Last else First + Chunk - 1);
+         GNAT.SHA256.Update (Ctx, Slice (PEM, First, Stop));
+         exit when Stop = Last;
+         First := Stop + 1;
+      end loop;
+      return GNAT.SHA256.Digest (Ctx);
+   end PEM_Digest;
+
+   --  For https the profile holds CA_PEM's digest rather than CA_PEM,
+   --  which may be a whole system store: the key kept per idle
+   --  connection is the same size whatever the bundle's, and building
+   --  it on each hop hashes the bundle without copying it.
    function Endpoint_Of
      (Self : Client_Type;
       U    : AHT.URL.URL_Type) return AHT.HTTP.Connection_Pools.Endpoint is
@@ -296,7 +323,7 @@ package body AHT.HTTP.Client is
                 ((if Self.Insecure then "insecure" else "verify")
                  & (if Self.Use_System_Roots then "+system" else "")
                  & ASCII.NUL & To_String (Self.CA_Path)
-                 & ASCII.NUL & To_String (Self.CA_PEM))
+                 & ASCII.NUL & PEM_Digest (Self.CA_PEM))
          else Null_Unbounded_String));
 
    function Pool_Endpoint

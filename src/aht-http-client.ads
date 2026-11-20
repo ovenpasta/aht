@@ -354,7 +354,8 @@ package AHT.HTTP.Client is
       URL  : AHT.URL.URL_Type) return AHT.HTTP.Connection_Pools.Endpoint;
    --  The pool key under which Send parks and looks up connections for
    --  URL: its scheme, host and port, and for https the trust settings
-   --  of Self (CA_Path, CA_PEM, Use_System_Roots, Insecure).
+   --  of Self (CA_Path, the SHA-256 digest of CA_PEM, Use_System_Roots,
+   --  Insecure).
 
    function Get
      (Self : in out Client_Type;

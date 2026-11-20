@@ -20,6 +20,10 @@
 --    7b. malformed PEM is refused under Insecure
 --    8. the WebSocket client's own guard on a ws:// dial
 --    9. Reconnect replays the PEM
+--   10. a CA_PEM of over 2 MiB (the fixture cert repeated) verifies
+--       from a task with a 256 KiB stack, through the transport and
+--       through the HTTP client; the one-certificate PEM from the
+--       same task is the control
 --
 --  Covers:
 --    - parsing is all-or-nothing: an implementation that reads until
@@ -31,6 +35,14 @@
 --      before admission reserves a generation
 --    - case 9: a reference kept instead of a copy fails the second
 --      handshake
+--    - case 10: a copy of the bundle on the stack of the task that
+--      connects raises Storage_Error; the control shows the stack is
+--      enough for a handshake, so the failure is the bundle's. The
+--      connect path's bundle-sized function results (To_String,
+--      To_C) live on GNAT's secondary stack, which is heap-backed on
+--      every target AHT builds for; what this catches is a copy
+--      declared on the primary stack, such as a constrained local
+--      array of the bundle's length
 
 with Ada.Command_Line;
 with Ada.Exceptions;
@@ -38,6 +50,7 @@ with Ada.Strings.Fixed;
 with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Text_IO; use Ada.Text_IO;
 
+with AHT.HTTP.Client;
 with AHT.Transport;
 with AHT.Transport.TLS;
 with AHT.URL;
@@ -119,6 +132,86 @@ procedure Test_TLS_CA_PEM is
                & Ada.Exceptions.Exception_Name (E) & ": "
                & Ada.Exceptions.Exception_Message (E));
    end Expect_Refused;
+
+   --  Case 10. A task stack far smaller than the bundle, so any copy
+   --  of it on the stack overflows.
+   Small_Stack : constant := 256 * 1024;
+
+   protected Dial_Result is
+      procedure Set (Text : String);
+      function Get return String;
+   private
+      Value : Unbounded_String;
+   end Dial_Result;
+
+   protected body Dial_Result is
+      procedure Set (Text : String) is
+      begin
+         Value := To_Unbounded_String (Text);
+      end Set;
+
+      function Get return String is (To_String (Value));
+   end Dial_Result;
+
+   type Route is (Transport, HTTP_Client);
+
+   --  Dials once with PEM.all and records "connected" or what was
+   --  raised in Dial_Result.
+   task type Small_Dialer
+     (PEM : not null access constant String; Via : Route)
+     with Storage_Size => Small_Stack;
+
+   task body Small_Dialer is
+   begin
+      case Via is
+         when Transport =>
+            declare
+               T : AHT.Transport.TLS.TLS_Transport;
+            begin
+               T.Connect (Host, Port, Insecure => False, CA_PEM => PEM.all);
+               Dial_Result.Set
+                 (if T.Is_Connected then "connected" else "not connected");
+               Close_Quietly (T);
+            end;
+         when HTTP_Client =>
+            declare
+               C : AHT.HTTP.Client.Client_Type;
+            begin
+               C.CA_PEM := To_Unbounded_String (PEM.all);
+               Dial_Result.Set
+                 (if AHT.HTTP.Client.Get
+                       (C, "https://localhost:8766/hello").Status = 200
+                  then "connected" else "not 200");
+            end;
+      end case;
+   exception
+      when E : others =>
+         Dial_Result.Set (Ada.Exceptions.Exception_Name (E) & ": "
+                          & Ada.Exceptions.Exception_Message (E));
+   end Small_Dialer;
+
+   procedure Expect_Small_Stack
+     (What : String; PEM : not null access constant String; Via : Route)
+   is
+      Backstop : constant Duration := 60.0;
+      Waited   : Duration := 0.0;
+   begin
+      Dial_Result.Set ("never reported");
+      declare
+         D : Small_Dialer (PEM, Via);
+      begin
+         while not D'Terminated and then Waited < Backstop loop
+            delay 0.05;
+            Waited := Waited + 0.05;
+         end loop;
+         if not D'Terminated then
+            abort D;
+         end if;
+      end;
+      if Dial_Result.Get /= "connected" then
+         Fail (What & ": " & Dial_Result.Get);
+      end if;
+   end Expect_Small_Stack;
 
    Cert : constant String := Read_File (CA_File);
 
@@ -306,6 +399,30 @@ begin
                & Ada.Exceptions.Exception_Name (E) & ": "
                & Ada.Exceptions.Exception_Message (E)
                & " — the saved CA_PEM was not replayed");
+   end;
+
+   --  Case 10: a bundle far larger than the stack of the task that
+   --  connects. On the heap here, so the test itself holds no stack
+   --  copy of it.
+   declare
+      type PEM_Access is access constant String;
+
+      function Repeated return String is
+         Bundle : Unbounded_String;
+      begin
+         while Length (Bundle) <= 2 * 1024 * 1024 loop
+            Append (Bundle, Cert);
+         end loop;
+         return To_String (Bundle);
+      end Repeated;
+
+      One   : constant PEM_Access := new String'(Cert);
+      Large : constant PEM_Access := new String'(Repeated);
+   begin
+      Expect_Small_Stack ("small-stack control", One, Transport);
+      Expect_Small_Stack ("small-stack transport", Large, Transport);
+      Expect_Small_Stack ("small-stack control (http)", One, HTTP_Client);
+      Expect_Small_Stack ("small-stack http", Large, HTTP_Client);
    end;
 
    if Failures = 0 then
